@@ -17,6 +17,8 @@ services:
         fromDatabase:
           name: pbrp-postgres
           property: connectionString
+      - key: PYTHON_VERSION
+        value: 3.11.15
       - key: CORS_ORIGINS
         sync: false
 

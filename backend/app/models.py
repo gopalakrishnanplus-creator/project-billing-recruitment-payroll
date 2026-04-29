@@ -13,6 +13,7 @@ def utcnow() -> datetime:
 
 
 class UserRole(str, Enum):
+    system_admin = "system_admin"
     operations_manager = "operations_manager"
     hr_manager = "hr_manager"
     internal_interviewer = "internal_interviewer"
@@ -39,8 +40,25 @@ class AppUser(Base):
     full_name: Mapped[str] = mapped_column(String(160), nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     role: Mapped[str] = mapped_column(String(64), nullable=False)
+    google_sub: Mapped[str | None] = mapped_column(String(255), unique=True)
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    role_assignments: Mapped[list["UserRoleAssignment"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class UserRoleAssignment(Base):
+    __tablename__ = "user_role_assignments"
+    __table_args__ = (UniqueConstraint("user_id", "role", name="uq_user_role_assignments_user_role"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_users.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), nullable=False)
+    assigned_by_name: Mapped[str | None] = mapped_column(String(160))
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[AppUser] = relationship(back_populates="role_assignments")
 
 
 class ClientCompany(Base):

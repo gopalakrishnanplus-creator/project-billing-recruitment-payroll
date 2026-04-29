@@ -1,16 +1,21 @@
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from os import getenv
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from authlib.integrations.starlette_client import OAuth
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from fastapi.responses import RedirectResponse
+from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.orm import Session, selectinload
+from starlette.middleware.sessions import SessionMiddleware
 
-from .database import Base, engine, get_db
+from .database import Base, SessionLocal, engine, get_db
 from .models import (
     ActivityLog,
+    AppUser,
     ClientCompany,
     ClientContact,
     ClientInvoice,
@@ -23,11 +28,16 @@ from .models import (
     ProjectSOW,
     RecruitmentNeed,
     UploadedDocument,
+    UserRole,
+    UserRoleAssignment,
     utcnow,
 )
 from .schemas import (
     ApprovalCreate,
+    AppUserRead,
+    AppUserUpsert,
     ClientInvoiceRead,
+    CurrentUserRead,
     GenerateInvoicesResult,
     InvoiceDetailRead,
     InvoiceScheduleCreate,
@@ -38,13 +48,26 @@ from .schemas import (
     ProjectRead,
     RecruitmentNeedCreate,
     RecruitmentNeedRead,
+    RoleSelect,
     SendInvoiceCreate,
 )
+
+
+VALID_ROLES = {role.value for role in UserRole}
+SYSTEM_ADMIN_EMAIL = getenv("SYSTEM_ADMIN_EMAIL", "Gopala.Krishnan@flexgcc.com").lower()
+FRONTEND_URL = getenv("FRONTEND_URL", "http://127.0.0.1:5174")
+API_BASE_URL = getenv("API_BASE_URL", "http://127.0.0.1:8001")
+SESSION_SECRET = getenv("SESSION_SECRET", "local-dev-session-secret")
+ALLOW_TEST_AUTH = getenv("ALLOW_TEST_AUTH", "false").lower() == "true"
+GOOGLE_CONFIGURED = bool(getenv("GOOGLE_CLIENT_ID") and getenv("GOOGLE_CLIENT_SECRET"))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_auth_columns()
+    with SessionLocal() as db:
+        seed_system_admin(db)
     yield
 
 
@@ -58,6 +81,132 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    same_site=getenv("SESSION_SAME_SITE", "none"),
+    https_only=getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+)
+
+oauth = OAuth()
+if GOOGLE_CONFIGURED:
+    oauth.register(
+        name="google",
+        client_id=getenv("GOOGLE_CLIENT_ID"),
+        client_secret=getenv("GOOGLE_CLIENT_SECRET"),
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
+
+
+@dataclass
+class AuthContext:
+    user: AppUser
+    roles: list[str]
+    active_role: str | None
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def ensure_auth_columns() -> None:
+    inspector = inspect(engine)
+    if "app_users" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("app_users")}
+    with engine.begin() as conn:
+        if "google_sub" not in existing:
+            conn.execute(text("ALTER TABLE app_users ADD COLUMN google_sub VARCHAR(255)"))
+        if "last_login_at" not in existing:
+            conn.execute(text("ALTER TABLE app_users ADD COLUMN last_login_at TIMESTAMP"))
+
+
+def seed_system_admin(db: Session) -> None:
+    admin = db.scalar(select(AppUser).where(func.lower(AppUser.email) == SYSTEM_ADMIN_EMAIL))
+    if admin is None:
+        admin = AppUser(full_name="Gopala Krishnan", email=SYSTEM_ADMIN_EMAIL, role=UserRole.system_admin.value, is_active=True)
+        db.add(admin)
+        db.flush()
+    admin.is_active = True
+    admin.role = UserRole.system_admin.value
+    db.flush()
+    backfill_primary_roles(db)
+    db.commit()
+
+
+def backfill_primary_roles(db: Session) -> None:
+    users = db.scalars(select(AppUser).options(selectinload(AppUser.role_assignments))).all()
+    for user in users:
+        if user.role in VALID_ROLES and not any(assignment.role == user.role for assignment in user.role_assignments):
+            ensure_role_assignment(db, user, user.role, "System")
+
+
+def ensure_role_assignment(db: Session, user: AppUser, role: str, assigned_by_name: str | None) -> None:
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
+    exists = db.scalar(select(UserRoleAssignment).where(UserRoleAssignment.user_id == user.id, UserRoleAssignment.role == role))
+    if exists is None:
+        db.add(UserRoleAssignment(user_id=user.id, role=role, assigned_by_name=assigned_by_name))
+
+
+def user_roles(user: AppUser) -> list[str]:
+    roles = sorted({assignment.role for assignment in user.role_assignments if assignment.role in VALID_ROLES})
+    if not roles and user.role in VALID_ROLES:
+        roles = [user.role]
+    return roles
+
+
+def serialize_user(user: AppUser) -> AppUserRead:
+    return AppUserRead(id=user.id, full_name=user.full_name, email=user.email, is_active=user.is_active, roles=user_roles(user))
+
+
+def auth_context_from_session(request: Request, db: Session) -> AuthContext:
+    test_email = request.headers.get("x-test-email")
+    test_role = request.headers.get("x-test-role")
+    if ALLOW_TEST_AUTH and test_email and test_role:
+        email = normalize_email(test_email)
+        user = db.scalar(select(AppUser).where(func.lower(AppUser.email) == email).options(selectinload(AppUser.role_assignments)))
+        if user is None:
+            user = AppUser(full_name="Test User", email=email, role=test_role, is_active=True)
+            db.add(user)
+            db.flush()
+        ensure_role_assignment(db, user, test_role, "Test")
+        db.commit()
+        db.refresh(user)
+        return AuthContext(user=user, roles=user_roles(user), active_role=test_role)
+
+    user_id = request.session.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Login required")
+    user = db.scalar(select(AppUser).where(AppUser.id == user_id).options(selectinload(AppUser.role_assignments)))
+    if user is None or not user.is_active:
+        request.session.clear()
+        raise HTTPException(status_code=403, detail="User is not active")
+    roles = user_roles(user)
+    if not roles:
+        raise HTTPException(status_code=403, detail="No roles assigned")
+    active_role = request.session.get("active_role")
+    if active_role and active_role not in roles:
+        request.session.pop("active_role", None)
+        active_role = None
+    return AuthContext(user=user, roles=roles, active_role=active_role)
+
+
+def require_login(request: Request, db: Session = Depends(get_db)) -> AuthContext:
+    return auth_context_from_session(request, db)
+
+
+def require_role(*allowed_roles: str):
+    def dependency(request: Request, db: Session = Depends(get_db)) -> AuthContext:
+        context = auth_context_from_session(request, db)
+        if context.active_role is None:
+            raise HTTPException(status_code=403, detail="Select a role before continuing")
+        if context.active_role not in allowed_roles:
+            raise HTTPException(status_code=403, detail=f"Active role cannot perform this action: {context.active_role}")
+        return context
+
+    return dependency
 
 
 def project_code(db: Session) -> str:
@@ -117,6 +266,21 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
     )
 
 
+def load_invoice_detail(invoice_id: int, db: Session) -> InvoiceDetailRead:
+    invoice = db.scalar(
+        select(ClientInvoice)
+        .where(ClientInvoice.id == invoice_id)
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.payments),
+        )
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return serialize_invoice(invoice)
+
+
 def next_date(current: date, frequency: str) -> date:
     if frequency == "weekly":
         return current + timedelta(days=7)
@@ -133,6 +297,113 @@ def add_months(value: date, months: int) -> date:
     month = month % 12 + 1
     month_end = [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
     return date(year, month, min(value.day, month_end))
+
+
+@app.get("/auth/login")
+async def auth_login(request: Request):
+    if not GOOGLE_CONFIGURED:
+        raise HTTPException(status_code=503, detail="Google OAuth is not configured")
+    redirect_uri = getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request, db: Session = Depends(get_db)):
+    if not GOOGLE_CONFIGURED:
+        raise HTTPException(status_code=503, detail="Google OAuth is not configured")
+    token = await oauth.google.authorize_access_token(request)
+    profile = token.get("userinfo") or await oauth.google.userinfo(token=token)
+    email = normalize_email(profile.get("email", ""))
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account did not return an email address")
+    user = db.scalar(select(AppUser).where(func.lower(AppUser.email) == email).options(selectinload(AppUser.role_assignments)))
+    if user is None or not user.is_active:
+        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=not_provisioned")
+    roles = user_roles(user)
+    if not roles:
+        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=no_roles")
+    user.google_sub = profile.get("sub")
+    user.full_name = profile.get("name") or user.full_name
+    user.last_login_at = utcnow()
+    db.commit()
+    request.session["user_id"] = user.id
+    request.session.pop("active_role", None)
+    if len(roles) == 1:
+        request.session["active_role"] = roles[0]
+    return RedirectResponse(FRONTEND_URL)
+
+
+@app.get("/auth/me", response_model=CurrentUserRead)
+def auth_me(request: Request, db: Session = Depends(get_db)) -> CurrentUserRead:
+    try:
+        context = auth_context_from_session(request, db)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return CurrentUserRead(authenticated=False)
+        raise
+    return CurrentUserRead(
+        authenticated=True,
+        id=context.user.id,
+        full_name=context.user.full_name,
+        email=context.user.email,
+        roles=context.roles,
+        active_role=context.active_role,
+    )
+
+
+@app.post("/auth/select-role", response_model=CurrentUserRead)
+def select_role(payload: RoleSelect, request: Request, db: Session = Depends(get_db)) -> CurrentUserRead:
+    context = auth_context_from_session(request, db)
+    if payload.role not in context.roles:
+        raise HTTPException(status_code=403, detail="Role is not assigned to this user")
+    request.session["active_role"] = payload.role
+    return CurrentUserRead(
+        authenticated=True,
+        id=context.user.id,
+        full_name=context.user.full_name,
+        email=context.user.email,
+        roles=context.roles,
+        active_role=payload.role,
+    )
+
+
+@app.post("/auth/logout")
+def auth_logout(request: Request) -> dict[str, str]:
+    request.session.clear()
+    return {"status": "logged_out"}
+
+
+@app.get("/users", response_model=list[AppUserRead])
+def list_users(_: AuthContext = Depends(require_role(UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[AppUserRead]:
+    users = db.scalars(select(AppUser).order_by(AppUser.full_name).options(selectinload(AppUser.role_assignments))).all()
+    return [serialize_user(user) for user in users]
+
+
+@app.post("/users", response_model=AppUserRead)
+def upsert_user(payload: AppUserUpsert, context: AuthContext = Depends(require_role(UserRole.system_admin.value)), db: Session = Depends(get_db)) -> AppUserRead:
+    roles = sorted(set(payload.roles))
+    invalid_roles = [role for role in roles if role not in VALID_ROLES]
+    if invalid_roles:
+        raise HTTPException(status_code=400, detail=f"Invalid roles: {', '.join(invalid_roles)}")
+    email = normalize_email(str(payload.email))
+    user = db.scalar(select(AppUser).where(func.lower(AppUser.email) == email).options(selectinload(AppUser.role_assignments)))
+    if user is None:
+        user = AppUser(full_name=payload.full_name, email=email, role=roles[0], is_active=payload.is_active)
+        db.add(user)
+        db.flush()
+    user.full_name = payload.full_name
+    user.email = email
+    user.role = roles[0]
+    user.is_active = payload.is_active
+    db.execute(delete(UserRoleAssignment).where(UserRoleAssignment.user_id == user.id))
+    db.flush()
+    for role in roles:
+        ensure_role_assignment(db, user, role, context.user.full_name)
+    db.commit()
+    db.refresh(user)
+    user = db.scalar(select(AppUser).where(AppUser.id == user.id).options(selectinload(AppUser.role_assignments)))
+    assert user is not None
+    return serialize_user(user)
 
 
 @app.get("/health")
@@ -156,9 +427,10 @@ def schema_overview() -> dict[str, list[str]]:
             "client_payments",
             "email_notifications",
             "activity_logs",
+            "app_users",
+            "user_role_assignments",
         ],
         "reserved_later_flow_tables": [
-            "app_users",
             "candidates",
             "candidate_screening_forms",
             "candidate_evaluations",
@@ -174,7 +446,7 @@ def schema_overview() -> dict[str, list[str]]:
 
 
 @app.post("/projects", response_model=ProjectRead, status_code=201)
-def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectRead:
+def create_project(payload: ProjectCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> ProjectRead:
     company = db.scalar(select(ClientCompany).where(ClientCompany.name == payload.client_company_name))
     if company is None:
         company = ClientCompany(name=payload.client_company_name)
@@ -241,7 +513,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
 
 
 @app.get("/projects", response_model=list[ProjectRead])
-def list_projects(db: Session = Depends(get_db)) -> list[ProjectRead]:
+def list_projects(_: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> list[ProjectRead]:
     projects = db.scalars(
         select(ProjectSOW)
         .order_by(ProjectSOW.created_at.desc())
@@ -258,7 +530,7 @@ def list_projects(db: Session = Depends(get_db)) -> list[ProjectRead]:
 
 
 @app.get("/projects/{project_id}", response_model=ProjectRead)
-def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectRead:
+def get_project(project_id: int, _: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> ProjectRead:
     project = db.scalar(
         select(ProjectSOW)
         .where(ProjectSOW.id == project_id)
@@ -277,7 +549,7 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectRead:
 
 
 @app.post("/projects/{project_id}/recruitment-needs", response_model=RecruitmentNeedRead, status_code=201)
-def add_recruitment_need(project_id: int, payload: RecruitmentNeedCreate, db: Session = Depends(get_db)) -> RecruitmentNeedRead:
+def add_recruitment_need(project_id: int, payload: RecruitmentNeedCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> RecruitmentNeedRead:
     project = db.get(ProjectSOW, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -290,7 +562,7 @@ def add_recruitment_need(project_id: int, payload: RecruitmentNeedCreate, db: Se
 
 
 @app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)
-def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, db: Session = Depends(get_db)) -> InvoiceScheduleRead:
+def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
     project = db.get(ProjectSOW, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -305,7 +577,7 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, db: Se
 
 
 @app.post("/invoices/generate", response_model=GenerateInvoicesResult)
-def generate_due_invoices(as_of: date = Query(default_factory=date.today), db: Session = Depends(get_db)) -> GenerateInvoicesResult:
+def generate_due_invoices(as_of: date = Query(default_factory=date.today), _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> GenerateInvoicesResult:
     schedules = db.scalars(select(ClientInvoiceSchedule).where(ClientInvoiceSchedule.status == "active")).all()
     generated: list[ClientInvoice] = []
 
@@ -345,7 +617,7 @@ def generate_due_invoices(as_of: date = Query(default_factory=date.today), db: S
 
 
 @app.get("/client-invoices", response_model=list[InvoiceDetailRead])
-def list_invoices(db: Session = Depends(get_db)) -> list[InvoiceDetailRead]:
+def list_invoices(_: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> list[InvoiceDetailRead]:
     invoices = db.scalars(
         select(ClientInvoice)
         .order_by(ClientInvoice.issue_date.desc(), ClientInvoice.id.desc())
@@ -357,25 +629,13 @@ def list_invoices(db: Session = Depends(get_db)) -> list[InvoiceDetailRead]:
     ).all()
     return [serialize_invoice(invoice) for invoice in invoices]
 
-
 @app.get("/client-invoices/{invoice_id}", response_model=InvoiceDetailRead)
-def get_invoice(invoice_id: int, db: Session = Depends(get_db)) -> InvoiceDetailRead:
-    invoice = db.scalar(
-        select(ClientInvoice)
-        .where(ClientInvoice.id == invoice_id)
-        .options(
-            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
-            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
-            selectinload(ClientInvoice.payments),
-        )
-    )
-    if invoice is None:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    return serialize_invoice(invoice)
+def get_invoice(invoice_id: int, _: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+    return load_invoice_detail(invoice_id, db)
 
 
 @app.post("/client-invoices/{invoice_id}/client-account-approval", response_model=InvoiceDetailRead)
-def approve_client_account(invoice_id: int, payload: ApprovalCreate, db: Session = Depends(get_db)) -> InvoiceDetailRead:
+def approve_client_account(invoice_id: int, payload: ApprovalCreate, _: AuthContext = Depends(require_role(UserRole.client_account_executive.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.get(ClientInvoice, invoice_id)
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -385,11 +645,11 @@ def approve_client_account(invoice_id: int, payload: ApprovalCreate, db: Session
     db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="client_account_executive", approver_name=payload.approver_name, decision="approved", notes=payload.notes))
     log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.approver_name, action="client_account_approved_invoice")
     db.commit()
-    return get_invoice(invoice_id, db)
+    return load_invoice_detail(invoice_id, db)
 
 
 @app.post("/client-invoices/{invoice_id}/finance-approval", response_model=InvoiceDetailRead)
-def approve_finance(invoice_id: int, payload: ApprovalCreate, db: Session = Depends(get_db)) -> InvoiceDetailRead:
+def approve_finance(invoice_id: int, payload: ApprovalCreate, _: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.get(ClientInvoice, invoice_id)
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -399,11 +659,11 @@ def approve_finance(invoice_id: int, payload: ApprovalCreate, db: Session = Depe
     db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="finance_manager", approver_name=payload.approver_name, decision="approved", notes=payload.notes))
     log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.approver_name, action="finance_approved_invoice")
     db.commit()
-    return get_invoice(invoice_id, db)
+    return load_invoice_detail(invoice_id, db)
 
 
 @app.post("/client-invoices/{invoice_id}/send", response_model=InvoiceDetailRead)
-def send_invoice(invoice_id: int, payload: SendInvoiceCreate, db: Session = Depends(get_db)) -> InvoiceDetailRead:
+def send_invoice(invoice_id: int, payload: SendInvoiceCreate, _: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.scalar(
         select(ClientInvoice)
         .where(ClientInvoice.id == invoice_id)
@@ -428,11 +688,11 @@ def send_invoice(invoice_id: int, payload: SendInvoiceCreate, db: Session = Depe
     )
     log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.sender_name, action="invoice_sent_to_client", details=recipient)
     db.commit()
-    return get_invoice(invoice_id, db)
+    return load_invoice_detail(invoice_id, db)
 
 
 @app.post("/client-invoices/{invoice_id}/payments", response_model=InvoiceDetailRead, status_code=201)
-def record_payment(invoice_id: int, payload: PaymentCreate, db: Session = Depends(get_db)) -> InvoiceDetailRead:
+def record_payment(invoice_id: int, payload: PaymentCreate, _: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.payments)))
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -445,4 +705,4 @@ def record_payment(invoice_id: int, payload: PaymentCreate, db: Session = Depend
     invoice.status = InvoiceStatus.paid.value if paid_total >= invoice.amount else InvoiceStatus.partially_paid.value
     log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.recorded_by_name, action="client_payment_recorded", details=str(payload.amount_received))
     db.commit()
-    return get_invoice(invoice_id, db)
+    return load_invoice_detail(invoice_id, db)

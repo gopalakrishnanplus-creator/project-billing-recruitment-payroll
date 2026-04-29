@@ -58,6 +58,36 @@ class PaymentCreate(BaseModel):
     recorded_by_name: str = Field(min_length=2, max_length=160)
 
 
+class RoleSelect(BaseModel):
+    role: str
+
+
+class AppUserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    full_name: str
+    email: str
+    is_active: bool
+    roles: list[str]
+
+
+class AppUserUpsert(BaseModel):
+    full_name: str = Field(min_length=2, max_length=160)
+    email: EmailStr
+    roles: list[str] = Field(min_length=1)
+    is_active: bool = True
+
+
+class CurrentUserRead(BaseModel):
+    authenticated: bool
+    id: int | None = None
+    full_name: str | None = None
+    email: str | None = None
+    roles: list[str] = Field(default_factory=list)
+    active_role: str | None = None
+
+
 class RecruitmentNeedRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -116,9 +146,9 @@ class ProjectRead(BaseModel):
     client_contact_name: str
     client_contact_email: str
     msa_reference: str | None
-    recruitment_needs: list[RecruitmentNeedRead] = []
-    invoice_schedules: list[InvoiceScheduleRead] = []
-    client_invoices: list[ClientInvoiceRead] = []
+    recruitment_needs: list[RecruitmentNeedRead] = Field(default_factory=list)
+    invoice_schedules: list[InvoiceScheduleRead] = Field(default_factory=list)
+    client_invoices: list[ClientInvoiceRead] = Field(default_factory=list)
 
 
 class PaymentRead(BaseModel):
@@ -139,7 +169,7 @@ class InvoiceDetailRead(ClientInvoiceRead):
     client_company_name: str
     client_contact_name: str
     client_contact_email: str
-    payments: list[PaymentRead] = []
+    payments: list[PaymentRead] = Field(default_factory=list)
     paid_total: Decimal
     balance_due: Decimal
 

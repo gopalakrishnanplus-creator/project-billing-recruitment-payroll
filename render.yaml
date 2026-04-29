@@ -20,10 +20,28 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.15
       - key: CORS_ORIGINS
+        value: https://pbrp-web.onrender.com
+      - key: FRONTEND_URL
+        value: https://pbrp-web.onrender.com
+      - key: API_BASE_URL
+        value: https://pbrp-api.onrender.com
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: SESSION_SAME_SITE
+        value: none
+      - key: SYSTEM_ADMIN_EMAIL
+        value: Gopala.Krishnan@flexgcc.com
+      - key: GOOGLE_CLIENT_ID
         sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        value: https://pbrp-api.onrender.com/auth/callback
 
   - type: web
-    name: pbrp-app
+    name: pbrp-web
     runtime: node
     rootDir: frontend
     plan: starter

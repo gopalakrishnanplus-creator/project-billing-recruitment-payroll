@@ -1,6 +1,6 @@
 databases:
   - name: pbrp-postgres
-    plan: starter
+    plan: basic_256mb
     databaseName: pbrp
     user: pbrp_user
 

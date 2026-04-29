@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "start": "vite preview",
+    "start": "serve -s dist -l tcp://0.0.0.0:$PORT",
     "lint": "eslint ."
   },
   "dependencies": {
@@ -15,7 +15,8 @@
     "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest"
+    "lucide-react": "latest",
+    "serve": "latest"
   },
   "devDependencies": {
     "@types/react": "latest",

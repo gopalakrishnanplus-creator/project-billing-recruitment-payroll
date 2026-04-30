@@ -274,6 +274,11 @@ dd {
   background: #fde7df;
 }
 
+.status.partially_paid_remainder_cancelled {
+  color: #7a271a;
+  background: #fff0c2;
+}
+
 .status.paid {
   background: #dff6ea;
   color: #124838;

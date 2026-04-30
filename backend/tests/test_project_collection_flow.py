@@ -267,6 +267,70 @@ def test_finance_can_cancel_unpaid_invoice():
         )
         assert cancel_response.status_code == 200, cancel_response.text
         assert cancel_response.json()["status"] == "cancelled"
+        assert cancel_response.json()["cancelled_amount"] == "4000.00"
+        assert cancel_response.json()["balance_due"] == "0.00"
+
+
+def test_partially_paid_invoice_cancels_only_unpaid_remainder():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Partial billing",
+                "amount": "4000.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(date.today()),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+        invoice_id = client.get("/client-invoices", headers=FINANCE_HEADERS).json()[0]["id"]
+        assert client.post(
+            f"/client-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"approver_name": "Client Account Executive"},
+        ).status_code == 200
+        assert client.post(
+            f"/client-invoices/{invoice_id}/finance-approval",
+            headers=FINANCE_HEADERS,
+            json={"approver_name": "Finance Manager"},
+        ).status_code == 200
+        assert client.post(
+            f"/client-invoices/{invoice_id}/send",
+            headers=FINANCE_HEADERS,
+            json={"sender_name": "Finance Manager", "recipient_email": "anita@example.com"},
+        ).status_code == 200
+        payment_response = client.post(
+            f"/client-invoices/{invoice_id}/payments",
+            headers=FINANCE_HEADERS,
+            json={
+                "amount_received": "1000.00",
+                "received_date": str(date.today()),
+                "recorded_by_name": "Finance Manager",
+            },
+        )
+        assert payment_response.status_code == 201, payment_response.text
+        assert payment_response.json()["status"] == "partially_paid"
+        cancel_response = client.post(
+            f"/client-invoices/{invoice_id}/cancel",
+            headers=FINANCE_HEADERS,
+            json={"cancelled_by_name": "Finance Manager", "reason": "Client accepted partial close"},
+        )
+        assert cancel_response.status_code == 200, cancel_response.text
+        assert cancel_response.json()["status"] == "partially_paid_remainder_cancelled"
+        assert cancel_response.json()["paid_total"] == "1000.00"
+        assert cancel_response.json()["cancelled_amount"] == "3000.00"
+        assert cancel_response.json()["balance_due"] == "0.00"
 
 
 def test_due_or_past_invoice_schedule_generates_approval_email_immediately():

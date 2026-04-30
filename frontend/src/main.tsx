@@ -96,6 +96,7 @@ type ClientInvoice = {
   client_contact_name?: string;
   client_contact_email?: string;
   paid_total?: string;
+  cancelled_amount?: string;
   balance_due?: string;
 };
 
@@ -709,6 +710,10 @@ function App() {
                   <div><dt>Client</dt><dd>{selectedInvoice.client_company_name}</dd></div>
                   <div><dt>Amount</dt><dd>{selectedInvoice.currency} {selectedInvoice.amount}</dd></div>
                   <div><dt>Status</dt><dd><Status value={selectedInvoice.status} /></dd></div>
+                  <div><dt>Paid</dt><dd>{selectedInvoice.currency} {selectedInvoice.paid_total ?? '0.00'}</dd></div>
+                  {selectedInvoice.cancelled_amount && selectedInvoice.cancelled_amount !== '0.00' && (
+                    <div><dt>Cancelled</dt><dd>{selectedInvoice.currency} {selectedInvoice.cancelled_amount}</dd></div>
+                  )}
                   <div><dt>Balance</dt><dd>{selectedInvoice.currency} {selectedInvoice.balance_due ?? selectedInvoice.amount}</dd></div>
                 </dl>
                 <div className="actions">
@@ -746,7 +751,7 @@ function App() {
                       </button>
                       <button
                         className="secondary danger"
-                        disabled={loading || ['paid', 'cancelled'].includes(selectedInvoice.status)}
+                        disabled={loading || ['paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedInvoice.status)}
                         onClick={() => {
                           const reason = window.prompt('Reason for cancelling this invoice');
                           if (reason) void invoiceAction('/cancel', { cancelled_by_name: me.full_name ?? 'Finance Manager', reason }, 'Invoice cancelled');

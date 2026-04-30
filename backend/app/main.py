@@ -361,7 +361,9 @@ def serialize_project(project: ProjectSOW) -> ProjectRead:
 
 def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
     paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
-    balance_due = max(invoice.amount - paid_total, Decimal("0.00"))
+    open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
+    cancelled_amount = open_balance if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value} else Decimal("0.00")
+    balance_due = Decimal("0.00") if cancelled_amount else open_balance
     return InvoiceDetailRead(
         id=invoice.id,
         project_id=invoice.project_id,
@@ -381,6 +383,7 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
         client_account_executive_email=invoice.project.client_account_executive.email if invoice.project.client_account_executive else None,
         payments=[PaymentRead.model_validate(payment) for payment in invoice.payments],
         paid_total=paid_total,
+        cancelled_amount=cancelled_amount,
         balance_due=balance_due,
     )
 
@@ -507,7 +510,9 @@ def client_invoice_email_template(invoice: ClientInvoice) -> tuple[str, str, str
 
 def invoice_download_html(invoice: ClientInvoice) -> str:
     paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
-    balance_due = max(invoice.amount - paid_total, Decimal("0.00"))
+    open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
+    cancelled_amount = open_balance if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value} else Decimal("0.00")
+    balance_due = Decimal("0.00") if cancelled_amount else open_balance
     return f"""<!doctype html>
 <html>
 <head>
@@ -533,6 +538,7 @@ def invoice_download_html(invoice: ClientInvoice) -> str:
     <tr><th>Due date</th><td>{escape(str(invoice.due_date))}</td></tr>
     <tr><th>Amount</th><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
     <tr><th>Paid</th><td>{escape(invoice.currency)} {escape(str(paid_total))}</td></tr>
+    <tr><th>Cancelled amount</th><td>{escape(invoice.currency)} {escape(str(cancelled_amount))}</td></tr>
     <tr class="total"><th>Balance due</th><td>{escape(invoice.currency)} {escape(str(balance_due))}</td></tr>
   </table>
 </body>
@@ -1128,14 +1134,25 @@ def send_invoice(invoice_id: int, payload: SendInvoiceCreate, _: AuthContext = D
 
 @app.post("/client-invoices/{invoice_id}/cancel", response_model=InvoiceDetailRead)
 def cancel_invoice(invoice_id: int, payload: CancelInvoiceCreate, _: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
-    invoice = db.get(ClientInvoice, invoice_id)
+    invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.payments)))
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.status == InvoiceStatus.paid.value:
         raise HTTPException(status_code=400, detail="Paid invoices cannot be cancelled")
-    invoice.status = InvoiceStatus.cancelled.value
+    if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value}:
+        raise HTTPException(status_code=400, detail=f"Invoice is already cancelled: {invoice.status}")
+    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
+    invoice.status = InvoiceStatus.partially_paid_remainder_cancelled.value if paid_total > 0 else InvoiceStatus.cancelled.value
     invoice.cancelled_reason = payload.reason
-    log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.cancelled_by_name, action="invoice_cancelled", details=payload.reason)
+    cancelled_amount = max(invoice.amount - paid_total, Decimal("0.00"))
+    log_event(
+        db,
+        project_id=invoice.project_id,
+        invoice_id=invoice.id,
+        actor_name=payload.cancelled_by_name,
+        action="invoice_cancelled",
+        details=f"{payload.reason}; cancelled_amount={cancelled_amount}; paid_total={paid_total}",
+    )
     db.commit()
     return load_invoice_detail(invoice_id, db)
 

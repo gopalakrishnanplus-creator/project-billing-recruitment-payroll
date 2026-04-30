@@ -217,6 +217,7 @@ class InvoiceDetailRead(ClientInvoiceRead):
     client_account_executive_email: str | None
     payments: list[PaymentRead] = Field(default_factory=list)
     paid_total: Decimal
+    cancelled_amount: Decimal
     balance_due: Decimal
 
 

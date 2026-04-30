@@ -29,6 +29,7 @@ class InvoiceStatus(str, Enum):
     approved_for_sending = "approved_for_sending"
     sent_to_client = "sent_to_client"
     partially_paid = "partially_paid"
+    partially_paid_remainder_cancelled = "partially_paid_remainder_cancelled"
     paid = "paid"
     cancelled = "cancelled"
 

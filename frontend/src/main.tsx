@@ -239,6 +239,10 @@ function App() {
     if (me?.active_role && me.active_role !== 'system_admin') void refreshData(me);
   }, [me?.active_role]);
 
+  useEffect(() => {
+    setEditingProject(false);
+  }, [selectedProjectId]);
+
   async function chooseRole(role: string) {
     await mutate(async () => {
       const current = await api<CurrentUser>('/auth/select-role', {
@@ -523,7 +527,46 @@ function App() {
                 </option>
               ))}
             </select>
-            {selectedProject ? (
+            {selectedProject && editingProject ? (
+              <form className="editStack" key={selectedProject.id} onSubmit={(event) => void submitProjectUpdate(event)}>
+                <div className="grid two">
+                  <Field label="Client contact name" name="client_contact_name" defaultValue={selectedProject.client_contact_name} />
+                  <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={selectedProject.client_contact_email} />
+                  <Field label="Client contact phone" name="client_contact_phone" />
+                  <label className="field">
+                    <span>Client Account Executive</span>
+                    <select name="client_account_executive_id" defaultValue={selectedProject.client_account_executive_id ?? ''}>
+                      <option value="" disabled>Select Client Account Executive</option>
+                      {clientAccountExecutives.map((user) => (
+                        <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <Field label="MSA reference" name="msa_reference" defaultValue={selectedProject.msa_reference ?? ''} />
+                  <Field label="MSA upload" name="msa_document" type="file" />
+                  <Field label="SOW title" name="sow_title" defaultValue={selectedProject.title} />
+                  <Field label="SOW upload" name="sow_document" type="file" />
+                  <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue={selectedProject.sow_amount} />
+                  <Field label="Currency" name="currency" defaultValue={selectedProject.currency} />
+                  <Field label="Start date" name="start_date" type="date" defaultValue={selectedProject.start_date} />
+                  <Field label="End date" name="end_date" type="date" defaultValue={selectedProject.end_date ?? ''} />
+                  <Field label="Operations manager" name="operations_manager_name" defaultValue={selectedProject.operations_manager_name} />
+                </div>
+                <label className="field full">
+                  <span>SOW description</span>
+                  <textarea name="sow_description" rows={3} defaultValue={selectedProject.description ?? ''} />
+                </label>
+                <div className="toolbar">
+                  <button className="primary" disabled={loading}>
+                    <FileCheck2 size={18} />
+                    <span>Save Changes</span>
+                  </button>
+                  <button className="secondary" type="button" onClick={() => setEditingProject(false)} disabled={loading}>
+                    <span>Cancel</span>
+                  </button>
+                </div>
+              </form>
+            ) : selectedProject ? (
               <>
                 <dl className="facts">
                   <div><dt>SOW</dt><dd>{selectedProject.title}</dd></div>
@@ -543,9 +586,9 @@ function App() {
                   </div>
                 )}
                 {canOperate && (
-                  <button className="secondary" onClick={() => setEditingProject((value) => !value)}>
+                  <button className="secondary" type="button" onClick={() => setEditingProject(true)}>
                     <Pencil size={18} />
-                    <span>{editingProject ? 'Close Edit' : 'Edit Selected SOW'}</span>
+                    <span>Edit Selected SOW</span>
                   </button>
                 )}
               </>
@@ -556,43 +599,6 @@ function App() {
 
           {canOperate && (
             <>
-              {editingProject && selectedProject && (
-                <form className="panel wide" onSubmit={(event) => void submitProjectUpdate(event)}>
-                  <PanelTitle icon={<Pencil size={18} />} title="Edit Selected SOW" />
-                  <div className="grid two">
-                    <Field label="Client contact name" name="client_contact_name" defaultValue={selectedProject.client_contact_name} />
-                    <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={selectedProject.client_contact_email} />
-                    <Field label="Client contact phone" name="client_contact_phone" />
-                    <label className="field">
-                      <span>Client Account Executive</span>
-                      <select name="client_account_executive_id" defaultValue={selectedProject.client_account_executive_id ?? ''}>
-                        <option value="" disabled>Select Client Account Executive</option>
-                        {clientAccountExecutives.map((user) => (
-                          <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <Field label="MSA reference" name="msa_reference" defaultValue={selectedProject.msa_reference ?? ''} />
-                    <Field label="MSA upload" name="msa_document" type="file" />
-                    <Field label="SOW title" name="sow_title" defaultValue={selectedProject.title} />
-                    <Field label="SOW upload" name="sow_document" type="file" />
-                    <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue={selectedProject.sow_amount} />
-                    <Field label="Currency" name="currency" defaultValue={selectedProject.currency} />
-                    <Field label="Start date" name="start_date" type="date" defaultValue={selectedProject.start_date} />
-                    <Field label="End date" name="end_date" type="date" defaultValue={selectedProject.end_date ?? ''} />
-                    <Field label="Operations manager" name="operations_manager_name" defaultValue={selectedProject.operations_manager_name} />
-                  </div>
-                  <label className="field full">
-                    <span>SOW description</span>
-                    <textarea name="sow_description" rows={3} defaultValue={selectedProject.description ?? ''} />
-                  </label>
-                  <button className="primary" disabled={loading}>
-                    <FileCheck2 size={18} />
-                    <span>Save Changes</span>
-                  </button>
-                </form>
-              )}
-
               <form className="panel" onSubmit={(event) => void submitAdditionalSow(event)}>
                 <PanelTitle icon={<FilePlus2 size={18} />} title="Add SOW To Selected MSA" />
                 <p className="contextLine">{selectedProject ? `${selectedProject.client_company_name} · ${selectedProject.msa_reference}` : 'Select an existing SOW first'}</p>

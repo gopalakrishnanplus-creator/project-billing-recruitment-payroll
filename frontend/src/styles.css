@@ -299,6 +299,12 @@ dd {
   gap: 6px;
 }
 
+.editStack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .authGate {
   width: min(520px, calc(100% - 32px));
   margin: 64px auto;

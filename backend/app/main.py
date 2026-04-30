@@ -11,7 +11,7 @@ from authlib.integrations.starlette_client import OAuth
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.orm import Session, selectinload
@@ -41,6 +41,7 @@ from .schemas import (
     ApprovalCreate,
     AppUserRead,
     AppUserUpsert,
+    CancelInvoiceCreate,
     ClientInvoiceRead,
     CurrentUserRead,
     GenerateInvoicesResult,
@@ -476,6 +477,68 @@ def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
     return subject, text, html
 
 
+def client_invoice_email_template(invoice: ClientInvoice) -> tuple[str, str, str]:
+    subject = f"Invoice {invoice.invoice_number} from FlexGCC"
+    text = "\n".join(
+        [
+            f"Please find invoice {invoice.invoice_number} for {invoice.project.company.name}.",
+            "",
+            f"SOW: {invoice.project.title} ({invoice.project.project_code})",
+            f"Amount: {invoice.currency} {invoice.amount}",
+            f"Invoice date: {invoice.issue_date}",
+            f"Due date: {invoice.due_date}",
+            "",
+            "Please process payment as per the agreed terms.",
+        ]
+    )
+    html = f"""
+    <h2>Invoice {escape(invoice.invoice_number)}</h2>
+    <p>Please process payment as per the agreed terms.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Client</strong></td><td>{escape(invoice.project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(invoice.project.title)} ({escape(invoice.project.project_code)})</td></tr>
+      <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+      <tr><td><strong>Invoice date</strong></td><td>{escape(str(invoice.issue_date))}</td></tr>
+      <tr><td><strong>Due date</strong></td><td>{escape(str(invoice.due_date))}</td></tr>
+    </table>
+    """
+    return subject, text, html
+
+
+def invoice_download_html(invoice: ClientInvoice) -> str:
+    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
+    balance_due = max(invoice.amount - paid_total, Decimal("0.00"))
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Invoice {escape(invoice.invoice_number)}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; color: #172033; margin: 40px; }}
+    h1 {{ margin-bottom: 4px; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 24px; }}
+    td, th {{ border: 1px solid #ccd3dd; padding: 10px; text-align: left; }}
+    .total {{ font-weight: bold; }}
+  </style>
+</head>
+<body>
+  <h1>FlexGCC Invoice</h1>
+  <p>Invoice number: <strong>{escape(invoice.invoice_number)}</strong></p>
+  <p>Status: <strong>{escape(invoice.status.replace("_", " "))}</strong></p>
+  <table>
+    <tr><th>Client</th><td>{escape(invoice.project.company.name)}</td></tr>
+    <tr><th>Client contact</th><td>{escape(invoice.project.client_contact.full_name)} ({escape(invoice.project.client_contact.email)})</td></tr>
+    <tr><th>SOW</th><td>{escape(invoice.project.title)} ({escape(invoice.project.project_code)})</td></tr>
+    <tr><th>Invoice date</th><td>{escape(str(invoice.issue_date))}</td></tr>
+    <tr><th>Due date</th><td>{escape(str(invoice.due_date))}</td></tr>
+    <tr><th>Amount</th><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+    <tr><th>Paid</th><td>{escape(invoice.currency)} {escape(str(paid_total))}</td></tr>
+    <tr class="total"><th>Balance due</th><td>{escape(invoice.currency)} {escape(str(balance_due))}</td></tr>
+  </table>
+</body>
+</html>"""
+
+
 def send_sendgrid_email(*, to_email: str, cc_emails: list[str], subject: str, text: str, html: str) -> tuple[str, str | None]:
     if not SENDGRID_API_KEY:
         return "not_configured", None
@@ -547,7 +610,7 @@ def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
 
     for schedule in schedules:
         candidate_date = schedule.first_invoice_date
-        while candidate_date <= as_of:
+        while candidate_date - timedelta(days=2) <= as_of:
             if schedule.final_invoice_date and candidate_date > schedule.final_invoice_date:
                 break
             exists = db.scalar(
@@ -972,6 +1035,26 @@ def get_invoice(invoice_id: int, _: AuthContext = Depends(require_login), db: Se
     return load_invoice_detail(invoice_id, db)
 
 
+@app.get("/client-invoices/{invoice_id}/download")
+def download_invoice(invoice_id: int, _: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
+    invoice = db.scalar(
+        select(ClientInvoice)
+        .where(ClientInvoice.id == invoice_id)
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.payments),
+        )
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return Response(
+        content=invoice_download_html(invoice),
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_number}.html"'},
+    )
+
+
 @app.post("/client-invoices/{invoice_id}/client-account-approval", response_model=InvoiceDetailRead)
 def approve_client_account(invoice_id: int, payload: ApprovalCreate, _: AuthContext = Depends(require_role(UserRole.client_account_executive.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.get(ClientInvoice, invoice_id)
@@ -1005,13 +1088,25 @@ def send_invoice(invoice_id: int, payload: SendInvoiceCreate, _: AuthContext = D
     invoice = db.scalar(
         select(ClientInvoice)
         .where(ClientInvoice.id == invoice_id)
-        .options(selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact))
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_account_executive),
+        )
     )
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.status != InvoiceStatus.approved_for_sending.value:
         raise HTTPException(status_code=400, detail=f"Invoice must be finance-approved before sending: {invoice.status}")
     recipient = str(payload.recipient_email) if payload.recipient_email else invoice.project.client_contact.email
+    cc_emails = finance_manager_emails(db)
+    if invoice.project.client_account_executive:
+        cc_emails.append(invoice.project.client_account_executive.email)
+    if payload.cc_email:
+        cc_emails.append(str(payload.cc_email))
+    cc_emails = sorted(set(email for email in cc_emails if email and email != recipient))
+    subject, text, html = client_invoice_email_template(invoice)
+    status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text, html=html)
     invoice.status = InvoiceStatus.sent_to_client.value
     invoice.sent_at = utcnow()
     db.add(
@@ -1019,12 +1114,27 @@ def send_invoice(invoice_id: int, payload: SendInvoiceCreate, _: AuthContext = D
             project_id=invoice.project_id,
             invoice_id=invoice.id,
             recipient_email=recipient,
-            subject=f"Invoice {invoice.invoice_number}",
-            body=f"Invoice {invoice.invoice_number} for {invoice.currency} {invoice.amount} is ready for payment.",
-            status="sent",
+            cc_email=",".join(cc_emails) if cc_emails else None,
+            subject=subject,
+            body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+            status=status,
         )
     )
     log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.sender_name, action="invoice_sent_to_client", details=recipient)
+    db.commit()
+    return load_invoice_detail(invoice_id, db)
+
+
+@app.post("/client-invoices/{invoice_id}/cancel", response_model=InvoiceDetailRead)
+def cancel_invoice(invoice_id: int, payload: CancelInvoiceCreate, _: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+    invoice = db.get(ClientInvoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.status == InvoiceStatus.paid.value:
+        raise HTTPException(status_code=400, detail="Paid invoices cannot be cancelled")
+    invoice.status = InvoiceStatus.cancelled.value
+    invoice.cancelled_reason = payload.reason
+    log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.cancelled_by_name, action="invoice_cancelled", details=payload.reason)
     db.commit()
     return load_invoice_detail(invoice_id, db)
 

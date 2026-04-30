@@ -106,6 +106,7 @@ def test_project_to_client_collection_flow():
             notification = db.query(EmailNotification).filter(EmailNotification.invoice_id == invoice_id).one()
             assert notification.recipient_email == "cae@example.com"
             assert notification.cc_email == "finance@example.com"
+            assert "Log in to review and approve this invoice" in notification.body
 
         client_account_response = client.post(
             f"/client-invoices/{invoice_id}/client-account-approval",
@@ -130,6 +131,14 @@ def test_project_to_client_collection_flow():
         )
         assert send_response.status_code == 200, send_response.text
         assert send_response.json()["status"] == "sent_to_client"
+        with SessionLocal() as db:
+            notifications = db.query(EmailNotification).filter(EmailNotification.invoice_id == invoice_id).order_by(EmailNotification.id).all()
+            assert notifications[-1].recipient_email == "anita@example.com"
+            assert notifications[-1].cc_email == "cae@example.com,finance@example.com"
+
+        download_response = client.get(f"/client-invoices/{invoice_id}/download", headers=FINANCE_HEADERS)
+        assert download_response.status_code == 200, download_response.text
+        assert "FlexGCC Invoice" in download_response.text
 
         payment_response = client.post(
             f"/client-invoices/{invoice_id}/payments",
@@ -144,6 +153,13 @@ def test_project_to_client_collection_flow():
         assert payment_response.status_code == 201, payment_response.text
         assert payment_response.json()["status"] == "paid"
         assert payment_response.json()["balance_due"] == "0.00"
+
+        cancel_paid_response = client.post(
+            f"/client-invoices/{invoice_id}/cancel",
+            headers=FINANCE_HEADERS,
+            json={"cancelled_by_name": "Finance Manager", "reason": "Incorrect billing"},
+        )
+        assert cancel_paid_response.status_code == 400
 
 
 def test_role_separated_permissions_and_admin_user_provisioning():
@@ -216,3 +232,38 @@ def test_project_file_upload_update_and_additional_sow():
         )
         assert sow_response.status_code == 201, sow_response.text
         assert sow_response.json()["msa_reference"] == PROJECT_PAYLOAD["msa_reference"]
+
+
+def test_finance_can_cancel_unpaid_invoice():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Single billing",
+                "amount": "4000.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": "2026-04-30",
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+        generated_response = client.post("/invoices/generate?as_of=2026-04-28", headers=ADMIN_HEADERS)
+        assert generated_response.status_code == 200, generated_response.text
+        invoice_id = generated_response.json()["invoices"][0]["id"]
+        cancel_response = client.post(
+            f"/client-invoices/{invoice_id}/cancel",
+            headers=FINANCE_HEADERS,
+            json={"cancelled_by_name": "Finance Manager", "reason": "Client requested cancellation"},
+        )
+        assert cancel_response.status_code == 200, cancel_response.text
+        assert cancel_response.json()["status"] == "cancelled"

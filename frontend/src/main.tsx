@@ -4,6 +4,7 @@ import {
   BadgeCheck,
   Banknote,
   CalendarPlus,
+  Download,
   ClipboardList,
   FileCheck2,
   FilePlus2,
@@ -373,6 +374,11 @@ function App() {
     });
   }
 
+  function downloadInvoice() {
+    if (!selectedInvoice) return;
+    window.open(`${API_BASE}/client-invoices/${selectedInvoice.id}/download`, '_blank', 'noopener,noreferrer');
+  }
+
   async function mutate(work: () => Promise<string>) {
     setLoading(true);
     setNotice(null);
@@ -706,6 +712,10 @@ function App() {
                   <div><dt>Balance</dt><dd>{selectedInvoice.currency} {selectedInvoice.balance_due ?? selectedInvoice.amount}</dd></div>
                 </dl>
                 <div className="actions">
+                  <button className="secondary" onClick={downloadInvoice}>
+                    <Download size={18} />
+                    <span>Download</span>
+                  </button>
                   {canClientApprove && (
                     <button
                       className="secondary"
@@ -733,6 +743,16 @@ function App() {
                       >
                         <Send size={18} />
                         <span>Send</span>
+                      </button>
+                      <button
+                        className="secondary danger"
+                        disabled={loading || ['paid', 'cancelled'].includes(selectedInvoice.status)}
+                        onClick={() => {
+                          const reason = window.prompt('Reason for cancelling this invoice');
+                          if (reason) void invoiceAction('/cancel', { cancelled_by_name: me.full_name ?? 'Finance Manager', reason }, 'Invoice cancelled');
+                        }}
+                      >
+                        <span>Cancel Invoice</span>
                       </button>
                     </>
                   )}

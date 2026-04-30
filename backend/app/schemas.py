@@ -76,6 +76,11 @@ class SendInvoiceCreate(BaseModel):
     cc_email: EmailStr | None = None
 
 
+class CancelInvoiceCreate(BaseModel):
+    cancelled_by_name: str = Field(min_length=2, max_length=160)
+    reason: str = Field(min_length=2)
+
+
 class PaymentCreate(BaseModel):
     amount_received: Decimal = Field(gt=0)
     received_date: date

@@ -31,6 +31,17 @@ const ROLE_LABELS: Record<string, string> = {
 
 const ALL_ROLES = Object.keys(ROLE_LABELS);
 
+const INVOICE_STATUSES = [
+  'due_for_client_approval',
+  'approved_by_client_account',
+  'approved_for_sending',
+  'sent_to_client',
+  'partially_paid',
+  'partially_paid_remainder_cancelled',
+  'paid',
+  'cancelled',
+];
+
 type Project = {
   id: number;
   project_code: string;
@@ -158,6 +169,11 @@ function App() {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
   const [editingProject, setEditingProject] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
+  const [activeView, setActiveView] = useState<'workflow' | 'invoices'>('workflow');
+  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
+  const [invoiceDateFrom, setInvoiceDateFrom] = useState('');
+  const [invoiceDateTo, setInvoiceDateTo] = useState('');
+  const [invoicePage, setInvoicePage] = useState(1);
   const [notice, setNotice] = useState<Notice>(null);
   const [loading, setLoading] = useState(false);
 
@@ -176,6 +192,7 @@ function App() {
   const canFinance = activeRole === 'finance_manager';
   const canClientApprove = activeRole === 'client_account_executive';
   const canViewWorkflow = Boolean(activeRole && activeRole !== 'system_admin');
+  const invoicePageSize = 20;
 
   async function refreshMe() {
     const current = await api<CurrentUser>('/auth/me');
@@ -183,13 +200,17 @@ function App() {
     return current;
   }
 
-  async function refreshData(current = me) {
-    if (!current?.authenticated || !current.active_role || current.active_role === 'system_admin') return;
+  async function refreshData(current = me, pageOverride = invoicePage) {
+    if (!current?.authenticated || !current.active_role) return;
     setLoading(true);
     try {
+      const invoiceParams = new URLSearchParams({ page: String(pageOverride), page_size: String(invoicePageSize) });
+      if (invoiceStatusFilter) invoiceParams.set('status', invoiceStatusFilter);
+      if (invoiceDateFrom) invoiceParams.set('date_from', invoiceDateFrom);
+      if (invoiceDateTo) invoiceParams.set('date_to', invoiceDateTo);
       const [projectData, invoiceData] = await Promise.all([
         api<Project[]>('/projects'),
-        api<ClientInvoice[]>('/client-invoices'),
+        api<ClientInvoice[]>(`/client-invoices?${invoiceParams.toString()}`),
       ]);
       setProjects(projectData);
       setInvoices(invoiceData);
@@ -217,7 +238,7 @@ function App() {
       if (current.authenticated && current.active_role === 'system_admin') {
         setUsers(await api<AppUser[]>('/users'));
       }
-      if (current.authenticated && current.active_role && current.active_role !== 'system_admin') {
+      if (current.authenticated && current.active_role) {
         await refreshData(current);
       }
     } catch (error) {
@@ -238,8 +259,8 @@ function App() {
 
   useEffect(() => {
     if (me?.active_role === 'system_admin') void refreshUsers();
-    if (me?.active_role && me.active_role !== 'system_admin') void refreshData(me);
-  }, [me?.active_role]);
+    if (me?.active_role) void refreshData(me);
+  }, [me?.active_role, invoicePage]);
 
   useEffect(() => {
     setEditingProject(false);
@@ -380,6 +401,12 @@ function App() {
     window.open(`${API_BASE}/client-invoices/${selectedInvoice.id}/download`, '_blank', 'noopener,noreferrer');
   }
 
+  async function submitInvoiceFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setInvoicePage(1);
+    await refreshData(me, 1);
+  }
+
   async function mutate(work: () => Promise<string>) {
     setLoading(true);
     setNotice(null);
@@ -441,7 +468,14 @@ function App() {
 
       {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
 
-      {canAdmin && (
+      {me.active_role && (
+        <nav className="viewSwitch">
+          <button className={activeView === 'workflow' ? 'primary' : 'secondary'} onClick={() => setActiveView('workflow')}>Workflow</button>
+          <button className={activeView === 'invoices' ? 'primary' : 'secondary'} onClick={() => setActiveView('invoices')}>All Invoices</button>
+        </nav>
+      )}
+
+      {canAdmin && activeView === 'workflow' && (
         <section className="workspace adminWorkspace">
           <form className="panel" onSubmit={(event) => void submitUser(event)}>
             <PanelTitle icon={<UserCog size={18} />} title="App Users" />
@@ -485,7 +519,57 @@ function App() {
         </section>
       )}
 
-      {canViewWorkflow && (
+      {activeView === 'invoices' && me.active_role && (
+        <section className="workspace invoiceWorkspace">
+          <form className="panel wide" onSubmit={(event) => void submitInvoiceFilters(event)}>
+            <PanelTitle icon={<FileCheck2 size={18} />} title="All Invoices" />
+            <div className="grid four">
+              <label className="field">
+                <span>Status</span>
+                <select value={invoiceStatusFilter} onChange={(event) => setInvoiceStatusFilter(event.target.value)}>
+                  <option value="">All statuses</option>
+                  {INVOICE_STATUSES.map((status) => (
+                    <option key={status} value={status}>{status.replaceAll('_', ' ')}</option>
+                  ))}
+                </select>
+              </label>
+              <Field label="From invoice date" name="date_from" type="date" value={invoiceDateFrom} onChange={(event) => setInvoiceDateFrom(event.currentTarget.value)} />
+              <Field label="To invoice date" name="date_to" type="date" value={invoiceDateTo} onChange={(event) => setInvoiceDateTo(event.currentTarget.value)} />
+              <button className="primary" disabled={loading}>
+                <RefreshCw size={18} />
+                <span>Apply</span>
+              </button>
+            </div>
+            <div className="toolbar">
+              <button className="secondary" type="button" disabled={invoicePage <= 1 || loading} onClick={() => setInvoicePage((page) => Math.max(1, page - 1))}>Previous</button>
+              <span className="status">Page {invoicePage}</span>
+              <button className="secondary" type="button" disabled={invoices.length < invoicePageSize || loading} onClick={() => setInvoicePage((page) => page + 1)}>Next</button>
+            </div>
+          </form>
+
+          <section className="panel wide">
+            <PanelTitle icon={<FileCheck2 size={18} />} title="Invoice Register" />
+            <select value={selectedInvoice?.id ?? ''} onChange={(event) => setSelectedInvoiceId(Number(event.target.value))}>
+              {invoices.map((invoice) => (
+                <option key={invoice.id} value={invoice.id}>
+                  {invoice.issue_date} · {invoice.invoice_number} · {invoice.status}
+                </option>
+              ))}
+            </select>
+            <InvoiceDetail
+              selectedInvoice={selectedInvoice}
+              loading={loading}
+              canClientApprove={canClientApprove}
+              canFinance={canFinance}
+              downloadInvoice={downloadInvoice}
+              invoiceAction={invoiceAction}
+              currentUserName={me.full_name}
+            />
+          </section>
+        </section>
+      )}
+
+      {activeView === 'workflow' && canViewWorkflow && (
         <section className="workspace">
           {canOperate && (
             <form className="panel wide" onSubmit={(event) => void submitProject(event)}>
@@ -837,6 +921,89 @@ function Field(props: React.InputHTMLAttributes<HTMLInputElement> & { label: str
       <span>{label}</span>
       <input {...inputProps} />
     </label>
+  );
+}
+
+function InvoiceDetail({
+  selectedInvoice,
+  loading,
+  canClientApprove,
+  canFinance,
+  downloadInvoice,
+  invoiceAction,
+  currentUserName,
+}: {
+  selectedInvoice: ClientInvoice | undefined;
+  loading: boolean;
+  canClientApprove: boolean;
+  canFinance: boolean;
+  downloadInvoice: () => void;
+  invoiceAction: (path: string, body: Record<string, unknown>, message: string) => Promise<void>;
+  currentUserName: string | null;
+}) {
+  if (!selectedInvoice) return <p className="empty">No invoices yet.</p>;
+
+  return (
+    <div className="invoiceGrid">
+      <dl className="facts">
+        <div><dt>Invoice</dt><dd>{selectedInvoice.invoice_number}</dd></div>
+        <div><dt>Project</dt><dd>{selectedInvoice.project_code}</dd></div>
+        <div><dt>Client</dt><dd>{selectedInvoice.client_company_name}</dd></div>
+        <div><dt>Amount</dt><dd>{selectedInvoice.currency} {selectedInvoice.amount}</dd></div>
+        <div><dt>Status</dt><dd><Status value={selectedInvoice.status} /></dd></div>
+        <div><dt>Paid</dt><dd>{selectedInvoice.currency} {selectedInvoice.paid_total ?? '0.00'}</dd></div>
+        {selectedInvoice.cancelled_amount && selectedInvoice.cancelled_amount !== '0.00' && (
+          <div><dt>Cancelled</dt><dd>{selectedInvoice.currency} {selectedInvoice.cancelled_amount}</dd></div>
+        )}
+        <div><dt>Balance</dt><dd>{selectedInvoice.currency} {selectedInvoice.balance_due ?? selectedInvoice.amount}</dd></div>
+      </dl>
+      <div className="actions">
+        <button className="secondary" onClick={downloadInvoice}>
+          <Download size={18} />
+          <span>Download</span>
+        </button>
+        {canClientApprove && (
+          <button
+            className="secondary"
+            disabled={loading || selectedInvoice.status !== 'due_for_client_approval'}
+            onClick={() => void invoiceAction('/client-account-approval', { approver_name: currentUserName ?? 'Client Account Executive' }, 'Client account executive approved invoice')}
+          >
+            <BadgeCheck size={18} />
+            <span>CAE Approve</span>
+          </button>
+        )}
+        {canFinance && (
+          <>
+            <button
+              className="secondary"
+              disabled={loading || selectedInvoice.status !== 'approved_by_client_account'}
+              onClick={() => void invoiceAction('/finance-approval', { approver_name: currentUserName ?? 'Finance Manager' }, 'Finance approved invoice')}
+            >
+              <FileCheck2 size={18} />
+              <span>Finance Approve</span>
+            </button>
+            <button
+              className="secondary"
+              disabled={loading || selectedInvoice.status !== 'approved_for_sending'}
+              onClick={() => void invoiceAction('/send', { sender_name: currentUserName ?? 'Finance Manager', recipient_email: selectedInvoice.client_contact_email }, 'Invoice sent to client')}
+            >
+              <Send size={18} />
+              <span>Send</span>
+            </button>
+            <button
+              className="secondary danger"
+              disabled={loading || ['paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedInvoice.status)}
+              onClick={() => {
+                const reason = window.prompt('Reason for cancelling this invoice');
+                if (reason) void invoiceAction('/cancel', { cancelled_by_name: currentUserName ?? 'Finance Manager', reason }, 'Invoice cancelled');
+              }}
+            >
+              <span>Cancel Invoice</span>
+            </button>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

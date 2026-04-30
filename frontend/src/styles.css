@@ -73,6 +73,10 @@ h2 {
   padding: 20px 32px 40px;
 }
 
+.invoiceWorkspace {
+  grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+}
+
 .adminWorkspace {
   grid-template-columns: minmax(320px, 420px) 1fr;
 }
@@ -106,6 +110,11 @@ h2 {
 
 .grid.two {
   grid-template-columns: repeat(2, minmax(180px, 1fr));
+}
+
+.grid.four {
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  align-items: end;
 }
 
 .field {
@@ -218,6 +227,13 @@ button:disabled {
   color: #7a271a;
   background: #fde7df;
   border: 1px solid #f3b19f;
+}
+
+.viewSwitch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px 32px 0;
 }
 
 .facts {
@@ -387,7 +403,8 @@ dd {
     grid-template-columns: 1fr 1fr;
   }
 
-  .adminWorkspace {
+  .adminWorkspace,
+  .invoiceWorkspace {
     grid-template-columns: 1fr;
   }
 
@@ -414,7 +431,8 @@ dd {
   }
 
   .wide,
-  .grid.two {
+  .grid.two,
+  .grid.four {
     grid-column: auto;
     grid-template-columns: 1fr;
   }

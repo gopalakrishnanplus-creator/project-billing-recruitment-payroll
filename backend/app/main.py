@@ -388,7 +388,15 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
     )
 
 
-def load_invoice_detail(invoice_id: int, db: Session) -> InvoiceDetailRead:
+def authorize_invoice_visibility(invoice: ClientInvoice, context: AuthContext) -> None:
+    if (
+        context.active_role == UserRole.client_account_executive.value
+        and invoice.project.client_account_executive_id != context.user.id
+    ):
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+
+def load_invoice_detail(invoice_id: int, db: Session, context: AuthContext | None = None) -> InvoiceDetailRead:
     invoice = db.scalar(
         select(ClientInvoice)
         .where(ClientInvoice.id == invoice_id)
@@ -401,6 +409,8 @@ def load_invoice_detail(invoice_id: int, db: Session) -> InvoiceDetailRead:
     )
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    if context is not None:
+        authorize_invoice_visibility(invoice, context)
     return serialize_invoice(invoice)
 
 
@@ -1023,10 +1033,25 @@ def generate_due_invoices_system(request: Request, as_of: date = Query(default_f
 
 
 @app.get("/client-invoices", response_model=list[InvoiceDetailRead])
-def list_invoices(context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> list[InvoiceDetailRead]:
-    query = select(ClientInvoice).order_by(ClientInvoice.issue_date.desc(), ClientInvoice.id.desc())
+def list_invoices(
+    context: AuthContext = Depends(require_login),
+    status: str | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[InvoiceDetailRead]:
+    query = select(ClientInvoice).order_by(ClientInvoice.issue_date.asc(), ClientInvoice.id.asc())
     if context.active_role == UserRole.client_account_executive.value:
         query = query.join(ProjectSOW, ProjectSOW.id == ClientInvoice.project_id).where(ProjectSOW.client_account_executive_id == context.user.id)
+    if status:
+        query = query.where(ClientInvoice.status == status)
+    if date_from:
+        query = query.where(ClientInvoice.issue_date >= date_from)
+    if date_to:
+        query = query.where(ClientInvoice.issue_date <= date_to)
+    query = query.offset((page - 1) * page_size).limit(page_size)
     invoices = db.scalars(
         query.options(
             selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
@@ -1038,12 +1063,12 @@ def list_invoices(context: AuthContext = Depends(require_login), db: Session = D
     return [serialize_invoice(invoice) for invoice in invoices]
 
 @app.get("/client-invoices/{invoice_id}", response_model=InvoiceDetailRead)
-def get_invoice(invoice_id: int, _: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
-    return load_invoice_detail(invoice_id, db)
+def get_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+    return load_invoice_detail(invoice_id, db, context)
 
 
 @app.get("/client-invoices/{invoice_id}/download")
-def download_invoice(invoice_id: int, _: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
+def download_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
     invoice = db.scalar(
         select(ClientInvoice)
         .where(ClientInvoice.id == invoice_id)
@@ -1055,6 +1080,7 @@ def download_invoice(invoice_id: int, _: AuthContext = Depends(require_login), d
     )
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    authorize_invoice_visibility(invoice, context)
     return Response(
         content=invoice_download_html(invoice),
         media_type="text/html",
@@ -1063,10 +1089,11 @@ def download_invoice(invoice_id: int, _: AuthContext = Depends(require_login), d
 
 
 @app.post("/client-invoices/{invoice_id}/client-account-approval", response_model=InvoiceDetailRead)
-def approve_client_account(invoice_id: int, payload: ApprovalCreate, _: AuthContext = Depends(require_role(UserRole.client_account_executive.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+def approve_client_account(invoice_id: int, payload: ApprovalCreate, context: AuthContext = Depends(require_role(UserRole.client_account_executive.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.get(ClientInvoice, invoice_id)
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    authorize_invoice_visibility(invoice, context)
     if invoice.status not in {InvoiceStatus.due_for_client_approval.value, InvoiceStatus.draft.value}:
         raise HTTPException(status_code=400, detail=f"Invoice is not ready for client account approval: {invoice.status}")
     invoice.status = InvoiceStatus.approved_by_client_account.value

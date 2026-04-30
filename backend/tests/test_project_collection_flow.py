@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 import os
 
 os.environ["ALLOW_TEST_AUTH"] = "true"
@@ -368,3 +368,90 @@ def test_due_or_past_invoice_schedule_generates_approval_email_immediately():
             notification = db.query(EmailNotification).filter(EmailNotification.invoice_id == invoices[0]["id"]).one()
             assert notification.recipient_email == "cae@example.com"
             assert notification.cc_email == "finance@example.com"
+
+
+def test_invoice_visibility_filters_sorting_and_pagination_by_role():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_one = provision_user(client, full_name="Client Account Executive One", email="cae1@example.com", roles=["client_account_executive"])
+        cae_two = provision_user(client, full_name="Client Account Executive Two", email="cae2@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        yesterday = date.today() - timedelta(days=1)
+        today_value = date.today()
+
+        payload_one = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_one["id"], "client_company_name": "Acme One", "start_date": str(yesterday)}
+        payload_two = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_two["id"], "client_company_name": "Acme Two", "start_date": str(today_value)}
+        project_one_response = client.post("/projects", headers=OPS_HEADERS, json=payload_one)
+        project_two_response = client.post("/projects", headers=OPS_HEADERS, json=payload_two)
+        assert project_one_response.status_code == 201, project_one_response.text
+        assert project_two_response.status_code == 201, project_two_response.text
+        project_one = project_one_response.json()
+        project_two = project_two_response.json()
+
+        for project, invoice_date in ((project_one, yesterday), (project_two, today_value)):
+            response = client.post(
+                f"/projects/{project['id']}/invoice-schedules",
+                headers=OPS_HEADERS,
+                json={
+                    "label": "Single billing",
+                    "amount": "4000.00",
+                    "currency": "USD",
+                    "frequency": "single",
+                    "first_invoice_date": str(invoice_date),
+                },
+            )
+            assert response.status_code == 201, response.text
+
+        finance_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        ops_response = client.get("/client-invoices", headers=OPS_HEADERS)
+        cae_one_headers = {"x-test-email": "cae1@example.com", "x-test-role": "client_account_executive"}
+        cae_two_headers = {"x-test-email": "cae2@example.com", "x-test-role": "client_account_executive"}
+        cae_one_response = client.get("/client-invoices", headers=cae_one_headers)
+        assert finance_response.status_code == 200, finance_response.text
+        assert ops_response.status_code == 200, ops_response.text
+        assert cae_one_response.status_code == 200, cae_one_response.text
+        finance_invoices = finance_response.json()
+        ops_invoices = ops_response.json()
+        cae_one_invoices = cae_one_response.json()
+
+        assert len(finance_invoices) == 2
+        assert len(ops_invoices) == 2
+        assert {invoice["status"] for invoice in finance_invoices} == {"due_for_client_approval"}
+        assert {invoice["status"] for invoice in ops_invoices} == {"due_for_client_approval"}
+        assert len(cae_one_invoices) == 1
+        assert cae_one_invoices[0]["client_company_name"] == "Acme One"
+        assert cae_one_invoices[0]["status"] == "due_for_client_approval"
+
+        cae_one_invoice_id = cae_one_invoices[0]["id"]
+        cae_two_invoice_id = next(invoice["id"] for invoice in finance_invoices if invoice["client_company_name"] == "Acme Two")
+        assert client.get(f"/client-invoices/{cae_one_invoice_id}", headers=cae_one_headers).status_code == 200
+        assert client.get(f"/client-invoices/{cae_two_invoice_id}", headers=cae_one_headers).status_code == 404
+        assert client.get(f"/client-invoices/{cae_one_invoice_id}/download", headers=cae_one_headers).status_code == 200
+        assert client.get(f"/client-invoices/{cae_two_invoice_id}/download", headers=cae_one_headers).status_code == 404
+        wrong_cae_approval = client.post(
+            f"/client-invoices/{cae_two_invoice_id}/client-account-approval",
+            headers=cae_one_headers,
+            json={"approver_name": "Client Account Executive One"},
+        )
+        assert wrong_cae_approval.status_code == 404
+        right_cae_approval = client.post(
+            f"/client-invoices/{cae_two_invoice_id}/client-account-approval",
+            headers=cae_two_headers,
+            json={"approver_name": "Client Account Executive Two"},
+        )
+        assert right_cae_approval.status_code == 200, right_cae_approval.text
+
+        first_page = client.get("/client-invoices?page_size=1&page=1", headers=FINANCE_HEADERS).json()
+        second_page = client.get("/client-invoices?page_size=1&page=2", headers=FINANCE_HEADERS).json()
+        assert first_page[0]["issue_date"] == str(yesterday)
+        assert second_page[0]["issue_date"] == str(today_value)
+
+        status_filtered = client.get("/client-invoices?status=due_for_client_approval", headers=FINANCE_HEADERS).json()
+        approved_filtered = client.get("/client-invoices?status=approved_by_client_account", headers=FINANCE_HEADERS).json()
+        date_filtered = client.get(f"/client-invoices?date_from={today_value}&date_to={today_value}", headers=FINANCE_HEADERS).json()
+        assert len(status_filtered) == 1
+        assert len(approved_filtered) == 1
+        assert len(date_filtered) == 1
+        assert date_filtered[0]["issue_date"] == str(today_value)

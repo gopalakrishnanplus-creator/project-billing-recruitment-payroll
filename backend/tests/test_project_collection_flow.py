@@ -257,9 +257,9 @@ def test_finance_can_cancel_unpaid_invoice():
             },
         )
         assert schedule_response.status_code == 201, schedule_response.text
-        generated_response = client.post("/invoices/generate?as_of=2026-04-28", headers=ADMIN_HEADERS)
-        assert generated_response.status_code == 200, generated_response.text
-        invoice_id = generated_response.json()["invoices"][0]["id"]
+        invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        assert invoices_response.status_code == 200, invoices_response.text
+        invoice_id = invoices_response.json()[0]["id"]
         cancel_response = client.post(
             f"/client-invoices/{invoice_id}/cancel",
             headers=FINANCE_HEADERS,
@@ -267,3 +267,40 @@ def test_finance_can_cancel_unpaid_invoice():
         )
         assert cancel_response.status_code == 200, cancel_response.text
         assert cancel_response.json()["status"] == "cancelled"
+
+
+def test_due_or_past_invoice_schedule_generates_approval_email_immediately():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"], "start_date": str(date.today())}
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Immediate billing",
+                "amount": "4000.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(date.today()),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+
+        invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        assert invoices_response.status_code == 200, invoices_response.text
+        invoices = invoices_response.json()
+        assert len(invoices) == 1
+        assert invoices[0]["issue_date"] == str(date.today())
+
+        with SessionLocal() as db:
+            notification = db.query(EmailNotification).filter(EmailNotification.invoice_id == invoices[0]["id"]).one()
+            assert notification.recipient_email == "cae@example.com"
+            assert notification.cc_email == "finance@example.com"

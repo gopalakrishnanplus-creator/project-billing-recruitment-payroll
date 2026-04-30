@@ -988,6 +988,7 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: Aut
         raise HTTPException(status_code=400, detail="Final invoice date cannot be earlier than first invoice date")
     schedule = ClientInvoiceSchedule(project_id=project_id, **payload.model_dump())
     db.add(schedule)
+    db.flush()
     log_event(db, project_id=project_id, actor_name=project.operations_manager_name, action="invoice_schedule_added", details=payload.label)
     create_due_invoices(db, date.today())
     db.commit()

@@ -238,12 +238,16 @@ function roleLabel(role: string): string {
 }
 
 function App() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const approvalInvoiceId = urlParams.get('approval_invoice_id');
+  const approvalError = urlParams.get('approval_error');
   const [me, setMe] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<AppUser[]>([]);
   const [clientAccountExecutives, setClientAccountExecutives] = useState<AppUser[]>([]);
   const [internalInterviewers, setInternalInterviewers] = useState<AppUser[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
+  const [approvalInvoice, setApprovalInvoice] = useState<ClientInvoice | null>(null);
   const [recruitmentNeeds, setRecruitmentNeeds] = useState<RecruitmentNeedDetail[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [interviews, setInterviews] = useState<Interview[]>([]);
@@ -372,6 +376,19 @@ function App() {
     }
   }
 
+  async function loadApprovalInvoice() {
+    if (!approvalInvoiceId) return;
+    setLoading(true);
+    try {
+      const invoice = await api<ClientInvoice>(`/client-invoices/${approvalInvoiceId}/client-account-approval-view`);
+      setApprovalInvoice(invoice);
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'This invoice approval link is not available for this account.' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     const error = new URLSearchParams(window.location.search).get('auth_error');
     if (error) {
@@ -380,6 +397,10 @@ function App() {
     }
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    if (approvalInvoiceId && me?.authenticated) void loadApprovalInvoice();
+  }, [approvalInvoiceId, me?.authenticated]);
 
   useEffect(() => {
     if (me?.active_role === 'system_admin') void refreshUsers();
@@ -636,6 +657,24 @@ function App() {
     });
   }
 
+  async function approvalInvoiceAction() {
+    if (!approvalInvoice) return;
+    setLoading(true);
+    setNotice(null);
+    try {
+      const invoice = await api<ClientInvoice>(`/client-invoices/${approvalInvoice.id}/client-account-approval`, {
+        method: 'POST',
+        body: JSON.stringify({ approver_name: me?.full_name ?? 'Client Account Executive' }),
+      });
+      setApprovalInvoice(invoice);
+      setNotice({ tone: 'ok', message: 'Invoice approved for finance review' });
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Approval failed' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function downloadInvoice() {
     if (!selectedInvoice) return;
     window.open(`${API_BASE}/client-invoices/${selectedInvoice.id}/download`, '_blank', 'noopener,noreferrer');
@@ -663,7 +702,22 @@ function App() {
   }
 
   if (me === null) {
+    if (approvalInvoiceId) return <ApprovalShell loading={loading} notice={notice} />;
     return <ShellHeader loading={loading} onRefresh={() => void refreshAll()} />;
+  }
+
+  if (approvalInvoiceId) {
+    return (
+      <ApprovalShell
+        loading={loading}
+        notice={notice}
+        me={me}
+        approvalInvoiceId={approvalInvoiceId}
+        approvalError={approvalError}
+        approvalInvoice={approvalInvoice}
+        onApprove={() => void approvalInvoiceAction()}
+      />
+    );
   }
 
   if (!me.authenticated) {
@@ -1436,6 +1490,91 @@ function ShellHeader({ loading, onRefresh, me, onLogout, onRoleChange }: { loadi
         {me?.authenticated && <button className="iconButton" onClick={onLogout} title="Log out"><LogOut size={18} /><span>Logout</span></button>}
       </div>
     </header>
+  );
+}
+
+function ApprovalShell({
+  loading,
+  notice,
+  me,
+  approvalInvoiceId,
+  approvalError,
+  approvalInvoice,
+  onApprove,
+}: {
+  loading: boolean;
+  notice: Notice;
+  me?: CurrentUser | null;
+  approvalInvoiceId?: string;
+  approvalError?: string | null;
+  approvalInvoice?: ClientInvoice | null;
+  onApprove?: () => void;
+}) {
+  if (!me) {
+    return (
+      <main className="approvalOnly">
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Invoice Approval Login</h2>
+          <p>Sign in with the Google account assigned as Client Account Executive for this invoice.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!me.authenticated) {
+    return (
+      <main className="approvalOnly">
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Invoice Approval Login</h2>
+          <p>Sign in with the Google account assigned as Client Account Executive for this invoice.</p>
+          <a className="primary linkButton" href={`${API_BASE}/auth/login?approval_invoice_id=${encodeURIComponent(approvalInvoiceId ?? '')}`}>Continue with Google</a>
+        </section>
+      </main>
+    );
+  }
+
+  if (approvalError === 'not_authorized') {
+    return (
+      <main className="approvalOnly">
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Invoice Not Available</h2>
+          <p>This invoice approval link is only available to the Client Account Executive assigned to the project.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="approvalOnly">
+      {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+      <section className="authGate approvalPanel">
+        <FileCheck2 size={42} />
+        <h2>Client Invoice Approval</h2>
+        {!approvalInvoice && <p>{loading ? 'Loading invoice...' : 'This invoice approval link is not available for this account.'}</p>}
+        {approvalInvoice && (
+          <>
+            <dl className="facts">
+              <div><dt>Invoice</dt><dd>{approvalInvoice.invoice_number}</dd></div>
+              <div><dt>Status</dt><dd><Status value={approvalInvoice.status} /></dd></div>
+              <div><dt>Client</dt><dd>{approvalInvoice.client_company_name}</dd></div>
+              <div><dt>SOW</dt><dd>{approvalInvoice.project_title}</dd></div>
+              <div><dt>Invoice date</dt><dd>{approvalInvoice.issue_date}</dd></div>
+              <div><dt>Due date</dt><dd>{approvalInvoice.due_date}</dd></div>
+              <div><dt>Amount</dt><dd>{approvalInvoice.currency} {approvalInvoice.amount}</dd></div>
+              <div><dt>Balance</dt><dd>{approvalInvoice.currency} {approvalInvoice.balance_due ?? approvalInvoice.amount}</dd></div>
+            </dl>
+            <button className="primary" disabled={loading || approvalInvoice.status !== 'due_for_client_approval'} onClick={onApprove}>
+              <BadgeCheck size={18} />
+              <span>Approve Invoice</span>
+            </button>
+          </>
+        )}
+      </section>
+    </main>
   );
 }
 

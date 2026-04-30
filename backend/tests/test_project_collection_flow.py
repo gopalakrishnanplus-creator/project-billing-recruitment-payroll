@@ -109,6 +109,7 @@ def test_project_to_client_collection_flow():
             assert notification.recipient_email == "cae@example.com"
             assert notification.cc_email == "finance@example.com"
             assert "Log in to review and approve this invoice" in notification.body
+            assert f"/auth/login?approval_invoice_id={invoice_id}" in notification.body
 
         client_account_response = client.post(
             f"/client-invoices/{invoice_id}/client-account-approval",
@@ -430,6 +431,9 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
         cae_two_invoice_id = next(invoice["id"] for invoice in finance_invoices if invoice["client_company_name"] == "Acme Two")
         assert client.get(f"/client-invoices/{cae_one_invoice_id}", headers=cae_one_headers).status_code == 200
         assert client.get(f"/client-invoices/{cae_two_invoice_id}", headers=cae_one_headers).status_code == 404
+        assert client.get(f"/client-invoices/{cae_one_invoice_id}/client-account-approval-view", headers=cae_one_headers).status_code == 200
+        assert client.get(f"/client-invoices/{cae_two_invoice_id}/client-account-approval-view", headers=cae_one_headers).status_code == 404
+        assert client.get(f"/client-invoices/{cae_one_invoice_id}/client-account-approval-view", headers=FINANCE_HEADERS).status_code == 404
         assert client.get(f"/client-invoices/{cae_one_invoice_id}/download", headers=cae_one_headers).status_code == 200
         assert client.get(f"/client-invoices/{cae_two_invoice_id}/download", headers=cae_one_headers).status_code == 404
         wrong_cae_approval = client.post(

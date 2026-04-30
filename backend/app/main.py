@@ -5,6 +5,7 @@ from decimal import Decimal
 from html import escape
 from os import getenv
 from pathlib import Path
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from authlib.integrations.starlette_client import OAuth
@@ -448,6 +449,14 @@ def authorize_invoice_visibility(invoice: ClientInvoice, context: AuthContext) -
         raise HTTPException(status_code=404, detail="Invoice not found")
 
 
+def authorize_client_account_invoice_approval(invoice: ClientInvoice, context: AuthContext) -> None:
+    if (
+        UserRole.client_account_executive.value not in context.roles
+        or invoice.project.client_account_executive_id != context.user.id
+    ):
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+
 def load_invoice_detail(invoice_id: int, db: Session, context: AuthContext | None = None) -> InvoiceDetailRead:
     invoice = db.scalar(
         select(ClientInvoice)
@@ -664,7 +673,7 @@ def notify_hr_for_recruitment_need(db: Session, project: ProjectSOW, need: Recru
 
 
 def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
-    approval_link = f"{FRONTEND_URL}/?invoice_id={invoice.id}"
+    approval_link = f"{API_BASE_URL}/auth/login?{urlencode({'approval_invoice_id': invoice.id})}"
     subject = f"Invoice {invoice.invoice_number} ready for approval"
     text = "\n".join(
         [
@@ -862,11 +871,18 @@ def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
 
 
 @app.get("/auth/login")
-async def auth_login(request: Request):
+async def auth_login(request: Request, approval_invoice_id: int | None = Query(default=None), db: Session = Depends(get_db)):
     if not GOOGLE_CONFIGURED:
         raise HTTPException(status_code=503, detail="Google OAuth is not configured")
+    if approval_invoice_id is not None:
+        invoice = db.get(ClientInvoice, approval_invoice_id)
+        if invoice is None:
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=invoice_not_found")
+        request.session.clear()
+        request.session["pending_approval_invoice_id"] = approval_invoice_id
     redirect_uri = getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
-    return await oauth.google.authorize_redirect(request, redirect_uri)
+    kwargs = {"prompt": "select_account"} if approval_invoice_id is not None else {}
+    return await oauth.google.authorize_redirect(request, redirect_uri, **kwargs)
 
 
 @app.get("/auth/callback")
@@ -890,6 +906,21 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
     db.commit()
     request.session["user_id"] = user.id
     request.session.pop("active_role", None)
+    pending_approval_invoice_id = request.session.pop("pending_approval_invoice_id", None)
+    if pending_approval_invoice_id is not None:
+        invoice = db.scalar(
+            select(ClientInvoice)
+            .where(ClientInvoice.id == pending_approval_invoice_id)
+            .options(selectinload(ClientInvoice.project))
+        )
+        if (
+            invoice is None
+            or UserRole.client_account_executive.value not in roles
+            or invoice.project.client_account_executive_id != user.id
+        ):
+            return RedirectResponse(f"{FRONTEND_URL}/?approval_invoice_id={pending_approval_invoice_id}&approval_error=not_authorized")
+        request.session["active_role"] = UserRole.client_account_executive.value
+        return RedirectResponse(f"{FRONTEND_URL}/?approval_invoice_id={pending_approval_invoice_id}")
     if len(roles) == 1:
         request.session["active_role"] = roles[0]
     return RedirectResponse(FRONTEND_URL)
@@ -1473,6 +1504,24 @@ def get_invoice(invoice_id: int, context: AuthContext = Depends(require_login), 
     return load_invoice_detail(invoice_id, db, context)
 
 
+@app.get("/client-invoices/{invoice_id}/client-account-approval-view", response_model=InvoiceDetailRead)
+def get_client_account_approval_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+    invoice = db.scalar(
+        select(ClientInvoice)
+        .where(ClientInvoice.id == invoice_id)
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoice.payments),
+        )
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    authorize_client_account_invoice_approval(invoice, context)
+    return serialize_invoice(invoice)
+
+
 @app.get("/client-invoices/{invoice_id}/download")
 def download_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
     invoice = db.scalar(
@@ -1495,11 +1544,11 @@ def download_invoice(invoice_id: int, context: AuthContext = Depends(require_log
 
 
 @app.post("/client-invoices/{invoice_id}/client-account-approval", response_model=InvoiceDetailRead)
-def approve_client_account(invoice_id: int, payload: ApprovalCreate, context: AuthContext = Depends(require_role(UserRole.client_account_executive.value)), db: Session = Depends(get_db)) -> InvoiceDetailRead:
-    invoice = db.get(ClientInvoice, invoice_id)
+def approve_client_account(invoice_id: int, payload: ApprovalCreate, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+    invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.project)))
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    authorize_invoice_visibility(invoice, context)
+    authorize_client_account_invoice_approval(invoice, context)
     if invoice.status not in {InvoiceStatus.due_for_client_approval.value, InvoiceStatus.draft.value}:
         raise HTTPException(status_code=400, detail=f"Invoice is not ready for client account approval: {invoice.status}")
     invoice.status = InvoiceStatus.approved_by_client_account.value

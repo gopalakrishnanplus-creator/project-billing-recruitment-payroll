@@ -14,6 +14,8 @@ OPS_HEADERS = {"x-test-email": "ops@example.com", "x-test-role": "operations_man
 CAE_HEADERS = {"x-test-email": "cae@example.com", "x-test-role": "client_account_executive"}
 FINANCE_HEADERS = {"x-test-email": "finance@example.com", "x-test-role": "finance_manager"}
 ADMIN_HEADERS = {"x-test-email": "Gopala.Krishnan@flexgcc.com", "x-test-role": "system_admin"}
+HR_HEADERS = {"x-test-email": "hr@example.com", "x-test-role": "hr_manager"}
+INTERVIEWER_HEADERS = {"x-test-email": "interviewer@example.com", "x-test-role": "internal_interviewer"}
 
 
 PROJECT_PAYLOAD = {
@@ -455,3 +457,153 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
         assert len(approved_filtered) == 1
         assert len(date_filtered) == 1
         assert date_filtered[0]["issue_date"] == str(today_value)
+
+
+def test_recruitment_flow_from_position_to_hired_candidate():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        interviewer = provision_user(client, full_name="Internal Interviewer", email="interviewer@example.com", roles=["internal_interviewer"])
+        other_interviewer = provision_user(client, full_name="Other Interviewer", email="other-interviewer@example.com", roles=["internal_interviewer"])
+
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Recruitment Analyst",
+                "number_of_positions": "2",
+                "employment_type": "FTE",
+                "description": "Recruitment analyst for client delivery.",
+                "position_billing_type": "periodic",
+                "fee_amount": "3000.00",
+                "currency": "USD",
+                "billing_frequency": "monthly",
+                "billing_start_date": str(date.today()),
+                "billing_end_date": str(date.today() + timedelta(days=90)),
+                "target_start_date": str(date.today() + timedelta(days=20)),
+                "internal_interviewers": "Internal Interviewer",
+            },
+            files={"detail_document": ("position.pdf", b"position details", "application/pdf")},
+        )
+        assert need_response.status_code == 201, need_response.text
+        need = need_response.json()
+        assert need["detail_document_id"] is not None
+        assert need["position_billing_type"] == "periodic"
+        assert need["billing_frequency"] == "monthly"
+
+        with SessionLocal() as db:
+            notification = db.query(EmailNotification).filter(EmailNotification.project_id == project["id"]).one()
+            assert notification.recipient_email == "hr@example.com"
+            assert notification.cc_email == "ops@example.com"
+            assert "New recruitment position" in notification.subject
+
+        update_response = client.put(
+            f"/recruitment-needs/{need['id']}",
+            headers=OPS_HEADERS,
+            data={"position_title": "Senior Recruitment Analyst", "description": "Updated detailed position description."},
+        )
+        assert update_response.status_code == 200, update_response.text
+        assert update_response.json()["position_title"] == "Senior Recruitment Analyst"
+
+        needs_response = client.get("/recruitment/needs", headers=HR_HEADERS)
+        assert needs_response.status_code == 200, needs_response.text
+        assert needs_response.json()[0]["project_code"] == project["project_code"]
+
+        assets_response = client.post(
+            f"/recruitment-needs/{need['id']}/assets",
+            headers=HR_HEADERS,
+            data={"linkedin_ad_url": "https://linkedin.com/jobs/view/123"},
+            files={
+                "jd_document": ("jd.pdf", b"jd", "application/pdf"),
+                "job_ad_document": ("job-ad.pdf", b"ad", "application/pdf"),
+            },
+        )
+        assert assets_response.status_code == 200, assets_response.text
+        assert assets_response.json()["jd_document_name"] == "jd.pdf"
+        assert assets_response.json()["job_ad_document_name"] == "job-ad.pdf"
+        assert assets_response.json()["linkedin_ad_url"] == "https://linkedin.com/jobs/view/123"
+
+        candidate_response = client.post(
+            f"/recruitment-needs/{need['id']}/candidates",
+            headers=HR_HEADERS,
+            json={
+                "full_name": "Priya Candidate",
+                "email": "priya@example.com",
+                "linkedin_profile_url": "https://linkedin.com/in/priya",
+            },
+        )
+        assert candidate_response.status_code == 201, candidate_response.text
+        candidate = candidate_response.json()
+
+        status_response = client.patch(
+            f"/candidates/{candidate['id']}/status",
+            headers=HR_HEADERS,
+            json={"status": "shortlisted_for_interview"},
+        )
+        assert status_response.status_code == 200, status_response.text
+        assert status_response.json()["status"] == "shortlisted_for_interview"
+
+        interview_response = client.post(
+            f"/candidates/{candidate['id']}/interviews",
+            headers=HR_HEADERS,
+            json={"interviewer_user_id": interviewer["id"], "calendly_url": "https://calendly.com/internal/priya"},
+        )
+        assert interview_response.status_code == 201, interview_response.text
+        interview = interview_response.json()
+        assert interview["interviewer_name"] == "Internal Interviewer"
+
+        own_interviews = client.get("/interviews", headers=INTERVIEWER_HEADERS)
+        other_interviews = client.get("/interviews", headers={"x-test-email": "other-interviewer@example.com", "x-test-role": "internal_interviewer"})
+        assert own_interviews.status_code == 200, own_interviews.text
+        assert len(own_interviews.json()) == 1
+        assert other_interviews.status_code == 200, other_interviews.text
+        assert other_interviews.json() == []
+
+        scorecard_response = client.post(
+            f"/interviews/{interview['id']}/scorecard",
+            headers=INTERVIEWER_HEADERS,
+            data={"score": "88", "recommendation": "hire", "notes": "Strong candidate."},
+            files={"evaluation_checklist": ("scorecard.pdf", b"scorecard", "application/pdf")},
+        )
+        assert scorecard_response.status_code == 200, scorecard_response.text
+        assert scorecard_response.json()["status"] == "completed"
+        assert scorecard_response.json()["evaluation_document_name"] == "scorecard.pdf"
+
+        send_contract_response = client.patch(
+            f"/candidates/{candidate['id']}/status",
+            headers=HR_HEADERS,
+            json={"status": "send_contract"},
+        )
+        assert send_contract_response.status_code == 200, send_contract_response.text
+        assert send_contract_response.json()["status"] == "send_contract"
+
+        contract_response = client.post(
+            f"/candidates/{candidate['id']}/contract",
+            headers=HR_HEADERS,
+            data={
+                "invoice_terms": "Monthly consultant invoice after client approval.",
+                "invoice_amount": "2500.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today()),
+                "invoice_end_date": str(date.today() + timedelta(days=90)),
+            },
+            files={"signed_contract": ("signed-contract.pdf", b"signed", "application/pdf")},
+        )
+        assert contract_response.status_code == 200, contract_response.text
+        hired_candidate = contract_response.json()
+        assert hired_candidate["status"] == "hired"
+        assert hired_candidate["contracts"][0]["contract_document_name"] == "signed-contract.pdf"
+        assert hired_candidate["contracts"][0]["invoice_amount"] == "2500.00"
+
+        candidates_response = client.get("/recruitment/candidates", headers=HR_HEADERS)
+        assert candidates_response.status_code == 200, candidates_response.text
+        assert candidates_response.json()[0]["interviews"][0]["recommendation"] == "hire"

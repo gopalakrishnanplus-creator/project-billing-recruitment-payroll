@@ -52,8 +52,69 @@ class RecruitmentNeedCreate(BaseModel):
     number_of_positions: int = Field(default=1, ge=1)
     employment_type: str
     description: str = Field(min_length=5)
+    position_billing_type: str | None = Field(default=None, pattern="^(fixed_fee|periodic)$")
+    fee_amount: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = "USD"
+    billing_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    billing_start_date: date | None = None
+    billing_end_date: date | None = None
     target_start_date: date | None = None
     internal_interviewers: str | None = None
+
+
+class RecruitmentNeedUpdate(BaseModel):
+    position_title: str | None = Field(default=None, min_length=2, max_length=180)
+    number_of_positions: int | None = Field(default=None, ge=1)
+    employment_type: str | None = None
+    description: str | None = Field(default=None, min_length=5)
+    position_billing_type: str | None = Field(default=None, pattern="^(fixed_fee|periodic)$")
+    fee_amount: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = None
+    billing_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    billing_start_date: date | None = None
+    billing_end_date: date | None = None
+    target_start_date: date | None = None
+    internal_interviewers: str | None = None
+    status: str | None = None
+
+
+class RecruitmentAssetCreate(BaseModel):
+    linkedin_ad_url: str | None = None
+
+
+class CandidateCreate(BaseModel):
+    full_name: str = Field(min_length=2, max_length=180)
+    email: EmailStr
+    phone: str | None = None
+    linkedin_profile_url: str | None = None
+    notes: str | None = None
+    candidate_type: str = "job_candidate"
+
+
+class CandidateStatusUpdate(BaseModel):
+    status: str = Field(pattern="^(entered|shortlisted_for_interview|rejected|backup_candidate|interview_scheduled|evaluation_submitted|send_contract|hired)$")
+
+
+class InterviewCreate(BaseModel):
+    interviewer_user_id: int
+    calendly_url: str | None = None
+    scheduled_at: datetime | None = None
+
+
+class ScorecardCreate(BaseModel):
+    score: int = Field(ge=0, le=100)
+    recommendation: str
+    notes: str | None = None
+
+
+class CandidateContractCreate(BaseModel):
+    invoice_terms: str | None = None
+    invoice_amount: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = "USD"
+    invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    invoice_start_date: date | None = None
+    invoice_end_date: date | None = None
+    invoice_date: date | None = None
 
 
 class InvoiceScheduleCreate(BaseModel):
@@ -123,13 +184,84 @@ class RecruitmentNeedRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    project_id: int
     position_title: str
     number_of_positions: int
     employment_type: str
     description: str
+    position_billing_type: str | None
+    fee_amount: Decimal | None
+    currency: str | None
+    billing_frequency: str | None
+    billing_start_date: date | None
+    billing_end_date: date | None
     target_start_date: date | None
     internal_interviewers: str | None
+    detail_document_id: int | None
+    jd_document_id: int | None
+    job_ad_document_id: int | None
+    linkedin_ad_url: str | None
     status: str
+
+
+class RecruitmentNeedDetailRead(RecruitmentNeedRead):
+    project_code: str
+    project_title: str
+    client_company_name: str
+    detail_document_name: str | None = None
+    jd_document_name: str | None = None
+    job_ad_document_name: str | None = None
+
+
+class InterviewRead(BaseModel):
+    id: int
+    candidate_id: int
+    interviewer_user_id: int | None
+    interviewer_name: str
+    calendly_url: str | None
+    scheduled_at: datetime | None
+    status: str
+    score: int | None = None
+    recommendation: str | None = None
+    notes: str | None = None
+    evaluation_document_id: int | None = None
+    evaluation_document_name: str | None = None
+
+
+class CandidateContractRead(BaseModel):
+    id: int
+    candidate_id: int
+    contract_document_id: int | None
+    contract_document_name: str | None = None
+    invoice_terms: str | None
+    invoice_amount: Decimal | None
+    currency: str | None
+    invoice_frequency: str | None
+    invoice_start_date: date | None
+    invoice_end_date: date | None
+    invoice_date: date | None
+    signed_at: datetime | None
+    status: str
+
+
+class CandidateRead(BaseModel):
+    id: int
+    project_id: int
+    recruitment_need_id: int | None
+    full_name: str
+    email: str
+    phone: str | None
+    linkedin_profile_url: str | None
+    notes: str | None
+    candidate_type: str
+    status: str
+    created_at: datetime
+    project_code: str
+    project_title: str
+    client_company_name: str
+    position_title: str | None = None
+    interviews: list[InterviewRead] = Field(default_factory=list)
+    contracts: list[CandidateContractRead] = Field(default_factory=list)
 
 
 class InvoiceScheduleRead(BaseModel):

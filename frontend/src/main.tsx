@@ -8,12 +8,16 @@ import {
   ClipboardList,
   FileCheck2,
   FilePlus2,
+  FileText,
   Pencil,
   LogOut,
   RefreshCw,
   Send,
   ShieldCheck,
+  Upload,
   UserCog,
+  UserCheck,
+  Users,
 } from 'lucide-react';
 import './styles.css';
 
@@ -68,10 +72,33 @@ type Project = {
 
 type RecruitmentNeed = {
   id: number;
+  project_id: number;
   position_title: string;
   number_of_positions: number;
   employment_type: string;
+  description: string;
+  position_billing_type: string | null;
+  fee_amount: string | null;
+  currency: string | null;
+  billing_frequency: string | null;
+  billing_start_date: string | null;
+  billing_end_date: string | null;
+  target_start_date: string | null;
+  internal_interviewers: string | null;
+  detail_document_id: number | null;
+  jd_document_id: number | null;
+  job_ad_document_id: number | null;
+  linkedin_ad_url: string | null;
   status: string;
+};
+
+type RecruitmentNeedDetail = RecruitmentNeed & {
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  detail_document_name: string | null;
+  jd_document_name: string | null;
+  job_ad_document_name: string | null;
 };
 
 type InvoiceSchedule = {
@@ -109,6 +136,57 @@ type ClientInvoice = {
   paid_total?: string;
   cancelled_amount?: string;
   balance_due?: string;
+};
+
+type Interview = {
+  id: number;
+  candidate_id: number;
+  interviewer_user_id: number | null;
+  interviewer_name: string;
+  calendly_url: string | null;
+  scheduled_at: string | null;
+  status: string;
+  score: number | null;
+  recommendation: string | null;
+  notes: string | null;
+  evaluation_document_id: number | null;
+  evaluation_document_name: string | null;
+};
+
+type CandidateContract = {
+  id: number;
+  candidate_id: number;
+  contract_document_id: number | null;
+  contract_document_name: string | null;
+  invoice_terms: string | null;
+  invoice_amount: string | null;
+  currency: string | null;
+  invoice_frequency: string | null;
+  invoice_start_date: string | null;
+  invoice_end_date: string | null;
+  invoice_date: string | null;
+  signed_at: string | null;
+  status: string;
+};
+
+type Candidate = {
+  id: number;
+  project_id: number;
+  recruitment_need_id: number | null;
+  full_name: string;
+  email: string;
+  phone: string | null;
+  linkedin_profile_url: string | null;
+  notes: string | null;
+  candidate_type: string;
+  status: string;
+  created_at: string;
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  position_title: string | null;
+  interviews: Interview[];
+  contracts: CandidateContract[];
 };
 
 type CurrentUser = {
@@ -163,13 +241,22 @@ function App() {
   const [me, setMe] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<AppUser[]>([]);
   const [clientAccountExecutives, setClientAccountExecutives] = useState<AppUser[]>([]);
+  const [internalInterviewers, setInternalInterviewers] = useState<AppUser[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
+  const [recruitmentNeeds, setRecruitmentNeeds] = useState<RecruitmentNeedDetail[]>([]);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [interviews, setInterviews] = useState<Interview[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
+  const [selectedNeedId, setSelectedNeedId] = useState<number | null>(null);
+  const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
+  const [selectedInterviewId, setSelectedInterviewId] = useState<number | null>(null);
   const [editingProject, setEditingProject] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
-  const [activeView, setActiveView] = useState<'workflow' | 'invoices'>('workflow');
+  const [needBillingType, setNeedBillingType] = useState('periodic');
+  const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
+  const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment'>('workflow');
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState('');
   const [invoiceDateTo, setInvoiceDateTo] = useState('');
@@ -185,13 +272,32 @@ function App() {
     () => invoices.find((invoice) => invoice.id === selectedInvoiceId) ?? invoices[0],
     [invoices, selectedInvoiceId],
   );
+  const selectedNeed = useMemo(
+    () => recruitmentNeeds.find((need) => need.id === selectedNeedId) ?? recruitmentNeeds[0],
+    [recruitmentNeeds, selectedNeedId],
+  );
+  const candidatesForNeed = useMemo(
+    () => candidates.filter((candidate) => !selectedNeed || candidate.recruitment_need_id === selectedNeed.id),
+    [candidates, selectedNeed],
+  );
+  const selectedCandidate = useMemo(
+    () => candidates.find((candidate) => candidate.id === selectedCandidateId) ?? candidatesForNeed[0] ?? candidates[0],
+    [candidates, candidatesForNeed, selectedCandidateId],
+  );
+  const selectedInterview = useMemo(
+    () => interviews.find((interview) => interview.id === selectedInterviewId) ?? interviews[0],
+    [interviews, selectedInterviewId],
+  );
 
   const activeRole = me?.active_role;
   const canAdmin = activeRole === 'system_admin';
   const canOperate = activeRole === 'operations_manager';
+  const canHrManage = activeRole === 'hr_manager';
+  const canInterview = activeRole === 'internal_interviewer';
   const canFinance = activeRole === 'finance_manager';
   const canClientApprove = activeRole === 'client_account_executive';
   const canViewWorkflow = Boolean(activeRole && activeRole !== 'system_admin');
+  const canRecruitment = Boolean(activeRole && ['operations_manager', 'hr_manager', 'internal_interviewer', 'system_admin'].includes(activeRole));
   const invoicePageSize = 20;
 
   async function refreshMe() {
@@ -216,6 +322,24 @@ function App() {
       setInvoices(invoiceData);
       if (current.active_role === 'operations_manager') {
         setClientAccountExecutives(await api<AppUser[]>('/users/by-role/client_account_executive'));
+      }
+      if (['operations_manager', 'hr_manager', 'system_admin'].includes(current.active_role)) {
+        const needData = await api<RecruitmentNeedDetail[]>('/recruitment/needs');
+        setRecruitmentNeeds(needData);
+        if (!selectedNeedId && needData[0]) setSelectedNeedId(needData[0].id);
+      }
+      if (['hr_manager', 'system_admin'].includes(current.active_role)) {
+        const candidateData = await api<Candidate[]>('/recruitment/candidates');
+        setCandidates(candidateData);
+        if (!selectedCandidateId && candidateData[0]) setSelectedCandidateId(candidateData[0].id);
+      }
+      if (['hr_manager', 'internal_interviewer', 'system_admin'].includes(current.active_role)) {
+        const interviewData = await api<Interview[]>('/interviews');
+        setInterviews(interviewData);
+        if (!selectedInterviewId && interviewData[0]) setSelectedInterviewId(interviewData[0].id);
+      }
+      if (current.active_role === 'hr_manager') {
+        setInternalInterviewers(await api<AppUser[]>('/users/by-role/internal_interviewer'));
       }
       if (!selectedProjectId && projectData[0]) setSelectedProjectId(projectData[0].id);
       if (!selectedInvoiceId && invoiceData[0]) setSelectedInvoiceId(invoiceData[0].id);
@@ -284,6 +408,10 @@ function App() {
     setInvoices([]);
     setUsers([]);
     setClientAccountExecutives([]);
+    setInternalInterviewers([]);
+    setRecruitmentNeeds([]);
+    setCandidates([]);
+    setInterviews([]);
   }
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
@@ -337,14 +465,126 @@ function App() {
     event.preventDefault();
     if (!selectedProject) return;
     const formElement = event.currentTarget;
-    const payload = formPayload(formElement);
+    const payload = new FormData(formElement);
     await mutate(async () => {
       await api<RecruitmentNeed>(`/projects/${selectedProject.id}/recruitment-needs`, {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: payload,
       });
       formElement.reset();
       return 'Recruitment need added';
+    });
+  }
+
+  async function submitNeedUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedNeed) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      await api<RecruitmentNeed>(`/recruitment-needs/${selectedNeed.id}`, {
+        method: 'PUT',
+        body: payload,
+      });
+      return 'Recruitment need updated';
+    });
+  }
+
+  async function deleteSelectedNeed() {
+    if (!selectedNeed) return;
+    await mutate(async () => {
+      await api(`/recruitment-needs/${selectedNeed.id}`, { method: 'DELETE' });
+      return 'Recruitment need deleted';
+    });
+  }
+
+  async function submitRecruitmentAssets(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedNeed) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      await api<RecruitmentNeedDetail>(`/recruitment-needs/${selectedNeed.id}/assets`, {
+        method: 'POST',
+        body: payload,
+      });
+      formElement.reset();
+      return 'Recruitment assets saved';
+    });
+  }
+
+  async function submitCandidate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedNeed) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/recruitment-needs/${selectedNeed.id}/candidates`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setSelectedCandidateId(candidate.id);
+      formElement.reset();
+      return 'Candidate added';
+    });
+  }
+
+  async function updateCandidateStatus(status: string) {
+    if (!selectedCandidate) return;
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/candidates/${selectedCandidate.id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      });
+      setSelectedCandidateId(candidate.id);
+      return 'Candidate status updated';
+    });
+  }
+
+  async function submitInterview(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedCandidate) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    await mutate(async () => {
+      const interview = await api<Interview>(`/candidates/${selectedCandidate.id}/interviews`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setSelectedInterviewId(interview.id);
+      formElement.reset();
+      return 'Interview assigned';
+    });
+  }
+
+  async function submitScorecard(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedInterview) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      await api<Interview>(`/interviews/${selectedInterview.id}/scorecard`, {
+        method: 'POST',
+        body: payload,
+      });
+      formElement.reset();
+      return 'Evaluation checklist uploaded';
+    });
+  }
+
+  async function submitContract(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedCandidate) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/candidates/${selectedCandidate.id}/contract`, {
+        method: 'POST',
+        body: payload,
+      });
+      setSelectedCandidateId(candidate.id);
+      formElement.reset();
+      return 'Candidate contract and invoice terms saved';
     });
   }
 
@@ -413,7 +653,7 @@ function App() {
     try {
       const message = await work();
       if (me?.active_role === 'system_admin') await refreshUsers();
-      if (me?.active_role && me.active_role !== 'system_admin') await refreshData(me);
+      if (me?.active_role) await refreshData(me);
       setNotice({ tone: 'ok', message });
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Action failed' });
@@ -471,6 +711,7 @@ function App() {
       {me.active_role && (
         <nav className="viewSwitch">
           <button className={activeView === 'workflow' ? 'primary' : 'secondary'} onClick={() => setActiveView('workflow')}>Workflow</button>
+          {canRecruitment && <button className={activeView === 'recruitment' ? 'primary' : 'secondary'} onClick={() => setActiveView('recruitment')}>Recruitment</button>}
           <button className={activeView === 'invoices' ? 'primary' : 'secondary'} onClick={() => setActiveView('invoices')}>All Invoices</button>
         </nav>
       )}
@@ -516,6 +757,278 @@ function App() {
               ))}
             </div>
           </section>
+        </section>
+      )}
+
+      {activeView === 'recruitment' && canRecruitment && (
+        <section className="workspace recruitmentWorkspace">
+          <section className="panel wide">
+            <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Positions" />
+            <label className="field">
+              <span>Position</span>
+              <select value={selectedNeed?.id ?? ''} onChange={(event) => setSelectedNeedId(Number(event.target.value))}>
+                {recruitmentNeeds.map((need) => (
+                  <option key={need.id} value={need.id}>
+                    {need.project_code} · {need.position_title} · {need.status}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedNeed ? (
+              <>
+                <dl className="facts">
+                  <div><dt>Client</dt><dd>{selectedNeed.client_company_name}</dd></div>
+                  <div><dt>SOW</dt><dd>{selectedNeed.project_title}</dd></div>
+                  <div><dt>Position</dt><dd>{selectedNeed.position_title}</dd></div>
+                  <div><dt>Openings</dt><dd>{selectedNeed.number_of_positions}</dd></div>
+                  <div><dt>Type</dt><dd>{selectedNeed.employment_type}</dd></div>
+                  <div><dt>Status</dt><dd><Status value={selectedNeed.status} /></dd></div>
+                  <div><dt>Fee</dt><dd>{selectedNeed.currency ?? 'USD'} {selectedNeed.fee_amount ?? '0.00'}</dd></div>
+                  <div><dt>Billing</dt><dd>{selectedNeed.position_billing_type ?? 'not set'} · {selectedNeed.billing_frequency ?? 'not set'}</dd></div>
+                </dl>
+                <div className="documentList">
+                  {selectedNeed.detail_document_name && <span className="status">Position: {selectedNeed.detail_document_name}</span>}
+                  {selectedNeed.jd_document_name && <span className="status">JD: {selectedNeed.jd_document_name}</span>}
+                  {selectedNeed.job_ad_document_name && <span className="status">Ad: {selectedNeed.job_ad_document_name}</span>}
+                  {selectedNeed.linkedin_ad_url && <a className="status" href={selectedNeed.linkedin_ad_url} target="_blank" rel="noreferrer">LinkedIn ad</a>}
+                </div>
+              </>
+            ) : (
+              <p className="empty">No recruitment positions yet.</p>
+            )}
+          </section>
+
+          {canOperate && selectedNeed && (
+            <form className="panel wide" key={selectedNeed.id} onSubmit={(event) => void submitNeedUpdate(event)}>
+              <PanelTitle icon={<Pencil size={18} />} title="Edit Selected Position" />
+              <div className="grid four">
+                <Field label="Position" name="position_title" defaultValue={selectedNeed.position_title} />
+                <Field label="Number" name="number_of_positions" type="number" defaultValue={selectedNeed.number_of_positions} />
+                <label className="field">
+                  <span>Type</span>
+                  <select name="employment_type" defaultValue={selectedNeed.employment_type}>
+                    <option>FE</option>
+                    <option>FTE</option>
+                    <option>Fractional Consultant</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Status</span>
+                  <select name="status" defaultValue={selectedNeed.status}>
+                    <option value="open">Open</option>
+                    <option value="sourcing">Sourcing</option>
+                    <option value="closed">Closed</option>
+                    <option value="deleted">Deleted</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Billing type</span>
+                  <select name="position_billing_type" defaultValue={selectedNeed.position_billing_type ?? 'periodic'}>
+                    <option value="fixed_fee">Fixed fee</option>
+                    <option value="periodic">Periodic</option>
+                  </select>
+                </label>
+                <Field label="Fee amount" name="fee_amount" type="number" step="0.01" defaultValue={selectedNeed.fee_amount ?? ''} />
+                <Field label="Currency" name="currency" defaultValue={selectedNeed.currency ?? 'USD'} />
+                <label className="field">
+                  <span>Billing frequency</span>
+                  <select name="billing_frequency" defaultValue={selectedNeed.billing_frequency ?? 'monthly'}>
+                    <option value="single">Single</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                  </select>
+                </label>
+                <Field label="Billing start" name="billing_start_date" type="date" defaultValue={selectedNeed.billing_start_date ?? ''} />
+                <Field label="Billing end" name="billing_end_date" type="date" defaultValue={selectedNeed.billing_end_date ?? ''} />
+                <Field label="Target start" name="target_start_date" type="date" defaultValue={selectedNeed.target_start_date ?? ''} />
+                <Field label="Detail upload" name="detail_document" type="file" />
+              </div>
+              <Field label="Internal interviewers" name="internal_interviewers" defaultValue={selectedNeed.internal_interviewers ?? ''} />
+              <label className="field">
+                <span>Description</span>
+                <textarea name="description" rows={4} defaultValue={selectedNeed.description} />
+              </label>
+              <div className="toolbar">
+                <button className="primary" disabled={loading}>
+                  <FileCheck2 size={18} />
+                  <span>Save Position</span>
+                </button>
+                <button className="secondary danger" type="button" disabled={loading} onClick={() => void deleteSelectedNeed()}>
+                  <span>Delete Position</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {canHrManage && (
+            <>
+              <form className="panel" onSubmit={(event) => void submitRecruitmentAssets(event)}>
+                <PanelTitle icon={<Upload size={18} />} title="JD And Job Ad" />
+                <p className="contextLine">{selectedNeed ? `${selectedNeed.project_code} · ${selectedNeed.position_title}` : 'Select a position first'}</p>
+                <Field label="JD upload" name="jd_document" type="file" />
+                <Field label="Job ad upload" name="job_ad_document" type="file" />
+                <Field label="LinkedIn ad URL" name="linkedin_ad_url" defaultValue={selectedNeed?.linkedin_ad_url ?? ''} />
+                <button className="secondary" disabled={!selectedNeed || loading}>
+                  <FileText size={18} />
+                  <span>Save Assets</span>
+                </button>
+              </form>
+
+              <form className="panel" onSubmit={(event) => void submitCandidate(event)}>
+                <PanelTitle icon={<Users size={18} />} title="Evaluation Shortlist" />
+                <p className="contextLine">{selectedNeed ? selectedNeed.position_title : 'Select a position first'}</p>
+                <Field label="Candidate name" name="full_name" required />
+                <Field label="Candidate email" name="email" type="email" required />
+                <Field label="Phone" name="phone" />
+                <Field label="LinkedIn profile URL" name="linkedin_profile_url" />
+                <label className="field">
+                  <span>Notes</span>
+                  <textarea name="notes" rows={3} />
+                </label>
+                <button className="secondary" disabled={!selectedNeed || loading}>
+                  <UserCheck size={18} />
+                  <span>Add Candidate</span>
+                </button>
+              </form>
+
+              <section className="panel wide">
+                <PanelTitle icon={<Users size={18} />} title="Candidate Status" />
+                <label className="field">
+                  <span>Candidate</span>
+                  <select value={selectedCandidate?.id ?? ''} onChange={(event) => setSelectedCandidateId(Number(event.target.value))}>
+                    {candidatesForNeed.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>{candidate.full_name} · {candidate.status}</option>
+                    ))}
+                  </select>
+                </label>
+                {selectedCandidate ? (
+                  <>
+                    <dl className="facts">
+                      <div><dt>Name</dt><dd>{selectedCandidate.full_name}</dd></div>
+                      <div><dt>Email</dt><dd>{selectedCandidate.email}</dd></div>
+                      <div><dt>Position</dt><dd>{selectedCandidate.position_title}</dd></div>
+                      <div><dt>Status</dt><dd><Status value={selectedCandidate.status} /></dd></div>
+                    </dl>
+                    <div className="actions horizontalActions">
+                      <button className="secondary" onClick={() => void updateCandidateStatus('shortlisted_for_interview')} disabled={loading}>Shortlist</button>
+                      <button className="secondary" onClick={() => void updateCandidateStatus('backup_candidate')} disabled={loading}>Back-up</button>
+                      <button className="secondary danger" onClick={() => void updateCandidateStatus('rejected')} disabled={loading}>Reject</button>
+                      <button className="secondary" onClick={() => void updateCandidateStatus('send_contract')} disabled={loading}>Send Contract</button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="empty">No candidates for the selected position.</p>
+                )}
+              </section>
+
+              <form className="panel" onSubmit={(event) => void submitInterview(event)}>
+                <PanelTitle icon={<CalendarPlus size={18} />} title="Interview Assignment" />
+                <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
+                <label className="field">
+                  <span>Internal interviewer</span>
+                  <select name="interviewer_user_id" required defaultValue="">
+                    <option value="" disabled>Select interviewer</option>
+                    {internalInterviewers.map((user) => (
+                      <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
+                    ))}
+                  </select>
+                </label>
+                <Field label="Calendly URL" name="calendly_url" />
+                <Field label="Scheduled at" name="scheduled_at" type="datetime-local" />
+                <button className="secondary" disabled={!selectedCandidate || loading}>
+                  <CalendarPlus size={18} />
+                  <span>Assign Interview</span>
+                </button>
+              </form>
+
+              <form className="panel" onSubmit={(event) => void submitContract(event)}>
+                <PanelTitle icon={<FileCheck2 size={18} />} title="Signed Contract And Invoice Terms" />
+                <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
+                <Field label="Signed contract upload" name="signed_contract" type="file" />
+                <Field label="Invoice amount" name="invoice_amount" type="number" step="0.01" />
+                <Field label="Currency" name="currency" defaultValue="USD" />
+                <label className="field">
+                  <span>Invoice frequency</span>
+                  <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
+                    <option value="single">Single</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                  </select>
+                </label>
+                {contractInvoiceFrequency === 'single' ? (
+                  <Field label="Invoice date" name="invoice_date" type="date" />
+                ) : (
+                  <>
+                    <Field label="Invoice start" name="invoice_start_date" type="date" />
+                    <Field label="Invoice end" name="invoice_end_date" type="date" />
+                  </>
+                )}
+                <label className="field">
+                  <span>Invoice terms</span>
+                  <textarea name="invoice_terms" rows={3} />
+                </label>
+                <button className="primary" disabled={!selectedCandidate || loading}>
+                  <BadgeCheck size={18} />
+                  <span>Mark Hired</span>
+                </button>
+              </form>
+            </>
+          )}
+
+          {(canInterview || canHrManage) && (
+            <section className="panel wide">
+              <PanelTitle icon={<UserCheck size={18} />} title={canInterview ? 'My Interview Evaluations' : 'Interview Evaluations'} />
+              <label className="field">
+                <span>Interview</span>
+                <select value={selectedInterview?.id ?? ''} onChange={(event) => setSelectedInterviewId(Number(event.target.value))}>
+                  {interviews.map((interview) => {
+                    const candidate = candidates.find((item) => item.id === interview.candidate_id);
+                    return <option key={interview.id} value={interview.id}>{candidate?.full_name ?? `Candidate ${interview.candidate_id}`} · {interview.interviewer_name} · {interview.status}</option>;
+                  })}
+                </select>
+              </label>
+              {selectedInterview ? (
+                <dl className="facts">
+                  <div><dt>Interviewer</dt><dd>{selectedInterview.interviewer_name}</dd></div>
+                  <div><dt>Status</dt><dd><Status value={selectedInterview.status} /></dd></div>
+                  <div><dt>Score</dt><dd>{selectedInterview.score ?? 'Not submitted'}</dd></div>
+                  <div><dt>Recommendation</dt><dd>{selectedInterview.recommendation ?? 'Not submitted'}</dd></div>
+                  <div><dt>Checklist</dt><dd>{selectedInterview.evaluation_document_name ?? 'Not uploaded'}</dd></div>
+                  <div><dt>Calendly</dt><dd>{selectedInterview.calendly_url ?? 'Not set'}</dd></div>
+                </dl>
+              ) : (
+                <p className="empty">No interviews yet.</p>
+              )}
+            </section>
+          )}
+
+          {canInterview && (
+            <form className="panel" onSubmit={(event) => void submitScorecard(event)}>
+              <PanelTitle icon={<Upload size={18} />} title="Upload Evaluation Checklist" />
+              <p className="contextLine">{selectedInterview ? `Interview ${selectedInterview.id}` : 'Select an interview first'}</p>
+              <Field label="Checklist upload" name="evaluation_checklist" type="file" />
+              <Field label="Score" name="score" type="number" min="0" max="100" required />
+              <label className="field">
+                <span>Recommendation</span>
+                <select name="recommendation" required defaultValue="advance">
+                  <option value="advance">Advance</option>
+                  <option value="backup">Back-up</option>
+                  <option value="reject">Reject</option>
+                  <option value="hire">Hire</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Notes</span>
+                <textarea name="notes" rows={4} />
+              </label>
+              <button className="primary" disabled={!selectedInterview || loading}>
+                <FileCheck2 size={18} />
+                <span>Submit Evaluation</span>
+              </button>
+            </form>
+          )}
         </section>
       )}
 
@@ -730,8 +1243,29 @@ function App() {
                     <option>Fractional Consultant</option>
                   </select>
                 </label>
+                <label className="field">
+                  <span>Billing type</span>
+                  <select name="position_billing_type" value={needBillingType} onChange={(event) => setNeedBillingType(event.target.value)}>
+                    <option value="fixed_fee">Fixed fee</option>
+                    <option value="periodic">Periodic</option>
+                  </select>
+                </label>
+                <Field label="Fee amount" name="fee_amount" type="number" step="0.01" />
+                <Field label="Currency" name="currency" defaultValue={selectedProject?.currency ?? 'USD'} />
+                <label className="field">
+                  <span>Billing frequency</span>
+                  <select name="billing_frequency" defaultValue={needBillingType === 'fixed_fee' ? 'single' : 'monthly'}>
+                    <option value="single">Single</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                  </select>
+                </label>
+                <Field label={needBillingType === 'fixed_fee' ? 'Billing date' : 'Billing start'} name="billing_start_date" type="date" />
+                {needBillingType !== 'fixed_fee' && <Field label="Billing end" name="billing_end_date" type="date" />}
                 <Field label="Target start" name="target_start_date" type="date" />
                 <Field label="Internal interviewers" name="internal_interviewers" placeholder="Names separated by semicolons" />
+                <Field label="Detailed position upload" name="detail_document" type="file" />
                 <label className="field">
                   <span>Description</span>
                   <textarea name="description" rows={4} required />

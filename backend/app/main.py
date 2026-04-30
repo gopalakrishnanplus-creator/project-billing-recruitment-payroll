@@ -21,6 +21,8 @@ from .database import Base, SessionLocal, engine, get_db
 from .models import (
     ActivityLog,
     AppUser,
+    Candidate,
+    CandidateContract,
     ClientCompany,
     ClientContact,
     ClientInvoice,
@@ -28,6 +30,8 @@ from .models import (
     ClientInvoiceSchedule,
     ClientPayment,
     EmailNotification,
+    Interview,
+    InterviewScorecard,
     InvoiceStatus,
     MasterServiceAgreement,
     ProjectSOW,
@@ -42,6 +46,11 @@ from .schemas import (
     AppUserRead,
     AppUserUpsert,
     CancelInvoiceCreate,
+    CandidateContractCreate,
+    CandidateContractRead,
+    CandidateCreate,
+    CandidateRead,
+    CandidateStatusUpdate,
     ClientInvoiceRead,
     CurrentUserRead,
     GenerateInvoicesResult,
@@ -53,10 +62,16 @@ from .schemas import (
     ProjectCreate,
     ProjectRead,
     ProjectUpdate,
+    RecruitmentAssetCreate,
     RecruitmentNeedCreate,
+    RecruitmentNeedDetailRead,
     RecruitmentNeedRead,
+    RecruitmentNeedUpdate,
     RoleSelect,
+    ScorecardCreate,
     SendInvoiceCreate,
+    InterviewCreate,
+    InterviewRead,
     SOWCreate,
 )
 
@@ -140,26 +155,63 @@ def ensure_auth_columns() -> None:
 def ensure_workflow_columns() -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
+
+    def add_column(conn, table: str, existing_columns: set[str], name: str, definition: str) -> None:
+        if name not in existing_columns:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+            existing_columns.add(name)
+
     with engine.begin() as conn:
         if "project_sows" in tables:
             existing = {column["name"] for column in inspector.get_columns("project_sows")}
-            if "client_account_executive_id" not in existing:
-                conn.execute(text("ALTER TABLE project_sows ADD COLUMN client_account_executive_id INTEGER"))
+            add_column(conn, "project_sows", existing, "client_account_executive_id", "INTEGER")
         if "uploaded_documents" in tables:
             existing = {column["name"] for column in inspector.get_columns("uploaded_documents")}
-            if "stored_filename" not in existing:
-                conn.execute(text("ALTER TABLE uploaded_documents ADD COLUMN stored_filename VARCHAR(255)"))
-            if "content_type" not in existing:
-                conn.execute(text("ALTER TABLE uploaded_documents ADD COLUMN content_type VARCHAR(120)"))
-        if "file_size" not in existing:
-            conn.execute(text("ALTER TABLE uploaded_documents ADD COLUMN file_size INTEGER"))
-        if "content_bytes" not in existing:
+            add_column(conn, "uploaded_documents", existing, "stored_filename", "VARCHAR(255)")
+            add_column(conn, "uploaded_documents", existing, "content_type", "VARCHAR(120)")
+            add_column(conn, "uploaded_documents", existing, "file_size", "INTEGER")
             column_type = "BYTEA" if engine.dialect.name == "postgresql" else "BLOB"
-            conn.execute(text(f"ALTER TABLE uploaded_documents ADD COLUMN content_bytes {column_type}"))
+            add_column(conn, "uploaded_documents", existing, "content_bytes", column_type)
+        if "recruitment_needs" in tables:
+            existing = {column["name"] for column in inspector.get_columns("recruitment_needs")}
+            for name, definition in {
+                "position_billing_type": "VARCHAR(40)",
+                "fee_amount": "NUMERIC(12, 2)",
+                "currency": "VARCHAR(12)",
+                "billing_frequency": "VARCHAR(40)",
+                "billing_start_date": "DATE",
+                "billing_end_date": "DATE",
+                "detail_document_id": "INTEGER",
+                "jd_document_id": "INTEGER",
+                "job_ad_document_id": "INTEGER",
+                "linkedin_ad_url": "VARCHAR(500)",
+                "jd_uploaded_at": "TIMESTAMP",
+            }.items():
+                add_column(conn, "recruitment_needs", existing, name, definition)
+        if "candidates" in tables:
+            existing = {column["name"] for column in inspector.get_columns("candidates")}
+            add_column(conn, "candidates", existing, "linkedin_profile_url", "VARCHAR(500)")
+            add_column(conn, "candidates", existing, "notes", "TEXT")
+        if "interviews" in tables:
+            existing = {column["name"] for column in inspector.get_columns("interviews")}
+            add_column(conn, "interviews", existing, "interviewer_user_id", "INTEGER")
+        if "interview_scorecards" in tables:
+            existing = {column["name"] for column in inspector.get_columns("interview_scorecards")}
+            add_column(conn, "interview_scorecards", existing, "evaluation_document_id", "INTEGER")
+        if "candidate_contracts" in tables:
+            existing = {column["name"] for column in inspector.get_columns("candidate_contracts")}
+            for name, definition in {
+                "invoice_amount": "NUMERIC(12, 2)",
+                "currency": "VARCHAR(12)",
+                "invoice_frequency": "VARCHAR(40)",
+                "invoice_start_date": "DATE",
+                "invoice_end_date": "DATE",
+                "invoice_date": "DATE",
+            }.items():
+                add_column(conn, "candidate_contracts", existing, name, definition)
         if "email_notifications" in tables:
             existing = {column["name"] for column in inspector.get_columns("email_notifications")}
-            if "cc_email" not in existing:
-                conn.execute(text("ALTER TABLE email_notifications ADD COLUMN cc_email TEXT"))
+            add_column(conn, "email_notifications", existing, "cc_email", "TEXT")
 
 
 def seed_system_admin(db: Session) -> None:
@@ -452,11 +504,163 @@ def load_project_for_read(project_id: int, db: Session) -> ProjectSOW:
     return project
 
 
+def document_name(db: Session, document_id: int | None) -> str | None:
+    if document_id is None:
+        return None
+    document = db.get(UploadedDocument, document_id)
+    return document.original_filename if document else None
+
+
+def serialize_recruitment_need_detail(need: RecruitmentNeed, db: Session) -> RecruitmentNeedDetailRead:
+    project = load_project_for_read(need.project_id, db)
+    return RecruitmentNeedDetailRead(
+        **RecruitmentNeedRead.model_validate(need).model_dump(),
+        project_code=project.project_code,
+        project_title=project.title,
+        client_company_name=project.company.name,
+        detail_document_name=document_name(db, need.detail_document_id),
+        jd_document_name=document_name(db, need.jd_document_id),
+        job_ad_document_name=document_name(db, need.job_ad_document_id),
+    )
+
+
+def serialize_interview(interview: Interview, db: Session) -> InterviewRead:
+    scorecard = db.scalar(
+        select(InterviewScorecard)
+        .where(InterviewScorecard.interview_id == interview.id)
+        .order_by(InterviewScorecard.submitted_at.desc(), InterviewScorecard.id.desc())
+    )
+    return InterviewRead(
+        id=interview.id,
+        candidate_id=interview.candidate_id,
+        interviewer_user_id=interview.interviewer_user_id,
+        interviewer_name=interview.interviewer_name,
+        calendly_url=interview.calendly_url,
+        scheduled_at=interview.scheduled_at,
+        status=interview.status,
+        score=scorecard.score if scorecard else None,
+        recommendation=scorecard.recommendation if scorecard else None,
+        notes=scorecard.notes if scorecard else None,
+        evaluation_document_id=scorecard.evaluation_document_id if scorecard else None,
+        evaluation_document_name=document_name(db, scorecard.evaluation_document_id if scorecard else None),
+    )
+
+
+def serialize_candidate_contract(contract: CandidateContract, db: Session) -> CandidateContractRead:
+    return CandidateContractRead(
+        id=contract.id,
+        candidate_id=contract.candidate_id,
+        contract_document_id=contract.contract_document_id,
+        contract_document_name=document_name(db, contract.contract_document_id),
+        invoice_terms=contract.invoice_terms,
+        invoice_amount=contract.invoice_amount,
+        currency=contract.currency,
+        invoice_frequency=contract.invoice_frequency,
+        invoice_start_date=contract.invoice_start_date,
+        invoice_end_date=contract.invoice_end_date,
+        invoice_date=contract.invoice_date,
+        signed_at=contract.signed_at,
+        status=contract.status,
+    )
+
+
+def serialize_candidate(candidate: Candidate, db: Session) -> CandidateRead:
+    project = load_project_for_read(candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    interviews = db.scalars(select(Interview).where(Interview.candidate_id == candidate.id).order_by(Interview.id.desc())).all()
+    contracts = db.scalars(select(CandidateContract).where(CandidateContract.candidate_id == candidate.id).order_by(CandidateContract.id.desc())).all()
+    return CandidateRead(
+        id=candidate.id,
+        project_id=candidate.project_id,
+        recruitment_need_id=candidate.recruitment_need_id,
+        full_name=candidate.full_name,
+        email=candidate.email,
+        phone=candidate.phone,
+        linkedin_profile_url=candidate.linkedin_profile_url,
+        notes=candidate.notes,
+        candidate_type=candidate.candidate_type,
+        status=candidate.status,
+        created_at=candidate.created_at,
+        project_code=project.project_code,
+        project_title=project.title,
+        client_company_name=project.company.name,
+        position_title=need.position_title if need else None,
+        interviews=[serialize_interview(interview, db) for interview in interviews],
+        contracts=[serialize_candidate_contract(contract, db) for contract in contracts],
+    )
+
+
+def load_candidate(candidate_id: int, db: Session) -> Candidate:
+    candidate = db.get(Candidate, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    return candidate
+
+
+def validate_internal_interviewer(db: Session, user_id: int) -> AppUser:
+    user = db.scalar(select(AppUser).where(AppUser.id == user_id, AppUser.is_active.is_(True)).options(selectinload(AppUser.role_assignments)))
+    if user is None or UserRole.internal_interviewer.value not in user_roles(user):
+        raise HTTPException(status_code=400, detail="Select an active Internal Interviewer")
+    return user
+
+
+def hr_manager_emails(db: Session) -> list[str]:
+    return sorted({user.email for user in users_with_role(db, UserRole.hr_manager.value)})
+
+
 def finance_manager_emails(db: Session) -> list[str]:
     emails = [user.email for user in users_with_role(db, UserRole.finance_manager.value)]
     if FINANCE_MANAGER_EMAIL:
         emails.extend(email.strip() for email in FINANCE_MANAGER_EMAIL.split(",") if email.strip())
     return sorted(set(emails))
+
+
+def recruitment_need_email_template(project: ProjectSOW, need: RecruitmentNeed) -> tuple[str, str, str]:
+    recruitment_link = f"{FRONTEND_URL}/"
+    subject = f"New recruitment position: {need.position_title}"
+    text = "\n".join(
+        [
+            "A new recruitment position has been added.",
+            "",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Position: {need.position_title}",
+            f"Number of hires: {need.number_of_positions}",
+            f"Type: {need.employment_type}",
+            "",
+            f"Log in to work on this position: {recruitment_link}",
+        ]
+    )
+    html = f"""
+    <h2>New recruitment position</h2>
+    <p>A new position has been added for recruitment.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(need.position_title)}</td></tr>
+      <tr><td><strong>Number of hires</strong></td><td>{need.number_of_positions}</td></tr>
+      <tr><td><strong>Type</strong></td><td>{escape(need.employment_type)}</td></tr>
+    </table>
+    <p><a href="{escape(recruitment_link)}">Log in to work on this position</a></p>
+    """
+    return subject, text, html
+
+
+def notify_hr_for_recruitment_need(db: Session, project: ProjectSOW, need: RecruitmentNeed, operations_manager_email: str | None) -> None:
+    subject, text, html = recruitment_need_email_template(project, need)
+    cc_emails = [operations_manager_email] if operations_manager_email else []
+    for recipient in hr_manager_emails(db):
+        status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text, html=html)
+        db.add(
+            EmailNotification(
+                project_id=project.id,
+                recipient_email=recipient,
+                cc_email=",".join(email for email in cc_emails if email and email != recipient) or None,
+                subject=subject,
+                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                status=status,
+            )
+        )
 
 
 def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
@@ -794,14 +998,14 @@ def schema_overview() -> dict[str, list[str]]:
             "activity_logs",
             "app_users",
             "user_role_assignments",
-        ],
-        "reserved_later_flow_tables": [
             "candidates",
-            "candidate_screening_forms",
-            "candidate_evaluations",
             "interviews",
             "interview_scorecards",
             "candidate_contracts",
+        ],
+        "reserved_later_flow_tables": [
+            "candidate_screening_forms",
+            "candidate_evaluations",
             "candidate_vendor_invoices",
             "candidate_invoice_approvals",
             "candidate_payments",
@@ -981,16 +1185,218 @@ def get_project(project_id: int, _: AuthContext = Depends(require_login), db: Se
 
 
 @app.post("/projects/{project_id}/recruitment-needs", response_model=RecruitmentNeedRead, status_code=201)
-def add_recruitment_need(project_id: int, payload: RecruitmentNeedCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> RecruitmentNeedRead:
-    project = db.get(ProjectSOW, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+async def add_recruitment_need(project_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> RecruitmentNeedRead:
+    project = load_project_for_read(project_id, db)
+    data, files = await request_payload_and_files(request)
+    payload: RecruitmentNeedCreate = parse_model(RecruitmentNeedCreate, data)
     need = RecruitmentNeed(project_id=project_id, **payload.model_dump())
     db.add(need)
+    db.flush()
+    detail_document = await save_uploaded_document(
+        db,
+        file=files.get("detail_document"),
+        project_id=project_id,
+        document_type="position_detail",
+        uploaded_by_name=context.user.full_name,
+    )
+    if detail_document:
+        need.detail_document_id = detail_document.id
     log_event(db, project_id=project_id, actor_name=project.operations_manager_name, action="recruitment_need_added", details=payload.position_title)
+    notify_hr_for_recruitment_need(db, project, need, context.user.email)
     db.commit()
     db.refresh(need)
     return RecruitmentNeedRead.model_validate(need)
+
+
+@app.put("/recruitment-needs/{need_id}", response_model=RecruitmentNeedRead)
+async def update_recruitment_need(need_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> RecruitmentNeedRead:
+    need = db.get(RecruitmentNeed, need_id)
+    if need is None:
+        raise HTTPException(status_code=404, detail="Recruitment need not found")
+    project = load_project_for_read(need.project_id, db)
+    data, files = await request_payload_and_files(request)
+    payload: RecruitmentNeedUpdate = parse_model(RecruitmentNeedUpdate, data)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "currency" and value:
+            value = str(value).upper()
+        setattr(need, field, value)
+    detail_document = await save_uploaded_document(
+        db,
+        file=files.get("detail_document"),
+        project_id=need.project_id,
+        document_type="position_detail",
+        uploaded_by_name=context.user.full_name,
+    )
+    if detail_document:
+        need.detail_document_id = detail_document.id
+    log_event(db, project_id=need.project_id, actor_name=project.operations_manager_name, action="recruitment_need_updated", details=need.position_title)
+    db.commit()
+    db.refresh(need)
+    return RecruitmentNeedRead.model_validate(need)
+
+
+@app.delete("/recruitment-needs/{need_id}")
+def delete_recruitment_need(need_id: int, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> dict[str, str]:
+    need = db.get(RecruitmentNeed, need_id)
+    if need is None:
+        raise HTTPException(status_code=404, detail="Recruitment need not found")
+    need.status = "deleted"
+    log_event(db, project_id=need.project_id, actor_name="Operations Manager", action="recruitment_need_deleted", details=need.position_title)
+    db.commit()
+    return {"status": "deleted"}
+
+
+@app.get("/recruitment/needs", response_model=list[RecruitmentNeedDetailRead])
+def list_recruitment_needs(_: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.hr_manager.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[RecruitmentNeedDetailRead]:
+    needs = db.scalars(select(RecruitmentNeed).order_by(RecruitmentNeed.created_at.desc(), RecruitmentNeed.id.desc())).all()
+    return [serialize_recruitment_need_detail(need, db) for need in needs]
+
+
+@app.post("/recruitment-needs/{need_id}/assets", response_model=RecruitmentNeedDetailRead)
+async def upload_recruitment_assets(need_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> RecruitmentNeedDetailRead:
+    need = db.get(RecruitmentNeed, need_id)
+    if need is None:
+        raise HTTPException(status_code=404, detail="Recruitment need not found")
+    data, files = await request_payload_and_files(request)
+    payload: RecruitmentAssetCreate = parse_model(RecruitmentAssetCreate, data)
+    jd_document = await save_uploaded_document(db, file=files.get("jd_document"), project_id=need.project_id, document_type="job_description", uploaded_by_name=context.user.full_name)
+    job_ad_document = await save_uploaded_document(db, file=files.get("job_ad_document"), project_id=need.project_id, document_type="job_ad", uploaded_by_name=context.user.full_name)
+    if jd_document:
+        need.jd_document_id = jd_document.id
+        need.jd_uploaded_at = utcnow()
+    if job_ad_document:
+        need.job_ad_document_id = job_ad_document.id
+    if payload.linkedin_ad_url is not None:
+        need.linkedin_ad_url = payload.linkedin_ad_url
+    if need.status == "open":
+        need.status = "sourcing"
+    log_event(db, project_id=need.project_id, actor_name=context.user.full_name, action="recruitment_assets_uploaded", details=need.position_title)
+    db.commit()
+    db.refresh(need)
+    return serialize_recruitment_need_detail(need, db)
+
+
+@app.post("/recruitment-needs/{need_id}/candidates", response_model=CandidateRead, status_code=201)
+def add_candidate(need_id: int, payload: CandidateCreate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> CandidateRead:
+    need = db.get(RecruitmentNeed, need_id)
+    if need is None:
+        raise HTTPException(status_code=404, detail="Recruitment need not found")
+    candidate = Candidate(
+        project_id=need.project_id,
+        recruitment_need_id=need.id,
+        full_name=payload.full_name,
+        email=str(payload.email),
+        phone=payload.phone,
+        linkedin_profile_url=payload.linkedin_profile_url,
+        notes=payload.notes,
+        candidate_type=payload.candidate_type,
+        status="entered",
+    )
+    db.add(candidate)
+    db.flush()
+    log_event(db, project_id=need.project_id, actor_name=context.user.full_name, action="candidate_added", details=candidate.full_name)
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
+@app.get("/recruitment/candidates", response_model=list[CandidateRead])
+def list_candidates(_: AuthContext = Depends(require_role(UserRole.hr_manager.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[CandidateRead]:
+    candidates = db.scalars(select(Candidate).order_by(Candidate.created_at.desc(), Candidate.id.desc())).all()
+    return [serialize_candidate(candidate, db) for candidate in candidates]
+
+
+@app.patch("/candidates/{candidate_id}/status", response_model=CandidateRead)
+def update_candidate_status(candidate_id: int, payload: CandidateStatusUpdate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> CandidateRead:
+    candidate = load_candidate(candidate_id, db)
+    candidate.status = payload.status
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_status_updated", details=f"{candidate.full_name}: {payload.status}")
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
+@app.post("/candidates/{candidate_id}/interviews", response_model=InterviewRead, status_code=201)
+def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> InterviewRead:
+    candidate = load_candidate(candidate_id, db)
+    interviewer = validate_internal_interviewer(db, payload.interviewer_user_id)
+    interview = Interview(
+        candidate_id=candidate.id,
+        interviewer_user_id=interviewer.id,
+        interviewer_name=interviewer.full_name,
+        calendly_url=payload.calendly_url,
+        scheduled_at=payload.scheduled_at,
+        status="pending",
+    )
+    candidate.status = "interview_scheduled"
+    db.add(interview)
+    db.flush()
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="interview_assigned", details=f"{candidate.full_name}: {interviewer.full_name}")
+    db.commit()
+    db.refresh(interview)
+    return serialize_interview(interview, db)
+
+
+@app.get("/interviews", response_model=list[InterviewRead])
+def list_interviews(context: AuthContext = Depends(require_role(UserRole.hr_manager.value, UserRole.internal_interviewer.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[InterviewRead]:
+    query = select(Interview).order_by(Interview.id.desc())
+    if context.active_role == UserRole.internal_interviewer.value:
+        query = query.where(Interview.interviewer_user_id == context.user.id)
+    interviews = db.scalars(query).all()
+    return [serialize_interview(interview, db) for interview in interviews]
+
+
+@app.post("/interviews/{interview_id}/scorecard", response_model=InterviewRead)
+async def submit_scorecard(interview_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.internal_interviewer.value)), db: Session = Depends(get_db)) -> InterviewRead:
+    interview = db.get(Interview, interview_id)
+    if interview is None or interview.interviewer_user_id != context.user.id:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    candidate = load_candidate(interview.candidate_id, db)
+    data, files = await request_payload_and_files(request)
+    payload: ScorecardCreate = parse_model(ScorecardCreate, data)
+    document = await save_uploaded_document(db, file=files.get("evaluation_checklist"), project_id=candidate.project_id, document_type="evaluation_checklist", uploaded_by_name=context.user.full_name)
+    scorecard = InterviewScorecard(
+        interview_id=interview.id,
+        interviewer_name=context.user.full_name,
+        score=payload.score,
+        recommendation=payload.recommendation,
+        notes=payload.notes,
+        evaluation_document_id=document.id if document else None,
+    )
+    interview.status = "completed"
+    candidate.status = "evaluation_submitted"
+    db.add(scorecard)
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="scorecard_submitted", details=candidate.full_name)
+    db.commit()
+    db.refresh(interview)
+    return serialize_interview(interview, db)
+
+
+@app.post("/candidates/{candidate_id}/contract", response_model=CandidateRead)
+async def upload_candidate_contract(candidate_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> CandidateRead:
+    candidate = load_candidate(candidate_id, db)
+    data, files = await request_payload_and_files(request)
+    payload: CandidateContractCreate = parse_model(CandidateContractCreate, data)
+    document = await save_uploaded_document(db, file=files.get("signed_contract"), project_id=candidate.project_id, document_type="signed_candidate_contract", uploaded_by_name=context.user.full_name)
+    contract = CandidateContract(
+        candidate_id=candidate.id,
+        contract_document_id=document.id if document else None,
+        invoice_terms=payload.invoice_terms,
+        invoice_amount=payload.invoice_amount,
+        currency=payload.currency.upper() if payload.currency else None,
+        invoice_frequency=payload.invoice_frequency,
+        invoice_start_date=payload.invoice_start_date,
+        invoice_end_date=payload.invoice_end_date,
+        invoice_date=payload.invoice_date,
+        signed_at=utcnow() if document else None,
+        status="signed" if document else "draft",
+    )
+    candidate.status = "hired"
+    db.add(contract)
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_contract_uploaded", details=candidate.full_name)
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
 
 
 @app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 class ProjectCreate(BaseModel):
     client_company_name: str = Field(min_length=2, max_length=255)
+    client_billing_address: str | None = None
     client_contact_name: str = Field(min_length=2, max_length=160)
     client_contact_email: EmailStr
     client_contact_phone: str | None = None
@@ -23,6 +24,7 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
+    client_billing_address: str | None = None
     client_contact_name: str | None = Field(default=None, min_length=2, max_length=160)
     client_contact_email: EmailStr | None = None
     client_contact_phone: str | None = None
@@ -119,6 +121,7 @@ class CandidateContractCreate(BaseModel):
 
 class InvoiceScheduleCreate(BaseModel):
     label: str = Field(min_length=2, max_length=180)
+    item_description: str | None = Field(default=None, min_length=2)
     amount: Decimal = Field(gt=0)
     currency: str = "USD"
     frequency: str = Field(pattern="^(single|monthly|weekly|quarterly)$")
@@ -269,6 +272,7 @@ class InvoiceScheduleRead(BaseModel):
 
     id: int
     label: str
+    item_description: str | None
     amount: Decimal
     currency: str
     frequency: str
@@ -296,6 +300,7 @@ class ClientInvoiceRead(BaseModel):
     invoice_number: str
     issue_date: date
     due_date: date
+    item_description: str | None
     amount: Decimal
     currency: str
     status: str
@@ -316,6 +321,7 @@ class ProjectRead(BaseModel):
     operations_manager_name: str
     status: str
     client_company_name: str
+    client_billing_address: str | None
     client_contact_name: str
     client_contact_email: str
     client_account_executive_id: int | None
@@ -344,6 +350,7 @@ class InvoiceDetailRead(ClientInvoiceRead):
     project_code: str
     project_title: str
     client_company_name: str
+    client_billing_address: str | None
     client_contact_name: str
     client_contact_email: str
     client_account_executive_email: str | None

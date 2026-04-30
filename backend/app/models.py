@@ -68,6 +68,7 @@ class ClientCompany(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     legal_name: Mapped[str | None] = mapped_column(String(255))
+    billing_address: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     contacts: Mapped[list["ClientContact"]] = relationship(back_populates="company")
@@ -184,6 +185,7 @@ class ClientInvoiceSchedule(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("project_sows.id"), nullable=False)
     label: Mapped[str] = mapped_column(String(180), nullable=False)
+    item_description: Mapped[str | None] = mapped_column(Text)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(12), default="USD")
     frequency: Mapped[str] = mapped_column(String(40), nullable=False)
@@ -206,6 +208,7 @@ class ClientInvoice(Base):
     invoice_number: Mapped[str] = mapped_column(String(80), nullable=False)
     issue_date: Mapped[date] = mapped_column(Date, nullable=False)
     due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    item_description: Mapped[str | None] = mapped_column(Text)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(12), default="USD")
     status: Mapped[str] = mapped_column(String(80), default=InvoiceStatus.due_for_client_approval.value)

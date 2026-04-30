@@ -58,6 +58,7 @@ type Project = {
   operations_manager_name: string;
   status: string;
   client_company_name: string;
+  client_billing_address: string | null;
   client_contact_name: string;
   client_contact_email: string;
   client_account_executive_id: number | null;
@@ -104,6 +105,7 @@ type RecruitmentNeedDetail = RecruitmentNeed & {
 type InvoiceSchedule = {
   id: number;
   label: string;
+  item_description: string | null;
   amount: string;
   currency: string;
   frequency: string;
@@ -125,12 +127,14 @@ type ClientInvoice = {
   invoice_number: string;
   issue_date: string;
   due_date: string;
+  item_description: string | null;
   amount: string;
   currency: string;
   status: string;
   project_code?: string;
   project_title?: string;
   client_company_name?: string;
+  client_billing_address?: string | null;
   client_contact_name?: string;
   client_contact_email?: string;
   paid_total?: string;
@@ -1143,6 +1147,10 @@ function App() {
               <PanelTitle icon={<FilePlus2 size={18} />} title="Project And Initial SOW Entry" />
               <div className="grid two">
                 <Field label="Client company" name="client_company_name" required />
+                <label className="field">
+                  <span>Client billing address</span>
+                  <textarea name="client_billing_address" rows={3} />
+                </label>
                 <Field label="Client contact name" name="client_contact_name" required />
                 <Field label="Client contact email" name="client_contact_email" type="email" required />
                 <Field label="Client contact phone" name="client_contact_phone" />
@@ -1189,6 +1197,10 @@ function App() {
               <form className="editStack" key={selectedProject.id} onSubmit={(event) => void submitProjectUpdate(event)}>
                 <div className="grid two">
                   <Field label="Client contact name" name="client_contact_name" defaultValue={selectedProject.client_contact_name} />
+                  <label className="field">
+                    <span>Client billing address</span>
+                    <textarea name="client_billing_address" rows={3} defaultValue={selectedProject.client_billing_address ?? ''} />
+                  </label>
                   <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={selectedProject.client_contact_email} />
                   <Field label="Client contact phone" name="client_contact_phone" />
                   <label className="field">
@@ -1229,6 +1241,7 @@ function App() {
                 <dl className="facts">
                   <div><dt>SOW</dt><dd>{selectedProject.title}</dd></div>
                   <div><dt>Client</dt><dd>{selectedProject.client_company_name}</dd></div>
+                  <div><dt>Billing address</dt><dd>{selectedProject.client_billing_address ?? 'Not entered'}</dd></div>
                   <div><dt>Contact</dt><dd>{selectedProject.client_contact_email}</dd></div>
                   <div><dt>MSA</dt><dd>{selectedProject.msa_reference}</dd></div>
                   <div><dt>Value</dt><dd>{selectedProject.currency} {selectedProject.sow_amount}</dd></div>
@@ -1341,6 +1354,10 @@ function App() {
                   </select>
                 </label>
                 <Field label="Label" name="label" defaultValue="Monthly client billing" required />
+                <label className="field">
+                  <span>Invoice item description</span>
+                  <textarea name="item_description" rows={3} defaultValue="Monthly outcome pod member X 1" required />
+                </label>
                 <Field label="Amount" name="amount" type="number" step="0.01" defaultValue="4000" required />
                 <Field label="Currency" name="currency" defaultValue="USD" required />
                 <label className="field">
@@ -1380,6 +1397,7 @@ function App() {
                   <div><dt>Invoice</dt><dd>{selectedInvoice.invoice_number}</dd></div>
                   <div><dt>Project</dt><dd>{selectedInvoice.project_code}</dd></div>
                   <div><dt>Client</dt><dd>{selectedInvoice.client_company_name}</dd></div>
+                  <div><dt>Item</dt><dd>{selectedInvoice.item_description ?? 'Not entered'}</dd></div>
                   <div><dt>Amount</dt><dd>{selectedInvoice.currency} {selectedInvoice.amount}</dd></div>
                   <div><dt>Status</dt><dd><Status value={selectedInvoice.status} /></dd></div>
                   <div><dt>Paid</dt><dd>{selectedInvoice.currency} {selectedInvoice.paid_total ?? '0.00'}</dd></div>
@@ -1561,6 +1579,7 @@ function ApprovalShell({
               <div><dt>Invoice</dt><dd>{approvalInvoice.invoice_number}</dd></div>
               <div><dt>Status</dt><dd><Status value={approvalInvoice.status} /></dd></div>
               <div><dt>Client</dt><dd>{approvalInvoice.client_company_name}</dd></div>
+              <div><dt>Item</dt><dd>{approvalInvoice.item_description ?? 'Not entered'}</dd></div>
               <div><dt>SOW</dt><dd>{approvalInvoice.project_title}</dd></div>
               <div><dt>Invoice date</dt><dd>{approvalInvoice.issue_date}</dd></div>
               <div><dt>Due date</dt><dd>{approvalInvoice.due_date}</dd></div>
@@ -1622,6 +1641,7 @@ function InvoiceDetail({
         <div><dt>Invoice</dt><dd>{selectedInvoice.invoice_number}</dd></div>
         <div><dt>Project</dt><dd>{selectedInvoice.project_code}</dd></div>
         <div><dt>Client</dt><dd>{selectedInvoice.client_company_name}</dd></div>
+        <div><dt>Item</dt><dd>{selectedInvoice.item_description ?? 'Not entered'}</dd></div>
         <div><dt>Amount</dt><dd>{selectedInvoice.currency} {selectedInvoice.amount}</dd></div>
         <div><dt>Status</dt><dd><Status value={selectedInvoice.status} /></dd></div>
         <div><dt>Paid</dt><dd>{selectedInvoice.currency} {selectedInvoice.paid_total ?? '0.00'}</dd></div>

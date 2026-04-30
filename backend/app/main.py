@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
+import base64
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from html import escape
+from io import BytesIO
 from os import getenv
 from pathlib import Path
+import re
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -17,6 +20,12 @@ from pydantic import ValidationError
 from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.orm import Session, selectinload
 from starlette.middleware.sessions import SessionMiddleware
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .database import Base, SessionLocal, engine, get_db
 from .models import (
@@ -86,10 +95,13 @@ ALLOW_TEST_AUTH = getenv("ALLOW_TEST_AUTH", "false").lower() == "true"
 GOOGLE_CONFIGURED = bool(getenv("GOOGLE_CLIENT_ID") and getenv("GOOGLE_CLIENT_SECRET"))
 UPLOAD_DIR = Path(getenv("UPLOAD_DIR", "uploaded_files"))
 SENDGRID_API_KEY = getenv("SENDGRID_API_KEY", "")
-SENDGRID_FROM_EMAIL = getenv("SENDGRID_FROM_EMAIL", "no-reply@flexgcc.com")
+SENDGRID_FROM_EMAIL = getenv("SENDGRID_FROM_EMAIL", "finance@flexGCC.com")
+SENDGRID_REPLY_TO_EMAIL = getenv("SENDGRID_REPLY_TO_EMAIL", "finance@flexGCC.com")
 SENDGRID_FROM_NAME = getenv("SENDGRID_FROM_NAME", "FlexGCC PBRP")
 FINANCE_MANAGER_EMAIL = getenv("FINANCE_MANAGER_EMAIL", "")
 INVOICE_CRON_TOKEN = getenv("INVOICE_CRON_TOKEN", "")
+INVOICE_SERIAL_START = int(getenv("INVOICE_SERIAL_START", "15"))
+INVOICE_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "invoice_logo.png"
 
 
 @asynccontextmanager
@@ -166,6 +178,15 @@ def ensure_workflow_columns() -> None:
         if "project_sows" in tables:
             existing = {column["name"] for column in inspector.get_columns("project_sows")}
             add_column(conn, "project_sows", existing, "client_account_executive_id", "INTEGER")
+        if "client_companies" in tables:
+            existing = {column["name"] for column in inspector.get_columns("client_companies")}
+            add_column(conn, "client_companies", existing, "billing_address", "TEXT")
+        if "client_invoice_schedules" in tables:
+            existing = {column["name"] for column in inspector.get_columns("client_invoice_schedules")}
+            add_column(conn, "client_invoice_schedules", existing, "item_description", "TEXT")
+        if "client_invoices" in tables:
+            existing = {column["name"] for column in inspector.get_columns("client_invoices")}
+            add_column(conn, "client_invoices", existing, "item_description", "TEXT")
         if "uploaded_documents" in tables:
             existing = {column["name"] for column in inspector.get_columns("uploaded_documents")}
             add_column(conn, "uploaded_documents", existing, "stored_filename", "VARCHAR(255)")
@@ -327,6 +348,17 @@ def project_code(db: Session) -> str:
     return f"PBRP-{year}-{count + 1:04d}"
 
 
+def next_invoice_number(db: Session, invoice_date: date) -> str:
+    prefix = f"{invoice_date.year}/"
+    invoice_numbers = db.scalars(select(ClientInvoice.invoice_number).where(ClientInvoice.invoice_number.like(f"{prefix}%"))).all()
+    max_serial = INVOICE_SERIAL_START - 1
+    for invoice_number in invoice_numbers:
+        match = re.fullmatch(rf"{invoice_date.year}/(\d+)", invoice_number or "")
+        if match:
+            max_serial = max(max_serial, int(match.group(1)))
+    return f"{invoice_date.year}/{max_serial + 1:03d}"
+
+
 def log_event(db: Session, *, project_id: int | None, invoice_id: int | None = None, actor_name: str, action: str, details: str | None = None) -> None:
     db.add(ActivityLog(project_id=project_id, invoice_id=invoice_id, actor_name=actor_name, action=action, details=details))
 
@@ -399,6 +431,7 @@ def serialize_project(project: ProjectSOW) -> ProjectRead:
         operations_manager_name=project.operations_manager_name,
         status=project.status,
         client_company_name=project.company.name,
+        client_billing_address=project.company.billing_address,
         client_contact_name=project.client_contact.full_name,
         client_contact_email=project.client_contact.email,
         client_account_executive_id=project.client_account_executive_id,
@@ -424,6 +457,7 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
         invoice_number=invoice.invoice_number,
         issue_date=invoice.issue_date,
         due_date=invoice.due_date,
+        item_description=invoice.item_description,
         amount=invoice.amount,
         currency=invoice.currency,
         status=invoice.status,
@@ -431,6 +465,7 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
         project_code=invoice.project.project_code,
         project_title=invoice.project.title,
         client_company_name=invoice.project.company.name,
+        client_billing_address=invoice.project.company.billing_address,
         client_contact_name=invoice.project.client_contact.full_name,
         client_contact_email=invoice.project.client_contact.email,
         client_account_executive_email=invoice.project.client_account_executive.email if invoice.project.client_account_executive else None,
@@ -707,7 +742,7 @@ def client_invoice_email_template(invoice: ClientInvoice) -> tuple[str, str, str
     subject = f"Invoice {invoice.invoice_number} from FlexGCC"
     text = "\n".join(
         [
-            f"Please find invoice {invoice.invoice_number} for {invoice.project.company.name}.",
+            f"Please find attached invoice {invoice.invoice_number} for {invoice.project.company.name}.",
             "",
             f"SOW: {invoice.project.title} ({invoice.project.project_code})",
             f"Amount: {invoice.currency} {invoice.amount}",
@@ -719,7 +754,7 @@ def client_invoice_email_template(invoice: ClientInvoice) -> tuple[str, str, str
     )
     html = f"""
     <h2>Invoice {escape(invoice.invoice_number)}</h2>
-    <p>Please process payment as per the agreed terms.</p>
+    <p>Please find the invoice attached as a PDF. Please process payment as per the agreed terms.</p>
     <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Client</strong></td><td>{escape(invoice.project.company.name)}</td></tr>
       <tr><td><strong>SOW</strong></td><td>{escape(invoice.project.title)} ({escape(invoice.project.project_code)})</td></tr>
@@ -729,6 +764,165 @@ def client_invoice_email_template(invoice: ClientInvoice) -> tuple[str, str, str
     </table>
     """
     return subject, text, html
+
+
+def ordinal_day(value: date) -> str:
+    if 11 <= value.day % 100 <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(value.day % 10, "th")
+    return f"{value.day}{suffix} {value.strftime('%b')}, {value.year}"
+
+
+ONES = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+]
+TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+
+def words_under_1000(number: int) -> str:
+    if number < 20:
+        return ONES[number]
+    if number < 100:
+        tens, remainder = divmod(number, 10)
+        return TENS[tens] if remainder == 0 else f"{TENS[tens]}-{ONES[remainder]}"
+    hundreds, remainder = divmod(number, 100)
+    return f"{ONES[hundreds]}-hundred" if remainder == 0 else f"{ONES[hundreds]}-hundred {words_under_1000(remainder)}"
+
+
+def amount_in_words(amount: Decimal) -> str:
+    quantized = amount.quantize(Decimal("0.01"))
+    whole = int(quantized)
+    cents = int((quantized - Decimal(whole)) * 100)
+    if whole == 0:
+        words = "zero"
+    else:
+        parts: list[str] = []
+        millions, remainder = divmod(whole, 1_000_000)
+        thousands, remainder = divmod(remainder, 1000)
+        if millions:
+            parts.append(f"{words_under_1000(millions)}-million")
+        if thousands:
+            parts.append(f"{words_under_1000(thousands)}-thousand")
+        if remainder:
+            parts.append(words_under_1000(remainder))
+        words = " ".join(parts)
+    return f"{words[:1].upper()}{words[1:]} & {cents:02d}/100"
+
+
+def invoice_pdf_bytes(invoice: ClientInvoice) -> bytes:
+    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
+    open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
+    cancelled_amount = open_balance if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value} else Decimal("0.00")
+    net_due = Decimal("0.00") if cancelled_amount else open_balance
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=0.65 * inch,
+        leftMargin=0.65 * inch,
+        topMargin=0.35 * inch,
+        bottomMargin=0.35 * inch,
+    )
+    blue = colors.HexColor("#376092")
+    header_blue = colors.HexColor("#c6d9f1")
+    styles = {
+        "normal": ParagraphStyle("normal", fontName="Helvetica", fontSize=10.5, leading=13, textColor=colors.black),
+        "small": ParagraphStyle("small", fontName="Helvetica", fontSize=9.5, leading=12, textColor=colors.black),
+        "bold": ParagraphStyle("bold", fontName="Helvetica-Bold", fontSize=10.5, leading=13, textColor=colors.black),
+        "company": ParagraphStyle("company", fontName="Helvetica-Bold", fontSize=14, leading=16, textColor=blue),
+        "invoice": ParagraphStyle("invoice", fontName="Helvetica-Bold", fontSize=14, leading=16, textColor=blue, alignment=TA_RIGHT),
+        "center_bold": ParagraphStyle("center_bold", fontName="Helvetica-Bold", fontSize=11, leading=14, alignment=TA_CENTER),
+        "right_bold": ParagraphStyle("right_bold", fontName="Helvetica-Bold", fontSize=10, leading=13, alignment=TA_RIGHT),
+        "right": ParagraphStyle("right", fontName="Helvetica", fontSize=10, leading=13, alignment=TA_RIGHT),
+    }
+    logo = Image(str(INVOICE_LOGO_PATH), width=0.62 * inch, height=0.62 * inch) if INVOICE_LOGO_PATH.exists() else Paragraph("", styles["normal"])
+    header = Table(
+        [
+            [Paragraph("", styles["normal"]), logo],
+            [Paragraph("<b>FlexGCC, LLC</b>", styles["company"]), Paragraph("<b>INVOICE</b>", styles["invoice"])],
+        ],
+        colWidths=[5.7 * inch, 1.25 * inch],
+    )
+    header.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("ALIGN", (1, 0), (1, 0), "CENTER")]))
+    billing_lines = [escape(line) for line in (invoice.project.company.billing_address or "Billing address not entered").splitlines() if line.strip()]
+    client_block = "<br/>".join([f"<b>{escape(invoice.project.company.name)}</b>", *billing_lines, f"<b>Contact:</b> {escape(invoice.project.client_contact.full_name)}"])
+    description = invoice.item_description or (invoice.schedule.item_description if invoice.schedule else None) or (invoice.schedule.label if invoice.schedule else invoice.project.title)
+    money = f"${net_due:,.0f}" if invoice.currency.upper() == "USD" else f"{escape(invoice.currency)} {net_due:,.2f}"
+    line_total = f"${invoice.amount:,.0f}" if invoice.currency.upper() == "USD" else f"{escape(invoice.currency)} {invoice.amount:,.2f}"
+    story = [
+        header,
+        Spacer(1, 0.08 * inch),
+        Paragraph("2412 Irwin Street, Suite 386,<br/>Melbourne, FL 32901", styles["normal"]),
+        Spacer(1, 0.15 * inch),
+        Paragraph("Phone:  +1 650 302 4988", styles["normal"]),
+        Spacer(1, 0.12 * inch),
+        Paragraph("Email:  contact@outcomepods.com", styles["normal"]),
+        Spacer(1, 0.16 * inch),
+        Paragraph(f"<b>Invoice #:</b> <font color='red'>{escape(invoice.invoice_number)}</font>", styles["normal"]),
+        Paragraph(f"<b>Date:</b> {ordinal_day(invoice.issue_date)}", styles["normal"]),
+        Spacer(1, 0.16 * inch),
+        Paragraph(client_block, styles["normal"]),
+        Spacer(1, 0.18 * inch),
+    ]
+    item_table = Table(
+        [
+            [Paragraph("<b>Description</b>", styles["bold"]), Paragraph("<b>Line Total</b>", styles["bold"])],
+            [Paragraph(f"<b>{escape(description)}</b>", styles["bold"]), Paragraph(line_total, styles["normal"])],
+            [Paragraph("<b>Net Due:</b>", styles["right_bold"]), Paragraph(f"<b>{money}</b>", styles["bold"])],
+        ],
+        colWidths=[5.75 * inch, 1.05 * inch],
+        rowHeights=[0.42 * inch, 0.55 * inch, 0.36 * inch],
+    )
+    item_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), header_blue),
+                ("GRID", (0, 0), (-1, -1), 0.7, colors.HexColor("#a6a6a6")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("ALIGN", (1, 1), (1, -1), "LEFT"),
+            ]
+        )
+    )
+    story.extend(
+        [
+            item_table,
+            Spacer(1, 0.18 * inch),
+            Paragraph(f"<b>US Dollars: {amount_in_words(net_due)}</b>", styles["bold"]),
+            Spacer(1, 0.14 * inch),
+            Paragraph("<b>Payment due: Within 7 days of this Invoice</b>", styles["bold"]),
+            Spacer(1, 0.16 * inch),
+            Paragraph("<b>Account information for Electronic Transfers:</b>", styles["bold"]),
+            Paragraph("&#9642;&nbsp;&nbsp; Company name: FlexGCC, LLC<br/>&#9642;&nbsp;&nbsp; Bank name: Bank of America<br/>&#9642;&nbsp;&nbsp; Account Number: 898160948065<br/>&#9642;&nbsp;&nbsp; Routing Numbers:<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;o&nbsp;&nbsp; ABA: 063000047 (paper and electronic)<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;o&nbsp;&nbsp; 026009593 (wires)<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;o&nbsp;&nbsp; SWIFT Code for US Dollars: BOFAUS3N", styles["small"]),
+            Spacer(1, 0.3 * inch),
+            Paragraph("<b>Thank you for your business!</b>", styles["center_bold"]),
+            Spacer(1, 0.42 * inch),
+            Paragraph("FlexGCC Private and Confidential", ParagraphStyle("footer", parent=styles["small"], alignment=TA_CENTER)),
+        ]
+    )
+    doc.build(story)
+    return buffer.getvalue()
 
 
 def invoice_download_html(invoice: ClientInvoice) -> str:
@@ -768,7 +962,15 @@ def invoice_download_html(invoice: ClientInvoice) -> str:
 </html>"""
 
 
-def send_sendgrid_email(*, to_email: str, cc_emails: list[str], subject: str, text: str, html: str) -> tuple[str, str | None]:
+def send_sendgrid_email(
+    *,
+    to_email: str,
+    cc_emails: list[str],
+    subject: str,
+    text: str,
+    html: str,
+    attachments: list[dict[str, str]] | None = None,
+) -> tuple[str, str | None]:
     if not SENDGRID_API_KEY:
         return "not_configured", None
     personalizations: dict[str, object] = {"to": [{"email": to_email}]}
@@ -777,12 +979,15 @@ def send_sendgrid_email(*, to_email: str, cc_emails: list[str], subject: str, te
     payload = {
         "personalizations": [personalizations],
         "from": {"email": SENDGRID_FROM_EMAIL, "name": SENDGRID_FROM_NAME},
+        "reply_to": {"email": SENDGRID_REPLY_TO_EMAIL},
         "subject": subject,
         "content": [
             {"type": "text/plain", "value": text},
             {"type": "text/html", "value": html},
         ],
     }
+    if attachments:
+        payload["attachments"] = attachments
     response = httpx.post(
         "https://api.sendgrid.com/v3/mail/send",
         headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
@@ -852,9 +1057,10 @@ def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
                 invoice = ClientInvoice(
                     schedule_id=schedule.id,
                     project_id=schedule.project_id,
-                    invoice_number=f"INV-{schedule.project_id:04d}-{schedule.id:04d}-{candidate_date.strftime('%Y%m%d')}",
+                    invoice_number=next_invoice_number(db, candidate_date),
                     issue_date=candidate_date,
                     due_date=candidate_date + timedelta(days=7),
+                    item_description=schedule.item_description or schedule.label,
                     amount=schedule.amount,
                     currency=schedule.currency,
                     status=InvoiceStatus.due_for_client_approval.value,
@@ -1055,6 +1261,8 @@ async def create_project(request: Request, _: AuthContext = Depends(require_role
         company = ClientCompany(name=payload.client_company_name)
         db.add(company)
         db.flush()
+    if payload.client_billing_address is not None:
+        company.billing_address = payload.client_billing_address
 
     contact = ClientContact(
         company_id=company.id,
@@ -1157,6 +1365,8 @@ async def update_project(project_id: int, request: Request, _: AuthContext = Dep
     if payload.client_account_executive_id is not None:
         validate_client_account_executive(db, payload.client_account_executive_id)
         project.client_account_executive_id = payload.client_account_executive_id
+    if payload.client_billing_address is not None:
+        project.company.billing_address = payload.client_billing_address
     if payload.client_contact_name is not None:
         project.client_contact.full_name = payload.client_contact_name
     if payload.client_contact_email is not None:
@@ -1439,6 +1649,8 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: Aut
         payload.final_invoice_date = None
     if payload.final_invoice_date and payload.final_invoice_date < payload.first_invoice_date:
         raise HTTPException(status_code=400, detail="Final invoice date cannot be earlier than first invoice date")
+    if not payload.item_description:
+        payload.item_description = payload.label
     schedule = ClientInvoiceSchedule(project_id=project_id, **payload.model_dump())
     db.add(schedule)
     db.flush()
@@ -1530,16 +1742,18 @@ def download_invoice(invoice_id: int, context: AuthContext = Depends(require_log
         .options(
             selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
             selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.schedule),
             selectinload(ClientInvoice.payments),
         )
     )
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
     authorize_invoice_visibility(invoice, context)
+    filename = invoice.invoice_number.replace("/", "-")
     return Response(
-        content=invoice_download_html(invoice),
-        media_type="text/html",
-        headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_number}.html"'},
+        content=invoice_pdf_bytes(invoice),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.pdf"'},
     )
 
 
@@ -1581,6 +1795,8 @@ def send_invoice(invoice_id: int, payload: SendInvoiceCreate, _: AuthContext = D
             selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
             selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
             selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoice.schedule),
+            selectinload(ClientInvoice.payments),
         )
     )
     if invoice is None:
@@ -1595,7 +1811,23 @@ def send_invoice(invoice_id: int, payload: SendInvoiceCreate, _: AuthContext = D
         cc_emails.append(str(payload.cc_email))
     cc_emails = sorted(set(email for email in cc_emails if email and email != recipient))
     subject, text, html = client_invoice_email_template(invoice)
-    status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text, html=html)
+    pdf = invoice_pdf_bytes(invoice)
+    filename = invoice.invoice_number.replace("/", "-")
+    status, detail = send_sendgrid_email(
+        to_email=recipient,
+        cc_emails=cc_emails,
+        subject=subject,
+        text=text,
+        html=html,
+        attachments=[
+            {
+                "content": base64.b64encode(pdf).decode("ascii"),
+                "filename": f"{filename}.pdf",
+                "type": "application/pdf",
+                "disposition": "attachment",
+            }
+        ],
+    )
     invoice.status = InvoiceStatus.sent_to_client.value
     invoice.sent_at = utcnow()
     db.add(

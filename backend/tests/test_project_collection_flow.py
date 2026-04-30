@@ -4,6 +4,7 @@ import os
 os.environ["ALLOW_TEST_AUTH"] = "true"
 
 from app.database import Base, engine
+from app import main as app_main
 from app.main import app
 from app.models import EmailNotification
 from app.database import SessionLocal
@@ -20,6 +21,7 @@ INTERVIEWER_HEADERS = {"x-test-email": "interviewer@example.com", "x-test-role":
 
 PROJECT_PAYLOAD = {
     "client_company_name": "Acme Operations",
+    "client_billing_address": "2385 NW Executive Center Drive, Suite 240\nBoca Raton, FL 33431",
     "client_contact_name": "Anita Shah",
     "client_contact_email": "anita@example.com",
     "client_contact_phone": "+1-555-0101",
@@ -63,6 +65,7 @@ def test_project_to_client_collection_flow():
         assert project_response.status_code == 201, project_response.text
         project = project_response.json()
         assert project["client_account_executive_email"] == "cae@example.com"
+        assert "Boca Raton" in project["client_billing_address"]
 
         need_response = client.post(
             f"/projects/{project['id']}/recruitment-needs",
@@ -83,6 +86,7 @@ def test_project_to_client_collection_flow():
             headers=OPS_HEADERS,
             json={
                 "label": "Monthly client billing",
+                "item_description": "Monthly outcome pod member X 1",
                 "amount": "4000.00",
                 "currency": "USD",
                 "frequency": "monthly",
@@ -103,6 +107,8 @@ def test_project_to_client_collection_flow():
         invoices = invoices_response.json()
         assert len(invoices) >= 1
         invoice_id = invoices[0]["id"]
+        assert invoices[0]["invoice_number"] == "2026/015"
+        assert invoices[0]["item_description"] == "Monthly outcome pod member X 1"
 
         with SessionLocal() as db:
             notification = db.query(EmailNotification).filter(EmailNotification.invoice_id == invoice_id).one()
@@ -141,7 +147,8 @@ def test_project_to_client_collection_flow():
 
         download_response = client.get(f"/client-invoices/{invoice_id}/download", headers=FINANCE_HEADERS)
         assert download_response.status_code == 200, download_response.text
-        assert "FlexGCC Invoice" in download_response.text
+        assert download_response.headers["content-type"] == "application/pdf"
+        assert download_response.content.startswith(b"%PDF")
 
         payment_response = client.post(
             f"/client-invoices/{invoice_id}/payments",
@@ -253,6 +260,7 @@ def test_finance_can_cancel_unpaid_invoice():
             headers=OPS_HEADERS,
             json={
                 "label": "Single billing",
+                "item_description": "Fixed client recruitment fee",
                 "amount": "4000.00",
                 "currency": "USD",
                 "frequency": "single",
@@ -290,6 +298,7 @@ def test_partially_paid_invoice_cancels_only_unpaid_remainder():
             headers=OPS_HEADERS,
             json={
                 "label": "Partial billing",
+                "item_description": "Partial billing line item",
                 "amount": "4000.00",
                 "currency": "USD",
                 "frequency": "single",
@@ -353,6 +362,7 @@ def test_due_or_past_invoice_schedule_generates_approval_email_immediately():
             headers=OPS_HEADERS,
             json={
                 "label": "Immediate billing",
+                "item_description": "Immediate billing line item",
                 "amount": "4000.00",
                 "currency": "USD",
                 "frequency": "single",
@@ -399,6 +409,7 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
                 headers=OPS_HEADERS,
                 json={
                     "label": "Single billing",
+                    "item_description": f"Single billing for {project['project_code']}",
                     "amount": "4000.00",
                     "currency": "USD",
                     "frequency": "single",
@@ -611,3 +622,47 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         candidates_response = client.get("/recruitment/candidates", headers=HR_HEADERS)
         assert candidates_response.status_code == 200, candidates_response.text
         assert candidates_response.json()[0]["interviews"][0]["recommendation"] == "hire"
+
+
+def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 202
+        text = ""
+        headers = {"X-Message-Id": "message-123"}
+
+    def fake_post(url, *, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(app_main, "SENDGRID_API_KEY", "test-key")
+    monkeypatch.setattr(app_main, "SENDGRID_FROM_EMAIL", "finance@flexGCC.com")
+    monkeypatch.setattr(app_main, "SENDGRID_REPLY_TO_EMAIL", "finance@flexGCC.com")
+    monkeypatch.setattr(app_main.httpx, "post", fake_post)
+
+    status, detail = app_main.send_sendgrid_email(
+        to_email="client@example.com",
+        cc_emails=["finance@example.com"],
+        subject="Invoice 2026/015 from FlexGCC",
+        text="Invoice attached.",
+        html="<p>Invoice attached.</p>",
+        attachments=[
+            {
+                "content": "JVBERi0xLjQ=",
+                "filename": "2026-015.pdf",
+                "type": "application/pdf",
+                "disposition": "attachment",
+            }
+        ],
+    )
+
+    assert status == "sent"
+    assert detail == "message-123"
+    assert captured["json"]["from"]["email"] == "finance@flexGCC.com"
+    assert captured["json"]["reply_to"]["email"] == "finance@flexGCC.com"
+    assert captured["json"]["attachments"][0]["filename"] == "2026-015.pdf"
+    assert captured["json"]["attachments"][0]["type"] == "application/pdf"

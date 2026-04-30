@@ -46,7 +46,9 @@ services:
       - key: SENDGRID_API_KEY
         sync: false
       - key: SENDGRID_FROM_EMAIL
-        value: no-reply@flexgcc.com
+        value: finance@flexGCC.com
+      - key: SENDGRID_REPLY_TO_EMAIL
+        value: finance@flexGCC.com
       - key: SENDGRID_FROM_NAME
         value: FlexGCC PBRP
       - key: FINANCE_MANAGER_EMAIL

@@ -16,3 +16,5 @@ coverage/
 .playwright/
 test-results/
 backend/uploaded_files/
+output/
+tmp/

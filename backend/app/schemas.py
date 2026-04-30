@@ -9,11 +9,37 @@ class ProjectCreate(BaseModel):
     client_contact_name: str = Field(min_length=2, max_length=160)
     client_contact_email: EmailStr
     client_contact_phone: str | None = None
+    client_account_executive_id: int
     msa_reference: str = Field(min_length=2, max_length=120)
     msa_document_name: str | None = None
     sow_title: str = Field(min_length=2, max_length=255)
     sow_description: str | None = None
     sow_document_name: str | None = None
+    sow_amount: Decimal = Field(ge=0)
+    currency: str = "USD"
+    start_date: date
+    end_date: date | None = None
+    operations_manager_name: str = Field(min_length=2, max_length=160)
+
+
+class ProjectUpdate(BaseModel):
+    client_contact_name: str | None = Field(default=None, min_length=2, max_length=160)
+    client_contact_email: EmailStr | None = None
+    client_contact_phone: str | None = None
+    client_account_executive_id: int | None = None
+    msa_reference: str | None = Field(default=None, min_length=2, max_length=120)
+    sow_title: str | None = Field(default=None, min_length=2, max_length=255)
+    sow_description: str | None = None
+    sow_amount: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    operations_manager_name: str | None = Field(default=None, min_length=2, max_length=160)
+
+
+class SOWCreate(BaseModel):
+    sow_title: str = Field(min_length=2, max_length=255)
+    sow_description: str | None = None
     sow_amount: Decimal = Field(ge=0)
     currency: str = "USD"
     start_date: date
@@ -114,6 +140,16 @@ class InvoiceScheduleRead(BaseModel):
     status: str
 
 
+class DocumentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    document_type: str
+    original_filename: str
+    content_type: str | None
+    file_size: int | None
+
+
 class ClientInvoiceRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -145,7 +181,11 @@ class ProjectRead(BaseModel):
     client_company_name: str
     client_contact_name: str
     client_contact_email: str
+    client_account_executive_id: int | None
+    client_account_executive_name: str | None
+    client_account_executive_email: str | None
     msa_reference: str | None
+    documents: list[DocumentRead] = Field(default_factory=list)
     recruitment_needs: list[RecruitmentNeedRead] = Field(default_factory=list)
     invoice_schedules: list[InvoiceScheduleRead] = Field(default_factory=list)
     client_invoices: list[ClientInvoiceRead] = Field(default_factory=list)
@@ -169,6 +209,7 @@ class InvoiceDetailRead(ClientInvoiceRead):
     client_company_name: str
     client_contact_name: str
     client_contact_email: str
+    client_account_executive_email: str | None
     payments: list[PaymentRead] = Field(default_factory=list)
     paid_total: Decimal
     balance_due: Decimal

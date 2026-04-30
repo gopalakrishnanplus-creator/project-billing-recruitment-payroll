@@ -7,6 +7,7 @@ import {
   ClipboardList,
   FileCheck2,
   FilePlus2,
+  Pencil,
   LogOut,
   RefreshCw,
   Send,
@@ -33,6 +34,7 @@ type Project = {
   id: number;
   project_code: string;
   title: string;
+  description: string | null;
   sow_amount: string;
   currency: string;
   start_date: string;
@@ -42,7 +44,11 @@ type Project = {
   client_company_name: string;
   client_contact_name: string;
   client_contact_email: string;
+  client_account_executive_id: number | null;
+  client_account_executive_name: string | null;
+  client_account_executive_email: string | null;
   msa_reference: string | null;
+  documents: UploadedDocument[];
   recruitment_needs: RecruitmentNeed[];
   invoice_schedules: InvoiceSchedule[];
   client_invoices: ClientInvoice[];
@@ -64,6 +70,14 @@ type InvoiceSchedule = {
   frequency: string;
   first_invoice_date: string;
   final_invoice_date: string | null;
+};
+
+type UploadedDocument = {
+  id: number;
+  document_type: string;
+  original_filename: string;
+  content_type: string | null;
+  file_size: number | null;
 };
 
 type ClientInvoice = {
@@ -104,11 +118,12 @@ type AppUser = {
 type Notice = { tone: 'ok' | 'error'; message: string } | null;
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const isFormData = options.body instanceof FormData;
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: 'include',
     headers: {
-      'Content-Type': 'application/json',
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
       ...(options.headers ?? {}),
     },
   });
@@ -134,10 +149,13 @@ function roleLabel(role: string): string {
 function App() {
   const [me, setMe] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<AppUser[]>([]);
+  const [clientAccountExecutives, setClientAccountExecutives] = useState<AppUser[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
+  const [editingProject, setEditingProject] = useState(false);
+  const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
   const [notice, setNotice] = useState<Notice>(null);
   const [loading, setLoading] = useState(false);
 
@@ -173,6 +191,9 @@ function App() {
       ]);
       setProjects(projectData);
       setInvoices(invoiceData);
+      if (current.active_role === 'operations_manager') {
+        setClientAccountExecutives(await api<AppUser[]>('/users/by-role/client_account_executive'));
+      }
       if (!selectedProjectId && projectData[0]) setSelectedProjectId(projectData[0].id);
       if (!selectedInvoiceId && invoiceData[0]) setSelectedInvoiceId(invoiceData[0].id);
     } catch (error) {
@@ -235,20 +256,53 @@ function App() {
     setProjects([]);
     setInvoices([]);
     setUsers([]);
+    setClientAccountExecutives([]);
   }
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
-    const payload = formPayload(formElement);
+    const payload = new FormData(formElement);
     await mutate(async () => {
       const project = await api<Project>('/projects', {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: payload,
       });
       setSelectedProjectId(project.id);
       formElement.reset();
       return `Created ${project.project_code}`;
+    });
+  }
+
+  async function submitProjectUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedProject) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      const project = await api<Project>(`/projects/${selectedProject.id}`, {
+        method: 'PUT',
+        body: payload,
+      });
+      setSelectedProjectId(project.id);
+      setEditingProject(false);
+      return `Updated ${project.project_code}`;
+    });
+  }
+
+  async function submitAdditionalSow(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedProject) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      const project = await api<Project>(`/projects/${selectedProject.id}/sows`, {
+        method: 'POST',
+        body: payload,
+      });
+      setSelectedProjectId(project.id);
+      formElement.reset();
+      return `Added ${project.project_code}`;
     });
   }
 
@@ -301,16 +355,6 @@ function App() {
       return 'User saved';
     });
     await refreshUsers();
-  }
-
-  async function generateInvoices() {
-    await mutate(async () => {
-      const result = await api<{ generated_count: number; invoices: ClientInvoice[] }>(`/invoices/generate?as_of=${today()}`, {
-        method: 'POST',
-      });
-      if (result.invoices[0]) setSelectedInvoiceId(result.invoices[0].id);
-      return `${result.generated_count} invoice${result.generated_count === 1 ? '' : 's'} generated`;
-    });
   }
 
   async function invoiceAction(path: string, body: Record<string, unknown>, message: string) {
@@ -434,16 +478,25 @@ function App() {
         <section className="workspace">
           {canOperate && (
             <form className="panel wide" onSubmit={(event) => void submitProject(event)}>
-              <PanelTitle icon={<FilePlus2 size={18} />} title="Project Entry" />
+              <PanelTitle icon={<FilePlus2 size={18} />} title="Project And Initial SOW Entry" />
               <div className="grid two">
                 <Field label="Client company" name="client_company_name" required />
                 <Field label="Client contact name" name="client_contact_name" required />
                 <Field label="Client contact email" name="client_contact_email" type="email" required />
                 <Field label="Client contact phone" name="client_contact_phone" />
+                <label className="field">
+                  <span>Client Account Executive</span>
+                  <select name="client_account_executive_id" required defaultValue="">
+                    <option value="" disabled>Select Client Account Executive</option>
+                    {clientAccountExecutives.map((user) => (
+                      <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
+                    ))}
+                  </select>
+                </label>
                 <Field label="MSA reference" name="msa_reference" required />
-                <Field label="MSA file name" name="msa_document_name" placeholder="master-services.pdf" />
+                <Field label="MSA upload" name="msa_document" type="file" />
                 <Field label="SOW title" name="sow_title" required />
-                <Field label="SOW file name" name="sow_document_name" placeholder="signed-sow.pdf" />
+                <Field label="SOW upload" name="sow_document" type="file" />
                 <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue="12000" required />
                 <Field label="Currency" name="currency" defaultValue="USD" required />
                 <Field label="Start date" name="start_date" type="date" defaultValue={today()} required />
@@ -462,23 +515,40 @@ function App() {
           )}
 
           <section className="panel">
-            <PanelTitle icon={<ClipboardList size={18} />} title="Project Register" />
+            <PanelTitle icon={<ClipboardList size={18} />} title="SOW Register" />
             <select value={selectedProject?.id ?? ''} onChange={(event) => setSelectedProjectId(Number(event.target.value))}>
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>
-                  {project.project_code} · {project.client_company_name}
+                  {project.project_code} · {project.client_company_name} · {project.title}
                 </option>
               ))}
             </select>
             {selectedProject ? (
-              <dl className="facts">
-                <div><dt>Project</dt><dd>{selectedProject.title}</dd></div>
-                <div><dt>Client</dt><dd>{selectedProject.client_company_name}</dd></div>
-                <div><dt>Contact</dt><dd>{selectedProject.client_contact_email}</dd></div>
-                <div><dt>SOW</dt><dd>{selectedProject.currency} {selectedProject.sow_amount}</dd></div>
-                <div><dt>Needs</dt><dd>{selectedProject.recruitment_needs.length}</dd></div>
-                <div><dt>Schedules</dt><dd>{selectedProject.invoice_schedules.length}</dd></div>
-              </dl>
+              <>
+                <dl className="facts">
+                  <div><dt>SOW</dt><dd>{selectedProject.title}</dd></div>
+                  <div><dt>Client</dt><dd>{selectedProject.client_company_name}</dd></div>
+                  <div><dt>Contact</dt><dd>{selectedProject.client_contact_email}</dd></div>
+                  <div><dt>MSA</dt><dd>{selectedProject.msa_reference}</dd></div>
+                  <div><dt>Value</dt><dd>{selectedProject.currency} {selectedProject.sow_amount}</dd></div>
+                  <div><dt>Client Account Executive</dt><dd>{selectedProject.client_account_executive_name ?? 'Not assigned'}</dd></div>
+                  <div><dt>Needs</dt><dd>{selectedProject.recruitment_needs.length}</dd></div>
+                  <div><dt>Schedules</dt><dd>{selectedProject.invoice_schedules.length}</dd></div>
+                </dl>
+                {selectedProject.documents.length > 0 && (
+                  <div className="documentList">
+                    {selectedProject.documents.map((document) => (
+                      <span className="status" key={document.id}>{document.document_type.toUpperCase()}: {document.original_filename}</span>
+                    ))}
+                  </div>
+                )}
+                {canOperate && (
+                  <button className="secondary" onClick={() => setEditingProject((value) => !value)}>
+                    <Pencil size={18} />
+                    <span>{editingProject ? 'Close Edit' : 'Edit Selected SOW'}</span>
+                  </button>
+                )}
+              </>
             ) : (
               <p className="empty">No projects yet.</p>
             )}
@@ -486,8 +556,73 @@ function App() {
 
           {canOperate && (
             <>
+              {editingProject && selectedProject && (
+                <form className="panel wide" onSubmit={(event) => void submitProjectUpdate(event)}>
+                  <PanelTitle icon={<Pencil size={18} />} title="Edit Selected SOW" />
+                  <div className="grid two">
+                    <Field label="Client contact name" name="client_contact_name" defaultValue={selectedProject.client_contact_name} />
+                    <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={selectedProject.client_contact_email} />
+                    <Field label="Client contact phone" name="client_contact_phone" />
+                    <label className="field">
+                      <span>Client Account Executive</span>
+                      <select name="client_account_executive_id" defaultValue={selectedProject.client_account_executive_id ?? ''}>
+                        <option value="" disabled>Select Client Account Executive</option>
+                        {clientAccountExecutives.map((user) => (
+                          <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <Field label="MSA reference" name="msa_reference" defaultValue={selectedProject.msa_reference ?? ''} />
+                    <Field label="MSA upload" name="msa_document" type="file" />
+                    <Field label="SOW title" name="sow_title" defaultValue={selectedProject.title} />
+                    <Field label="SOW upload" name="sow_document" type="file" />
+                    <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue={selectedProject.sow_amount} />
+                    <Field label="Currency" name="currency" defaultValue={selectedProject.currency} />
+                    <Field label="Start date" name="start_date" type="date" defaultValue={selectedProject.start_date} />
+                    <Field label="End date" name="end_date" type="date" defaultValue={selectedProject.end_date ?? ''} />
+                    <Field label="Operations manager" name="operations_manager_name" defaultValue={selectedProject.operations_manager_name} />
+                  </div>
+                  <label className="field full">
+                    <span>SOW description</span>
+                    <textarea name="sow_description" rows={3} defaultValue={selectedProject.description ?? ''} />
+                  </label>
+                  <button className="primary" disabled={loading}>
+                    <FileCheck2 size={18} />
+                    <span>Save Changes</span>
+                  </button>
+                </form>
+              )}
+
+              <form className="panel" onSubmit={(event) => void submitAdditionalSow(event)}>
+                <PanelTitle icon={<FilePlus2 size={18} />} title="Add SOW To Selected MSA" />
+                <p className="contextLine">{selectedProject ? `${selectedProject.client_company_name} · ${selectedProject.msa_reference}` : 'Select an existing SOW first'}</p>
+                <Field label="SOW title" name="sow_title" required />
+                <Field label="SOW upload" name="sow_document" type="file" />
+                <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue="5000" required />
+                <Field label="Currency" name="currency" defaultValue={selectedProject?.currency ?? 'USD'} required />
+                <Field label="Start date" name="start_date" type="date" defaultValue={today()} required />
+                <Field label="End date" name="end_date" type="date" />
+                <Field label="Operations manager" name="operations_manager_name" defaultValue={me.full_name ?? 'Operations Manager'} required />
+                <label className="field">
+                  <span>SOW description</span>
+                  <textarea name="sow_description" rows={3} />
+                </label>
+                <button className="secondary" disabled={!selectedProject || loading}>
+                  <FilePlus2 size={18} />
+                  <span>Add SOW</span>
+                </button>
+              </form>
+
               <form className="panel" onSubmit={(event) => void submitNeed(event)}>
                 <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Need" />
+                <label className="field">
+                  <span>SOW</span>
+                  <select value={selectedProject?.id ?? ''} onChange={(event) => setSelectedProjectId(Number(event.target.value))}>
+                    {projects.map((project) => (
+                      <option key={project.id} value={project.id}>{project.project_code} · {project.title}</option>
+                    ))}
+                  </select>
+                </label>
                 <Field label="Position" name="position_title" required />
                 <Field label="Number" name="number_of_positions" type="number" defaultValue="1" required />
                 <label className="field">
@@ -512,20 +647,28 @@ function App() {
 
               <form className="panel" onSubmit={(event) => void submitSchedule(event)}>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Client Invoice Schedule" />
+                <label className="field">
+                  <span>SOW</span>
+                  <select value={selectedProject?.id ?? ''} onChange={(event) => setSelectedProjectId(Number(event.target.value))}>
+                    {projects.map((project) => (
+                      <option key={project.id} value={project.id}>{project.project_code} · {project.title}</option>
+                    ))}
+                  </select>
+                </label>
                 <Field label="Label" name="label" defaultValue="Monthly client billing" required />
                 <Field label="Amount" name="amount" type="number" step="0.01" defaultValue="4000" required />
                 <Field label="Currency" name="currency" defaultValue="USD" required />
                 <label className="field">
                   <span>Frequency</span>
-                  <select name="frequency" defaultValue="monthly">
+                  <select name="frequency" value={scheduleFrequency} onChange={(event) => setScheduleFrequency(event.target.value)}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
                 </label>
-                <Field label="First invoice date" name="first_invoice_date" type="date" defaultValue={today()} required />
-                <Field label="Final invoice date" name="final_invoice_date" type="date" />
+                <Field label={scheduleFrequency === 'single' ? 'Invoice date' : 'First invoice date'} name="first_invoice_date" type="date" defaultValue={today()} required />
+                {scheduleFrequency !== 'single' && <Field label="Final invoice date" name="final_invoice_date" type="date" />}
                 <button className="secondary" disabled={!selectedProject || loading}>
                   <CalendarPlus size={18} />
                   <span>Add Schedule</span>
@@ -534,15 +677,10 @@ function App() {
             </>
           )}
 
+          {!canOperate && (
           <section className="panel wide">
             <PanelTitle icon={<FileCheck2 size={18} />} title="Client Invoices" />
             <div className="toolbar">
-              {canOperate && (
-                <button className="primary" onClick={() => void generateInvoices()} disabled={loading}>
-                  <FilePlus2 size={18} />
-                  <span>Generate Due</span>
-                </button>
-              )}
               <select value={selectedInvoice?.id ?? ''} onChange={(event) => setSelectedInvoiceId(Number(event.target.value))}>
                 {invoices.map((invoice) => (
                   <option key={invoice.id} value={invoice.id}>
@@ -598,6 +736,7 @@ function App() {
               <p className="empty">No invoices yet.</p>
             )}
           </section>
+          )}
 
           {canFinance && (
             <form

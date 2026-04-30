@@ -286,6 +286,19 @@ dd {
   margin: 0;
 }
 
+.contextLine {
+  margin: 0;
+  color: #526071;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.documentList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .authGate {
   width: min(520px, calc(100% - 32px));
   margin: 64px auto;

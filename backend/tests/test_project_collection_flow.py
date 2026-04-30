@@ -5,6 +5,8 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 
 from app.database import Base, engine
 from app.main import app
+from app.models import EmailNotification
+from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
 
@@ -19,6 +21,7 @@ PROJECT_PAYLOAD = {
     "client_contact_name": "Anita Shah",
     "client_contact_email": "anita@example.com",
     "client_contact_phone": "+1-555-0101",
+    "client_account_executive_id": 0,
     "msa_reference": "MSA-ACME-2026",
     "msa_document_name": "acme-msa.pdf",
     "sow_title": "Plant recruitment sprint",
@@ -32,18 +35,32 @@ PROJECT_PAYLOAD = {
 }
 
 
+def provision_user(client: TestClient, *, full_name: str, email: str, roles: list[str]) -> dict:
+    response = client.post(
+        "/users",
+        headers=ADMIN_HEADERS,
+        json={"full_name": full_name, "email": email, "is_active": True, "roles": roles},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def test_project_to_client_collection_flow():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
     with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
         project_response = client.post(
             "/projects",
             headers=OPS_HEADERS,
-            json=PROJECT_PAYLOAD,
+            json=payload,
         )
         assert project_response.status_code == 201, project_response.text
         project = project_response.json()
+        assert project["client_account_executive_email"] == "cae@example.com"
 
         need_response = client.post(
             f"/projects/{project['id']}/recruitment-needs",
@@ -73,11 +90,22 @@ def test_project_to_client_collection_flow():
         )
         assert schedule_response.status_code == 201, schedule_response.text
 
-        generated_response = client.post("/invoices/generate?as_of=2026-04-29", headers=OPS_HEADERS)
+        ops_generate_response = client.post("/invoices/generate?as_of=2026-04-29", headers=OPS_HEADERS)
+        assert ops_generate_response.status_code == 403
+
+        generated_response = client.post("/invoices/generate?as_of=2026-04-29", headers=ADMIN_HEADERS)
         assert generated_response.status_code == 200, generated_response.text
-        generated = generated_response.json()
-        assert generated["generated_count"] >= 1
-        invoice_id = generated["invoices"][0]["id"]
+
+        invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        assert invoices_response.status_code == 200, invoices_response.text
+        invoices = invoices_response.json()
+        assert len(invoices) >= 1
+        invoice_id = invoices[0]["id"]
+
+        with SessionLocal() as db:
+            notification = db.query(EmailNotification).filter(EmailNotification.invoice_id == invoice_id).one()
+            assert notification.recipient_email == "cae@example.com"
+            assert notification.cc_email == "finance@example.com"
 
         client_account_response = client.post(
             f"/client-invoices/{invoice_id}/client-account-approval",
@@ -123,10 +151,12 @@ def test_role_separated_permissions_and_admin_user_provisioning():
     Base.metadata.create_all(bind=engine)
 
     with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
         unauthenticated_response = client.get("/projects")
         assert unauthenticated_response.status_code == 401
 
-        finance_project_response = client.post("/projects", headers=FINANCE_HEADERS, json=PROJECT_PAYLOAD)
+        finance_project_response = client.post("/projects", headers=FINANCE_HEADERS, json=payload)
         assert finance_project_response.status_code == 403
 
         admin_user_response = client.post(
@@ -141,3 +171,48 @@ def test_role_separated_permissions_and_admin_user_provisioning():
         )
         assert admin_user_response.status_code == 200, admin_user_response.text
         assert admin_user_response.json()["roles"] == ["finance_manager", "operations_manager"]
+
+
+def test_project_file_upload_update_and_additional_sow():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": str(cae_user["id"])}
+        response = client.post(
+            "/projects",
+            headers=OPS_HEADERS,
+            data=payload,
+            files={
+                "msa_document": ("msa.pdf", b"msa", "application/pdf"),
+                "sow_document": ("sow.pdf", b"sow", "application/pdf"),
+            },
+        )
+        assert response.status_code == 201, response.text
+        project = response.json()
+        assert sorted(document["document_type"] for document in project["documents"]) == ["msa", "sow"]
+
+        update_response = client.put(
+            f"/projects/{project['id']}",
+            headers=OPS_HEADERS,
+            data={"sow_title": "Updated SOW", "sow_amount": "15000.00"},
+        )
+        assert update_response.status_code == 200, update_response.text
+        assert update_response.json()["title"] == "Updated SOW"
+        assert update_response.json()["sow_amount"] == "15000.00"
+
+        sow_response = client.post(
+            f"/projects/{project['id']}/sows",
+            headers=OPS_HEADERS,
+            data={
+                "sow_title": "Second SOW",
+                "sow_amount": "5000.00",
+                "currency": "USD",
+                "start_date": "2026-05-01",
+                "operations_manager_name": "Ops Manager",
+            },
+            files={"sow_document": ("second-sow.pdf", b"sow2", "application/pdf")},
+        )
+        assert sow_response.status_code == 201, sow_response.text
+        assert sow_response.json()["msa_reference"] == PROJECT_PAYLOAD["msa_reference"]

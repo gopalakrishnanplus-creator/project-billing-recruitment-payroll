@@ -110,6 +110,7 @@ class ProjectSOW(Base):
     company_id: Mapped[int] = mapped_column(ForeignKey("client_companies.id"), nullable=False)
     client_contact_id: Mapped[int] = mapped_column(ForeignKey("client_contacts.id"), nullable=False)
     msa_id: Mapped[int | None] = mapped_column(ForeignKey("master_service_agreements.id"))
+    client_account_executive_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"))
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     sow_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"))
@@ -122,10 +123,12 @@ class ProjectSOW(Base):
 
     company: Mapped[ClientCompany] = relationship()
     client_contact: Mapped[ClientContact] = relationship()
+    client_account_executive: Mapped[AppUser | None] = relationship()
     msa: Mapped[MasterServiceAgreement] = relationship(back_populates="projects")
     recruitment_needs: Mapped[list["RecruitmentNeed"]] = relationship(back_populates="project")
     invoice_schedules: Mapped[list["ClientInvoiceSchedule"]] = relationship(back_populates="project")
     client_invoices: Mapped[list["ClientInvoice"]] = relationship(back_populates="project")
+    documents: Mapped[list["UploadedDocument"]] = relationship(back_populates="project")
 
 
 class UploadedDocument(Base):
@@ -136,8 +139,13 @@ class UploadedDocument(Base):
     document_type: Mapped[str] = mapped_column(String(80), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_uri: Mapped[str | None] = mapped_column(String(500))
+    stored_filename: Mapped[str | None] = mapped_column(String(255))
+    content_type: Mapped[str | None] = mapped_column(String(120))
+    file_size: Mapped[int | None] = mapped_column()
     uploaded_by_name: Mapped[str | None] = mapped_column(String(160))
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    project: Mapped[ProjectSOW | None] = relationship(back_populates="documents")
 
 
 class RecruitmentNeed(Base):
@@ -352,6 +360,7 @@ class EmailNotification(Base):
     project_id: Mapped[int | None] = mapped_column(ForeignKey("project_sows.id"))
     invoice_id: Mapped[int | None] = mapped_column(ForeignKey("client_invoices.id"))
     recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    cc_email: Mapped[str | None] = mapped_column(Text)
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(80), default="queued")

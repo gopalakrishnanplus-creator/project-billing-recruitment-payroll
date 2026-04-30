@@ -150,8 +150,11 @@ def ensure_workflow_columns() -> None:
                 conn.execute(text("ALTER TABLE uploaded_documents ADD COLUMN stored_filename VARCHAR(255)"))
             if "content_type" not in existing:
                 conn.execute(text("ALTER TABLE uploaded_documents ADD COLUMN content_type VARCHAR(120)"))
-            if "file_size" not in existing:
-                conn.execute(text("ALTER TABLE uploaded_documents ADD COLUMN file_size INTEGER"))
+        if "file_size" not in existing:
+            conn.execute(text("ALTER TABLE uploaded_documents ADD COLUMN file_size INTEGER"))
+        if "content_bytes" not in existing:
+            column_type = "BYTEA" if engine.dialect.name == "postgresql" else "BLOB"
+            conn.execute(text(f"ALTER TABLE uploaded_documents ADD COLUMN content_bytes {column_type}"))
         if "email_notifications" in tables:
             existing = {column["name"] for column in inspector.get_columns("email_notifications")}
             if "cc_email" not in existing:
@@ -321,6 +324,7 @@ async def save_uploaded_document(
         stored_filename=stored_filename,
         content_type=file.content_type,
         file_size=len(content),
+        content_bytes=content,
         uploaded_by_name=uploaded_by_name,
     )
     db.add(document)

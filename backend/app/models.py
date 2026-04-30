@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, LargeBinary, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -142,6 +142,7 @@ class UploadedDocument(Base):
     stored_filename: Mapped[str | None] = mapped_column(String(255))
     content_type: Mapped[str | None] = mapped_column(String(120))
     file_size: Mapped[int | None] = mapped_column()
+    content_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
     uploaded_by_name: Mapped[str | None] = mapped_column(String(160))
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

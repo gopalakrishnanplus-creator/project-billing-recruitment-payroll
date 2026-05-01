@@ -212,6 +212,15 @@ type AppUser = {
 
 type Notice = { tone: 'ok' | 'error'; message: string } | null;
 
+const ANONYMOUS_USER: CurrentUser = {
+  authenticated: false,
+  id: null,
+  full_name: null,
+  email: null,
+  roles: [],
+  active_role: null,
+};
+
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const isFormData = options.body instanceof FormData;
   const response = await fetch(`${API_BASE}${path}`, {
@@ -374,6 +383,7 @@ function App() {
         await refreshData(current);
       }
     } catch (error) {
+      setMe(ANONYMOUS_USER);
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to load app state' });
     } finally {
       setLoading(false);
@@ -707,7 +717,17 @@ function App() {
 
   if (me === null) {
     if (approvalInvoiceId) return <ApprovalShell loading={loading} notice={notice} />;
-    return <ShellHeader loading={loading} onRefresh={() => void refreshAll()} />;
+    return (
+      <main>
+        <ShellHeader loading={loading} onRefresh={() => void refreshAll()} />
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Checking Login</h2>
+          <p>Confirming whether a valid Google session is available.</p>
+        </section>
+      </main>
+    );
   }
 
   if (approvalInvoiceId) {

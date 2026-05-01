@@ -564,6 +564,9 @@ def test_recruitment_flow_from_position_to_hired_candidate():
             assert notification.recipient_email == "hr@example.com"
             assert notification.cc_email == "ops@example.com"
             assert "New recruitment position" in notification.subject
+            assert f"view=recruitment" in notification.body
+            assert f"need_id={need['id']}" in notification.body
+            assert "Recruitment Analyst" in notification.body
 
         update_response = client.put(
             f"/recruitment-needs/{need['id']}",

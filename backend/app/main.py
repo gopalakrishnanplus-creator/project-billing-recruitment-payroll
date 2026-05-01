@@ -694,7 +694,7 @@ def finance_manager_emails(db: Session) -> list[str]:
 
 
 def recruitment_need_email_template(project: ProjectSOW, need: RecruitmentNeed) -> tuple[str, str, str]:
-    recruitment_link = f"{FRONTEND_URL}/"
+    recruitment_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'need_id': need.id})}"
     subject = f"New recruitment position: {need.position_title}"
     text = "\n".join(
         [
@@ -705,6 +705,9 @@ def recruitment_need_email_template(project: ProjectSOW, need: RecruitmentNeed) 
             f"Position: {need.position_title}",
             f"Number of hires: {need.number_of_positions}",
             f"Type: {need.employment_type}",
+            f"Billing: {need.position_billing_type or 'not set'} / {need.billing_frequency or 'not set'}",
+            f"Target start: {need.target_start_date or 'not set'}",
+            f"Description: {need.description}",
             "",
             f"Log in to work on this position: {recruitment_link}",
         ]
@@ -718,6 +721,9 @@ def recruitment_need_email_template(project: ProjectSOW, need: RecruitmentNeed) 
       <tr><td><strong>Position</strong></td><td>{escape(need.position_title)}</td></tr>
       <tr><td><strong>Number of hires</strong></td><td>{need.number_of_positions}</td></tr>
       <tr><td><strong>Type</strong></td><td>{escape(need.employment_type)}</td></tr>
+      <tr><td><strong>Billing</strong></td><td>{escape(need.position_billing_type or 'not set')} / {escape(need.billing_frequency or 'not set')}</td></tr>
+      <tr><td><strong>Target start</strong></td><td>{escape(str(need.target_start_date or 'not set'))}</td></tr>
+      <tr><td><strong>Description</strong></td><td>{escape(need.description)}</td></tr>
     </table>
     <p><a href="{escape(recruitment_link)}">Log in to work on this position</a></p>
     """

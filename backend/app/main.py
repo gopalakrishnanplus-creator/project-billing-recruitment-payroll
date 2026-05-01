@@ -83,6 +83,7 @@ from .schemas import (
     InterviewCreate,
     InterviewRead,
     SOWCreate,
+    UpcomingInvoiceRead,
 )
 
 
@@ -477,6 +478,24 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
     )
 
 
+def serialize_upcoming_invoice(schedule: ClientInvoiceSchedule, next_invoice_date: date) -> UpcomingInvoiceRead:
+    return UpcomingInvoiceRead(
+        schedule_id=schedule.id,
+        project_id=schedule.project_id,
+        project_code=schedule.project.project_code,
+        project_title=schedule.project.title,
+        client_company_name=schedule.project.company.name,
+        client_account_executive_email=schedule.project.client_account_executive.email if schedule.project.client_account_executive else None,
+        label=schedule.label,
+        item_description=schedule.item_description,
+        amount=schedule.amount,
+        currency=schedule.currency,
+        frequency=schedule.frequency,
+        next_invoice_date=next_invoice_date,
+        final_invoice_date=schedule.final_invoice_date,
+    )
+
+
 def authorize_invoice_visibility(invoice: ClientInvoice, context: AuthContext) -> None:
     if (
         context.active_role == UserRole.client_account_executive.value
@@ -519,6 +538,20 @@ def next_date(current: date, frequency: str) -> date:
     if frequency == "monthly":
         return add_months(current, 1)
     return current
+
+
+def next_unraised_invoice_date(schedule: ClientInvoiceSchedule) -> date | None:
+    issued_dates = {invoice.issue_date for invoice in schedule.invoices}
+    candidate_date = schedule.first_invoice_date
+    for _ in range(600):
+        if schedule.final_invoice_date and candidate_date > schedule.final_invoice_date:
+            return None
+        if candidate_date not in issued_dates:
+            return candidate_date
+        if schedule.frequency == "single":
+            return None
+        candidate_date = next_date(candidate_date, schedule.frequency)
+    return None
 
 
 def add_months(value: date, months: int) -> date:
@@ -1713,6 +1746,46 @@ def list_invoices(
         )
     ).all()
     return [serialize_invoice(invoice) for invoice in invoices]
+
+
+@app.get("/upcoming-invoices", response_model=list[UpcomingInvoiceRead])
+def list_upcoming_invoices(
+    context: AuthContext = Depends(require_login),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[UpcomingInvoiceRead]:
+    query = select(ClientInvoiceSchedule).where(ClientInvoiceSchedule.status == "active")
+    if context.active_role == UserRole.client_account_executive.value:
+        query = query.join(ProjectSOW, ProjectSOW.id == ClientInvoiceSchedule.project_id).where(ProjectSOW.client_account_executive_id == context.user.id)
+
+    schedules = db.scalars(
+        query.options(
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoiceSchedule.invoices),
+        )
+    ).all()
+
+    upcoming_by_project: dict[int, UpcomingInvoiceRead] = {}
+    for schedule in schedules:
+        next_invoice_date = next_unraised_invoice_date(schedule)
+        if next_invoice_date is None:
+            continue
+        if date_from and next_invoice_date < date_from:
+            continue
+        if date_to and next_invoice_date > date_to:
+            continue
+        upcoming = serialize_upcoming_invoice(schedule, next_invoice_date)
+        existing = upcoming_by_project.get(schedule.project_id)
+        if existing is None or (upcoming.next_invoice_date, upcoming.schedule_id) < (existing.next_invoice_date, existing.schedule_id):
+            upcoming_by_project[schedule.project_id] = upcoming
+
+    upcoming_invoices = sorted(upcoming_by_project.values(), key=lambda invoice: (invoice.next_invoice_date, invoice.project_code, invoice.schedule_id))
+    start = (page - 1) * page_size
+    return upcoming_invoices[start:start + page_size]
 
 @app.get("/client-invoices/{invoice_id}", response_model=InvoiceDetailRead)
 def get_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:

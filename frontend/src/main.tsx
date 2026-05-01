@@ -45,6 +45,7 @@ const INVOICE_STATUSES = [
   'paid',
   'cancelled',
 ];
+const UPCOMING_INVOICES_FILTER = 'upcoming_invoices';
 
 type Project = {
   id: number;
@@ -141,6 +142,22 @@ type ClientInvoice = {
   paid_total?: string;
   cancelled_amount?: string;
   balance_due?: string;
+};
+
+type UpcomingInvoice = {
+  schedule_id: number;
+  project_id: number;
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  client_account_executive_email: string | null;
+  label: string;
+  item_description: string | null;
+  amount: string;
+  currency: string;
+  frequency: string;
+  next_invoice_date: string;
+  final_invoice_date: string | null;
 };
 
 type Interview = {
@@ -261,6 +278,7 @@ function App() {
   const [internalInterviewers, setInternalInterviewers] = useState<AppUser[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
+  const [upcomingInvoices, setUpcomingInvoices] = useState<UpcomingInvoice[]>([]);
   const [approvalInvoice, setApprovalInvoice] = useState<ClientInvoice | null>(null);
   const [recruitmentNeeds, setRecruitmentNeeds] = useState<RecruitmentNeedDetail[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -316,6 +334,8 @@ function App() {
   const canClientApprove = activeRole === 'client_account_executive';
   const canViewWorkflow = Boolean(activeRole && activeRole !== 'system_admin');
   const canRecruitment = Boolean(activeRole && ['operations_manager', 'hr_manager', 'internal_interviewer', 'system_admin'].includes(activeRole));
+  const showingUpcomingInvoices = invoiceStatusFilter === UPCOMING_INVOICES_FILTER;
+  const invoiceListCount = showingUpcomingInvoices ? upcomingInvoices.length : invoices.length;
   const invoicePageSize = 20;
 
   async function refreshMe() {
@@ -329,15 +349,24 @@ function App() {
     setLoading(true);
     try {
       const invoiceParams = new URLSearchParams({ page: String(pageOverride), page_size: String(invoicePageSize) });
-      if (invoiceStatusFilter) invoiceParams.set('status', invoiceStatusFilter);
+      if (invoiceStatusFilter && !showingUpcomingInvoices) invoiceParams.set('status', invoiceStatusFilter);
       if (invoiceDateFrom) invoiceParams.set('date_from', invoiceDateFrom);
       if (invoiceDateTo) invoiceParams.set('date_to', invoiceDateTo);
+      const invoiceRequest = showingUpcomingInvoices
+        ? api<UpcomingInvoice[]>(`/upcoming-invoices?${invoiceParams.toString()}`)
+        : api<ClientInvoice[]>(`/client-invoices?${invoiceParams.toString()}`);
       const [projectData, invoiceData] = await Promise.all([
         api<Project[]>('/projects'),
-        api<ClientInvoice[]>(`/client-invoices?${invoiceParams.toString()}`),
+        invoiceRequest,
       ]);
       setProjects(projectData);
-      setInvoices(invoiceData);
+      if (showingUpcomingInvoices) {
+        setUpcomingInvoices(invoiceData as UpcomingInvoice[]);
+        setInvoices([]);
+      } else {
+        setInvoices(invoiceData as ClientInvoice[]);
+        setUpcomingInvoices([]);
+      }
       if (current.active_role === 'operations_manager') {
         setClientAccountExecutives(await api<AppUser[]>('/users/by-role/client_account_executive'));
       }
@@ -360,7 +389,7 @@ function App() {
         setInternalInterviewers(await api<AppUser[]>('/users/by-role/internal_interviewer'));
       }
       if (!selectedProjectId && projectData[0]) setSelectedProjectId(projectData[0].id);
-      if (!selectedInvoiceId && invoiceData[0]) setSelectedInvoiceId(invoiceData[0].id);
+      if (!showingUpcomingInvoices && !selectedInvoiceId && invoiceData[0]) setSelectedInvoiceId((invoiceData[0] as ClientInvoice).id);
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to load data' });
     } finally {
@@ -443,11 +472,12 @@ function App() {
     setProjects([]);
     setInvoices([]);
     setUsers([]);
-    setClientAccountExecutives([]);
-    setInternalInterviewers([]);
-    setRecruitmentNeeds([]);
-    setCandidates([]);
-    setInterviews([]);
+      setClientAccountExecutives([]);
+      setInternalInterviewers([]);
+      setRecruitmentNeeds([]);
+      setCandidates([]);
+      setInterviews([]);
+      setUpcomingInvoices([]);
   }
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
@@ -1120,6 +1150,7 @@ function App() {
                 <span>Status</span>
                 <select value={invoiceStatusFilter} onChange={(event) => setInvoiceStatusFilter(event.target.value)}>
                   <option value="">All statuses</option>
+                  <option value={UPCOMING_INVOICES_FILTER}>Upcoming invoices</option>
                   {INVOICE_STATUSES.map((status) => (
                     <option key={status} value={status}>{status.replaceAll('_', ' ')}</option>
                   ))}
@@ -1135,28 +1166,56 @@ function App() {
             <div className="toolbar">
               <button className="secondary" type="button" disabled={invoicePage <= 1 || loading} onClick={() => setInvoicePage((page) => Math.max(1, page - 1))}>Previous</button>
               <span className="status">Page {invoicePage}</span>
-              <button className="secondary" type="button" disabled={invoices.length < invoicePageSize || loading} onClick={() => setInvoicePage((page) => page + 1)}>Next</button>
+              <button className="secondary" type="button" disabled={invoiceListCount < invoicePageSize || loading} onClick={() => setInvoicePage((page) => page + 1)}>Next</button>
             </div>
           </form>
 
           <section className="panel wide">
-            <PanelTitle icon={<FileCheck2 size={18} />} title="Invoice Register" />
-            <select value={selectedInvoice?.id ?? ''} onChange={(event) => setSelectedInvoiceId(Number(event.target.value))}>
-              {invoices.map((invoice) => (
-                <option key={invoice.id} value={invoice.id}>
-                  {invoice.issue_date} · {invoice.invoice_number} · {invoice.status}
-                </option>
-              ))}
-            </select>
-            <InvoiceDetail
-              selectedInvoice={selectedInvoice}
-              loading={loading}
-              canClientApprove={canClientApprove}
-              canFinance={canFinance}
-              downloadInvoice={downloadInvoice}
-              invoiceAction={invoiceAction}
-              currentUserName={me.full_name}
-            />
+            {showingUpcomingInvoices ? (
+              <>
+                <PanelTitle icon={<CalendarPlus size={18} />} title="Upcoming Invoice Schedule" />
+                {upcomingInvoices.length > 0 ? (
+                  <div className="userList">
+                    {upcomingInvoices.map((invoice) => (
+                      <div className="userRow" key={invoice.schedule_id}>
+                        <div>
+                          <strong>{invoice.next_invoice_date} · {invoice.currency} {invoice.amount}</strong>
+                          <span>{invoice.project_code} · {invoice.client_company_name} · {invoice.project_title}</span>
+                          <span>{invoice.item_description ?? invoice.label}</span>
+                        </div>
+                        <div className="rolePills">
+                          <span className="status">{invoice.frequency.replaceAll('_', ' ')}</span>
+                          {invoice.final_invoice_date && <span className="status">Until {invoice.final_invoice_date}</span>}
+                          {invoice.client_account_executive_email && <span className="status">{invoice.client_account_executive_email}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty">No upcoming scheduled invoices match the filters.</p>
+                )}
+              </>
+            ) : (
+              <>
+                <PanelTitle icon={<FileCheck2 size={18} />} title="Invoice Register" />
+                <select value={selectedInvoice?.id ?? ''} onChange={(event) => setSelectedInvoiceId(Number(event.target.value))}>
+                  {invoices.map((invoice) => (
+                    <option key={invoice.id} value={invoice.id}>
+                      {invoice.issue_date} · {invoice.invoice_number} · {invoice.status}
+                    </option>
+                  ))}
+                </select>
+                <InvoiceDetail
+                  selectedInvoice={selectedInvoice}
+                  loading={loading}
+                  canClientApprove={canClientApprove}
+                  canFinance={canFinance}
+                  downloadInvoice={downloadInvoice}
+                  invoiceAction={invoiceAction}
+                  currentUserName={me.full_name}
+                />
+              </>
+            )}
           </section>
         </section>
       )}

@@ -407,6 +407,8 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
         provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
         yesterday = date.today() - timedelta(days=1)
         today_value = date.today()
+        future_one = today_value + timedelta(days=10)
+        future_two = today_value + timedelta(days=20)
 
         payload_one = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_one["id"], "client_company_name": "Acme One", "start_date": str(yesterday)}
         payload_two = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_two["id"], "client_company_name": "Acme Two", "start_date": str(today_value)}
@@ -431,6 +433,21 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
                 },
             )
             assert response.status_code == 201, response.text
+        for project, invoice_date, amount in ((project_one, future_one, "5100.00"), (project_two, future_two, "6200.00")):
+            response = client.post(
+                f"/projects/{project['id']}/invoice-schedules",
+                headers=OPS_HEADERS,
+                json={
+                    "label": "Upcoming monthly billing",
+                    "item_description": f"Upcoming monthly billing for {project['project_code']}",
+                    "amount": amount,
+                    "currency": "USD",
+                    "frequency": "monthly",
+                    "first_invoice_date": str(invoice_date),
+                    "final_invoice_date": str(invoice_date + timedelta(days=90)),
+                },
+            )
+            assert response.status_code == 201, response.text
 
         finance_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
         ops_response = client.get("/client-invoices", headers=OPS_HEADERS)
@@ -451,6 +468,20 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
         assert len(cae_one_invoices) == 1
         assert cae_one_invoices[0]["client_company_name"] == "Acme One"
         assert cae_one_invoices[0]["status"] == "due_for_client_approval"
+
+        finance_upcoming = client.get("/upcoming-invoices", headers=FINANCE_HEADERS)
+        cae_one_upcoming = client.get("/upcoming-invoices", headers=cae_one_headers)
+        assert finance_upcoming.status_code == 200, finance_upcoming.text
+        assert cae_one_upcoming.status_code == 200, cae_one_upcoming.text
+        assert [invoice["next_invoice_date"] for invoice in finance_upcoming.json()] == [str(future_one), str(future_two)]
+        assert finance_upcoming.json()[0]["amount"] == "5100.00"
+        assert len(cae_one_upcoming.json()) == 1
+        assert cae_one_upcoming.json()[0]["client_company_name"] == "Acme One"
+
+        upcoming_date_filtered = client.get(f"/upcoming-invoices?date_from={future_two}&date_to={future_two}", headers=FINANCE_HEADERS)
+        assert upcoming_date_filtered.status_code == 200, upcoming_date_filtered.text
+        assert len(upcoming_date_filtered.json()) == 1
+        assert upcoming_date_filtered.json()[0]["next_invoice_date"] == str(future_two)
 
         cae_one_invoice_id = cae_one_invoices[0]["id"]
         cae_two_invoice_id = next(invoice["id"] for invoice in finance_invoices if invoice["client_company_name"] == "Acme Two")

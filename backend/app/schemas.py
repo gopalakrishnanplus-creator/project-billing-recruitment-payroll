@@ -362,6 +362,22 @@ class InvoiceDetailRead(ClientInvoiceRead):
     balance_due: Decimal
 
 
+class UpcomingInvoiceRead(BaseModel):
+    schedule_id: int
+    project_id: int
+    project_code: str
+    project_title: str
+    client_company_name: str
+    client_account_executive_email: str | None
+    label: str
+    item_description: str | None
+    amount: Decimal
+    currency: str
+    frequency: str
+    next_invoice_date: date
+    final_invoice_date: date | None
+
+
 class GenerateInvoicesResult(BaseModel):
     generated_count: int
     invoices: list[ClientInvoiceRead]

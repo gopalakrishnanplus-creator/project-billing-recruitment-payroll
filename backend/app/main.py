@@ -1214,7 +1214,7 @@ def upsert_user(payload: AppUserUpsert, context: AuthContext = Depends(require_r
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "database": engine.url.get_backend_name(), "database_name": str(engine.url.database or "")}
 
 
 @app.get("/schema/overview")

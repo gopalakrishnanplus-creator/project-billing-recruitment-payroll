@@ -222,11 +222,25 @@ def test_project_file_upload_update_and_additional_sow():
         update_response = client.put(
             f"/projects/{project['id']}",
             headers=OPS_HEADERS,
-            data={"sow_title": "Updated SOW", "sow_amount": "15000.00"},
+            data={
+                "client_company_name": "Updated Client Company",
+                "client_billing_address": "10 Updated Street\nMelbourne, FL 32901",
+                "client_contact_name": "Updated Contact",
+                "client_contact_email": "updated-contact@example.com",
+                "client_contact_phone": "+1-555-9999",
+                "sow_title": "Updated SOW",
+                "sow_amount": "15000.00",
+            },
         )
         assert update_response.status_code == 200, update_response.text
-        assert update_response.json()["title"] == "Updated SOW"
-        assert update_response.json()["sow_amount"] == "15000.00"
+        updated_project = update_response.json()
+        assert updated_project["client_company_name"] == "Updated Client Company"
+        assert "Updated Street" in updated_project["client_billing_address"]
+        assert updated_project["client_contact_name"] == "Updated Contact"
+        assert updated_project["client_contact_email"] == "updated-contact@example.com"
+        assert updated_project["client_contact_phone"] == "+1-555-9999"
+        assert updated_project["title"] == "Updated SOW"
+        assert updated_project["sow_amount"] == "15000.00"
 
         sow_response = client.post(
             f"/projects/{project['id']}/sows",

@@ -61,6 +61,7 @@ type Project = {
   client_billing_address: string | null;
   client_contact_name: string;
   client_contact_email: string;
+  client_contact_phone: string | null;
   client_account_executive_id: number | null;
   client_account_executive_name: string | null;
   client_account_executive_email: string | null;
@@ -1205,7 +1206,7 @@ function App() {
           )}
 
           <section className="panel">
-            <PanelTitle icon={<ClipboardList size={18} />} title="SOW Register" />
+            <PanelTitle icon={<ClipboardList size={18} />} title="Project And SOW Register" />
             <select value={selectedProject?.id ?? ''} onChange={(event) => setSelectedProjectId(Number(event.target.value))}>
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>
@@ -1215,14 +1216,16 @@ function App() {
             </select>
             {selectedProject && editingProject ? (
               <form className="editStack" key={selectedProject.id} onSubmit={(event) => void submitProjectUpdate(event)}>
+                <PanelTitle icon={<Pencil size={18} />} title="Edit Project Details" />
                 <div className="grid two">
+                  <Field label="Client company" name="client_company_name" defaultValue={selectedProject.client_company_name} />
                   <Field label="Client contact name" name="client_contact_name" defaultValue={selectedProject.client_contact_name} />
                   <label className="field">
                     <span>Client billing address</span>
                     <textarea name="client_billing_address" rows={3} defaultValue={selectedProject.client_billing_address ?? ''} />
                   </label>
                   <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={selectedProject.client_contact_email} />
-                  <Field label="Client contact phone" name="client_contact_phone" />
+                  <Field label="Client contact phone" name="client_contact_phone" defaultValue={selectedProject.client_contact_phone ?? ''} />
                   <label className="field">
                     <span>Client Account Executive</span>
                     <select name="client_account_executive_id" defaultValue={selectedProject.client_account_executive_id ?? ''}>
@@ -1262,7 +1265,9 @@ function App() {
                   <div><dt>SOW</dt><dd>{selectedProject.title}</dd></div>
                   <div><dt>Client</dt><dd>{selectedProject.client_company_name}</dd></div>
                   <div><dt>Billing address</dt><dd>{selectedProject.client_billing_address ?? 'Not entered'}</dd></div>
-                  <div><dt>Contact</dt><dd>{selectedProject.client_contact_email}</dd></div>
+                  <div><dt>Contact name</dt><dd>{selectedProject.client_contact_name}</dd></div>
+                  <div><dt>Contact email</dt><dd>{selectedProject.client_contact_email}</dd></div>
+                  <div><dt>Contact phone</dt><dd>{selectedProject.client_contact_phone ?? 'Not entered'}</dd></div>
                   <div><dt>MSA</dt><dd>{selectedProject.msa_reference}</dd></div>
                   <div><dt>Value</dt><dd>{selectedProject.currency} {selectedProject.sow_amount}</dd></div>
                   <div><dt>Client Account Executive</dt><dd>{selectedProject.client_account_executive_name ?? 'Not assigned'}</dd></div>
@@ -1279,7 +1284,7 @@ function App() {
                 {canOperate && (
                   <button className="secondary" type="button" onClick={() => setEditingProject(true)}>
                     <Pencil size={18} />
-                    <span>Edit Selected SOW</span>
+                    <span>Edit Project Details</span>
                   </button>
                 )}
               </>

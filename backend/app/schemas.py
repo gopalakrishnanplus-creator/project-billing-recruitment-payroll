@@ -24,6 +24,7 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
+    client_company_name: str | None = Field(default=None, min_length=2, max_length=255)
     client_billing_address: str | None = None
     client_contact_name: str | None = Field(default=None, min_length=2, max_length=160)
     client_contact_email: EmailStr | None = None
@@ -324,6 +325,7 @@ class ProjectRead(BaseModel):
     client_billing_address: str | None
     client_contact_name: str
     client_contact_email: str
+    client_contact_phone: str | None
     client_account_executive_id: int | None
     client_account_executive_name: str | None
     client_account_executive_email: str | None

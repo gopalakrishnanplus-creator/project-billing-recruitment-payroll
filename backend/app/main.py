@@ -434,6 +434,7 @@ def serialize_project(project: ProjectSOW) -> ProjectRead:
         client_billing_address=project.company.billing_address,
         client_contact_name=project.client_contact.full_name,
         client_contact_email=project.client_contact.email,
+        client_contact_phone=project.client_contact.phone,
         client_account_executive_id=project.client_account_executive_id,
         client_account_executive_name=project.client_account_executive.full_name if project.client_account_executive else None,
         client_account_executive_email=project.client_account_executive.email if project.client_account_executive else None,
@@ -1362,6 +1363,8 @@ async def update_project(project_id: int, request: Request, _: AuthContext = Dep
     project = load_project_for_read(project_id, db)
     data, files = await request_payload_and_files(request)
     payload: ProjectUpdate = parse_model(ProjectUpdate, data)
+    if payload.client_company_name is not None:
+        project.company.name = payload.client_company_name
     if payload.client_account_executive_id is not None:
         validate_client_account_executive(db, payload.client_account_executive_id)
         project.client_account_executive_id = payload.client_account_executive_id

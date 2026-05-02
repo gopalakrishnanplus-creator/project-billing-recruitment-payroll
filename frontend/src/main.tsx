@@ -253,9 +253,37 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail ?? `Request failed with ${response.status}`);
+    throw new Error(formatApiErrorDetail(body.detail ?? `Request failed with ${response.status}`));
   }
   return response.json() as Promise<T>;
+}
+
+function formatApiErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string') {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === 'object') {
+          const record = item as { loc?: unknown; msg?: unknown; detail?: unknown };
+          const location = Array.isArray(record.loc) ? record.loc.join('.') : '';
+          const message =
+            typeof record.msg === 'string'
+              ? record.msg
+              : typeof record.detail === 'string'
+                ? record.detail
+                : JSON.stringify(record);
+          return location ? `${location}: ${message}` : message;
+        }
+        return String(item);
+      })
+      .join('; ');
+  }
+  if (detail && typeof detail === 'object') {
+    return JSON.stringify(detail);
+  }
+  return 'Request failed';
 }
 
 function today(): string {
@@ -961,7 +989,7 @@ function App() {
               </div>
               <label className="field full">
                 <span>Description</span>
-                <textarea name="description" rows={4} required />
+                <textarea name="description" rows={4} required minLength={5} />
               </label>
               <label className="checkField">
                 <input name="historical_completed" type="checkbox" />
@@ -1059,7 +1087,7 @@ function App() {
               <Field label="Internal interviewers" name="internal_interviewers" defaultValue={selectedNeed.internal_interviewers ?? ''} />
               <label className="field">
                 <span>Description</span>
-                <textarea name="description" rows={4} defaultValue={selectedNeed.description} />
+                <textarea name="description" rows={4} defaultValue={selectedNeed.description} minLength={5} />
               </label>
               <div className="toolbar">
                 <button className="primary" disabled={loading}>
@@ -1565,7 +1593,7 @@ function App() {
                 <Field label="Detailed position upload" name="detail_document" type="file" />
                 <label className="field">
                   <span>Description</span>
-                  <textarea name="description" rows={4} required />
+                  <textarea name="description" rows={4} required minLength={5} />
                 </label>
                 <button className="secondary" disabled={!selectedProject || loading}>
                   <BadgeCheck size={18} />

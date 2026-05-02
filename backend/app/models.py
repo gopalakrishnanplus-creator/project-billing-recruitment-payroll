@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Date, DateTime, ForeignKey, LargeBinary, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, LargeBinary, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -191,6 +191,8 @@ class ClientInvoiceSchedule(Base):
     frequency: Mapped[str] = mapped_column(String(40), nullable=False)
     first_invoice_date: Mapped[date] = mapped_column(Date, nullable=False)
     final_invoice_date: Mapped[date | None] = mapped_column(Date)
+    historical_backfill: Mapped[bool] = mapped_column(Boolean, default=False)
+    next_invoice_generation_date: Mapped[date | None] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(60), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

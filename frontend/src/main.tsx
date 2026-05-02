@@ -113,6 +113,8 @@ type InvoiceSchedule = {
   frequency: string;
   first_invoice_date: string;
   final_invoice_date: string | null;
+  historical_backfill: boolean;
+  next_invoice_generation_date: string | null;
 };
 
 type UploadedDocument = {
@@ -304,6 +306,7 @@ function App() {
   const [selectedInterviewId, setSelectedInterviewId] = useState<number | null>(null);
   const [editingProject, setEditingProject] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
+  const [scheduleBackfill, setScheduleBackfill] = useState(false);
   const [needBillingType, setNeedBillingType] = useState('periodic');
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment'>(requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : 'workflow');
@@ -693,12 +696,14 @@ function App() {
     if (!selectedProject) return;
     const formElement = event.currentTarget;
     const payload = formPayload(formElement);
+    payload.historical_backfill = scheduleBackfill ? 'true' : 'false';
     await mutate(async () => {
       await api<InvoiceSchedule>(`/projects/${selectedProject.id}/invoice-schedules`, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
       formElement.reset();
+      setScheduleBackfill(false);
       return 'Invoice schedule added';
     });
   }
@@ -1594,8 +1599,13 @@ function App() {
                     <option value="quarterly">Quarterly</option>
                   </select>
                 </label>
-                <Field label={scheduleFrequency === 'single' ? 'Invoice date' : 'First invoice date'} name="first_invoice_date" type="date" defaultValue={today()} required />
+                <Field label={scheduleBackfill ? 'Original first invoice date' : scheduleFrequency === 'single' ? 'Invoice date' : 'First invoice date'} name="first_invoice_date" type="date" defaultValue={today()} required />
                 {scheduleFrequency !== 'single' && <Field label="Final invoice date" name="final_invoice_date" type="date" />}
+                <label className="checkField">
+                  <input name="historical_backfill" type="checkbox" checked={scheduleBackfill} onChange={(event) => setScheduleBackfill(event.currentTarget.checked)} />
+                  <span>Historical schedule - start reminders from next cycle</span>
+                </label>
+                {scheduleBackfill && <Field label="Next invoice/reminder date" name="next_invoice_generation_date" type="date" defaultValue={endOfCurrentMonth()} required />}
                 <button className="secondary" disabled={!selectedProject || loading}>
                   <CalendarPlus size={18} />
                   <span>Add Schedule</span>

@@ -186,6 +186,8 @@ def ensure_workflow_columns() -> None:
         if "client_invoice_schedules" in tables:
             existing = {column["name"] for column in inspector.get_columns("client_invoice_schedules")}
             add_column(conn, "client_invoice_schedules", existing, "item_description", "TEXT")
+            add_column(conn, "client_invoice_schedules", existing, "historical_backfill", "BOOLEAN DEFAULT FALSE")
+            add_column(conn, "client_invoice_schedules", existing, "next_invoice_generation_date", "DATE")
         if "client_invoices" in tables:
             existing = {column["name"] for column in inspector.get_columns("client_invoices")}
             add_column(conn, "client_invoices", existing, "item_description", "TEXT")
@@ -543,7 +545,7 @@ def next_date(current: date, frequency: str) -> date:
 
 def next_unraised_invoice_date(schedule: ClientInvoiceSchedule) -> date | None:
     issued_dates = {invoice.issue_date for invoice in schedule.invoices}
-    candidate_date = schedule.first_invoice_date
+    candidate_date = schedule.next_invoice_generation_date or schedule.first_invoice_date
     for _ in range(600):
         if schedule.final_invoice_date and candidate_date > schedule.final_invoice_date:
             return None
@@ -1084,7 +1086,7 @@ def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
     generated: list[ClientInvoice] = []
 
     for schedule in schedules:
-        candidate_date = schedule.first_invoice_date
+        candidate_date = schedule.next_invoice_generation_date or schedule.first_invoice_date
         while candidate_date - timedelta(days=2) <= as_of:
             if schedule.final_invoice_date and candidate_date > schedule.final_invoice_date:
                 break
@@ -1742,6 +1744,15 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: Aut
         payload.final_invoice_date = None
     if payload.final_invoice_date and payload.final_invoice_date < payload.first_invoice_date:
         raise HTTPException(status_code=400, detail="Final invoice date cannot be earlier than first invoice date")
+    if payload.historical_backfill:
+        if payload.next_invoice_generation_date is None:
+            raise HTTPException(status_code=400, detail="Next invoice/reminder date is required for historical backfill schedules")
+        if payload.next_invoice_generation_date < date.today():
+            raise HTTPException(status_code=400, detail="Historical backfill schedules should start reminders from the next current/future cycle")
+        if payload.final_invoice_date and payload.next_invoice_generation_date > payload.final_invoice_date:
+            raise HTTPException(status_code=400, detail="Next invoice/reminder date cannot be after the final invoice date")
+    else:
+        payload.next_invoice_generation_date = None
     if not payload.item_description:
         payload.item_description = payload.label
     schedule = ClientInvoiceSchedule(project_id=project_id, **payload.model_dump())

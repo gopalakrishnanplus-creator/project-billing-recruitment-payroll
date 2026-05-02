@@ -519,6 +519,66 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
         assert date_filtered[0]["issue_date"] == str(today_value)
 
 
+def test_historical_client_invoice_schedule_starts_from_next_cycle():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        historical_first_invoice = date.today() - timedelta(days=60)
+        next_cycle_invoice = date.today() + timedelta(days=29)
+
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Historical client billing",
+                "item_description": "Historical backfill, next cycle only",
+                "amount": "4000.00",
+                "currency": "USD",
+                "frequency": "monthly",
+                "first_invoice_date": str(historical_first_invoice),
+                "final_invoice_date": str(next_cycle_invoice + timedelta(days=120)),
+                "historical_backfill": True,
+                "next_invoice_generation_date": str(next_cycle_invoice),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+        schedule = schedule_response.json()
+        assert schedule["first_invoice_date"] == str(historical_first_invoice)
+        assert schedule["historical_backfill"] is True
+        assert schedule["next_invoice_generation_date"] == str(next_cycle_invoice)
+
+        invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        assert invoices_response.status_code == 200, invoices_response.text
+        assert invoices_response.json() == []
+
+        upcoming_response = client.get("/upcoming-invoices", headers=FINANCE_HEADERS)
+        assert upcoming_response.status_code == 200, upcoming_response.text
+        assert len(upcoming_response.json()) == 1
+        assert upcoming_response.json()[0]["next_invoice_date"] == str(next_cycle_invoice)
+
+        past_next_cycle_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Invalid historical billing",
+                "amount": "4000.00",
+                "currency": "USD",
+                "frequency": "monthly",
+                "first_invoice_date": str(historical_first_invoice),
+                "historical_backfill": True,
+                "next_invoice_generation_date": str(date.today() - timedelta(days=1)),
+            },
+        )
+        assert past_next_cycle_response.status_code == 400
+        assert "next current/future cycle" in past_next_cycle_response.text
+
+
 def test_recruitment_flow_from_position_to_hired_candidate():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)

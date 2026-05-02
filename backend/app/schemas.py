@@ -139,6 +139,8 @@ class InvoiceScheduleCreate(BaseModel):
     frequency: str = Field(pattern="^(single|monthly|weekly|quarterly)$")
     first_invoice_date: date
     final_invoice_date: date | None = None
+    historical_backfill: bool = False
+    next_invoice_generation_date: date | None = None
 
 
 class ApprovalCreate(BaseModel):
@@ -290,6 +292,8 @@ class InvoiceScheduleRead(BaseModel):
     frequency: str
     first_invoice_date: date
     final_invoice_date: date | None
+    historical_backfill: bool
+    next_invoice_generation_date: date | None
     status: str
 
 

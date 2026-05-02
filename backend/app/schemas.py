@@ -63,6 +63,7 @@ class RecruitmentNeedCreate(BaseModel):
     billing_end_date: date | None = None
     target_start_date: date | None = None
     internal_interviewers: str | None = None
+    historical_completed: bool = False
 
 
 class RecruitmentNeedUpdate(BaseModel):
@@ -92,6 +93,16 @@ class CandidateCreate(BaseModel):
     linkedin_profile_url: str | None = None
     notes: str | None = None
     candidate_type: str = "job_candidate"
+
+
+class HistoricalHireCreate(CandidateCreate):
+    invoice_terms: str | None = None
+    invoice_amount: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = "USD"
+    invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    invoice_start_date: date | None = None
+    invoice_end_date: date | None = None
+    invoice_date: date | None = None
 
 
 class CandidateStatusUpdate(BaseModel):

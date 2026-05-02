@@ -672,6 +672,77 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert candidates_response.json()[0]["interviews"][0]["recommendation"] == "hire"
 
 
+def test_historical_completed_recruitment_backfill_without_hr_notification():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Already Recruited Consultant",
+                "number_of_positions": "1",
+                "employment_type": "Fractional Consultant",
+                "description": "Historical backfill for a completed recruitment.",
+                "position_billing_type": "periodic",
+                "fee_amount": "2500.00",
+                "currency": "USD",
+                "billing_frequency": "monthly",
+                "billing_start_date": "2026-01-01",
+                "historical_completed": "on",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        need = need_response.json()
+        assert need["status"] == "closed"
+
+        with SessionLocal() as db:
+            assert db.query(EmailNotification).filter(EmailNotification.project_id == project["id"]).count() == 0
+
+        hire_response = client.post(
+            f"/recruitment-needs/{need['id']}/historical-hires",
+            headers=OPS_HEADERS,
+            data={
+                "full_name": "Historical Hire",
+                "email": "historical@example.com",
+                "phone": "+1-555-7777",
+                "invoice_terms": "Monthly candidate invoice.",
+                "invoice_amount": "2500.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today() + timedelta(days=29)),
+                "invoice_end_date": str(date.today() + timedelta(days=120)),
+            },
+            files={"signed_contract": ("historical-contract.pdf", b"signed", "application/pdf")},
+        )
+        assert hire_response.status_code == 201, hire_response.text
+        candidate = hire_response.json()
+        assert candidate["status"] == "hired"
+        assert candidate["position_title"] == "Already Recruited Consultant"
+        assert candidate["contracts"][0]["contract_document_name"] == "historical-contract.pdf"
+        assert candidate["contracts"][0]["invoice_amount"] == "2500.00"
+
+        past_hire_response = client.post(
+            f"/recruitment-needs/{need['id']}/historical-hires",
+            headers=OPS_HEADERS,
+            data={
+                "full_name": "Past Reminder Hire",
+                "email": "past-reminder@example.com",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today() - timedelta(days=1)),
+            },
+        )
+        assert past_hire_response.status_code == 400
+        assert "next future candidate invoice" in past_hire_response.text
+
+
 def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):
     captured = {}
 

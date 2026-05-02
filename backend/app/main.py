@@ -64,6 +64,7 @@ from .schemas import (
     ClientInvoiceRead,
     CurrentUserRead,
     GenerateInvoicesResult,
+    HistoricalHireCreate,
     InvoiceDetailRead,
     InvoiceScheduleCreate,
     InvoiceScheduleRead,
@@ -1472,7 +1473,11 @@ async def add_recruitment_need(project_id: int, request: Request, context: AuthC
     project = load_project_for_read(project_id, db)
     data, files = await request_payload_and_files(request)
     payload: RecruitmentNeedCreate = parse_model(RecruitmentNeedCreate, data)
-    need = RecruitmentNeed(project_id=project_id, **payload.model_dump())
+    payload_data = payload.model_dump()
+    historical_completed = bool(payload_data.pop("historical_completed", False))
+    need = RecruitmentNeed(project_id=project_id, **payload_data)
+    if historical_completed:
+        need.status = "closed"
     db.add(need)
     db.flush()
     detail_document = await save_uploaded_document(
@@ -1485,7 +1490,8 @@ async def add_recruitment_need(project_id: int, request: Request, context: AuthC
     if detail_document:
         need.detail_document_id = detail_document.id
     log_event(db, project_id=project_id, actor_name=project.operations_manager_name, action="recruitment_need_added", details=payload.position_title)
-    notify_hr_for_recruitment_need(db, project, need, context.user.email)
+    if not historical_completed:
+        notify_hr_for_recruitment_need(db, project, need, context.user.email)
     db.commit()
     db.refresh(need)
     return RecruitmentNeedRead.model_validate(need)
@@ -1583,8 +1589,53 @@ def add_candidate(need_id: int, payload: CandidateCreate, context: AuthContext =
     return serialize_candidate(candidate, db)
 
 
+@app.post("/recruitment-needs/{need_id}/historical-hires", response_model=CandidateRead, status_code=201)
+async def add_historical_hire(need_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.hr_manager.value, UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> CandidateRead:
+    need = db.get(RecruitmentNeed, need_id)
+    if need is None:
+        raise HTTPException(status_code=404, detail="Recruitment need not found")
+    data, files = await request_payload_and_files(request)
+    payload: HistoricalHireCreate = parse_model(HistoricalHireCreate, data)
+    next_candidate_invoice_date = payload.invoice_date if payload.invoice_frequency == "single" else payload.invoice_start_date
+    if next_candidate_invoice_date and next_candidate_invoice_date < date.today():
+        raise HTTPException(status_code=400, detail="Historical hires should use the next future candidate invoice/reminder date, not a completed past date")
+    candidate = Candidate(
+        project_id=need.project_id,
+        recruitment_need_id=need.id,
+        full_name=payload.full_name,
+        email=str(payload.email),
+        phone=payload.phone,
+        linkedin_profile_url=payload.linkedin_profile_url,
+        notes=payload.notes,
+        candidate_type=payload.candidate_type,
+        status="hired",
+    )
+    db.add(candidate)
+    db.flush()
+    document = await save_uploaded_document(db, file=files.get("signed_contract"), project_id=need.project_id, document_type="signed_candidate_contract", uploaded_by_name=context.user.full_name)
+    contract = CandidateContract(
+        candidate_id=candidate.id,
+        contract_document_id=document.id if document else None,
+        invoice_terms=payload.invoice_terms,
+        invoice_amount=payload.invoice_amount,
+        currency=payload.currency.upper() if payload.currency else None,
+        invoice_frequency=payload.invoice_frequency,
+        invoice_start_date=payload.invoice_start_date,
+        invoice_end_date=payload.invoice_end_date,
+        invoice_date=payload.invoice_date,
+        signed_at=utcnow() if document else None,
+        status="signed" if document else "draft",
+    )
+    need.status = "closed"
+    db.add(contract)
+    log_event(db, project_id=need.project_id, actor_name=context.user.full_name, action="historical_hire_added", details=candidate.full_name)
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
 @app.get("/recruitment/candidates", response_model=list[CandidateRead])
-def list_candidates(_: AuthContext = Depends(require_role(UserRole.hr_manager.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[CandidateRead]:
+def list_candidates(_: AuthContext = Depends(require_role(UserRole.hr_manager.value, UserRole.operations_manager.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[CandidateRead]:
     candidates = db.scalars(select(Candidate).order_by(Candidate.created_at.desc(), Candidate.id.desc())).all()
     return [serialize_candidate(candidate, db) for candidate in candidates]
 

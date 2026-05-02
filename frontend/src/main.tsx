@@ -257,7 +257,19 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return formatLocalDate(new Date());
+}
+
+function endOfCurrentMonth(): string {
+  const now = new Date();
+  return formatLocalDate(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+}
+
+function formatLocalDate(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function formPayload(form: HTMLFormElement): Record<string, FormDataEntryValue> {
@@ -377,7 +389,7 @@ function App() {
         setRecruitmentNeeds(needData);
         if (!selectedNeedId && needData[0]) setSelectedNeedId(needData[0].id);
       }
-      if (['hr_manager', 'system_admin'].includes(current.active_role)) {
+      if (['operations_manager', 'hr_manager', 'system_admin'].includes(current.active_role)) {
         const candidateData = await api<Candidate[]>('/recruitment/candidates');
         setCandidates(candidateData);
         if (!selectedCandidateId && candidateData[0]) setSelectedCandidateId(candidateData[0].id);
@@ -533,6 +545,7 @@ function App() {
     event.preventDefault();
     const formElement = event.currentTarget;
     const payload = new FormData(formElement);
+    const historicalCompleted = payload.get('historical_completed') === 'on';
     const projectId = Number(payload.get('project_id') || selectedProject?.id);
     payload.delete('project_id');
     if (!projectId) return;
@@ -543,7 +556,23 @@ function App() {
       });
       setSelectedNeedId(need.id);
       formElement.reset();
-      return 'Recruitment position added and HR notified';
+      return historicalCompleted ? 'Historical recruitment position added as closed' : 'Recruitment position added and HR notified';
+    });
+  }
+
+  async function submitHistoricalHire(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedNeed) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/recruitment-needs/${selectedNeed.id}/historical-hires`, {
+        method: 'POST',
+        body: payload,
+      });
+      setSelectedCandidateId(candidate.id);
+      formElement.reset();
+      return 'Historical hired candidate saved';
     });
   }
 
@@ -929,9 +958,13 @@ function App() {
                 <span>Description</span>
                 <textarea name="description" rows={4} required />
               </label>
+              <label className="checkField">
+                <input name="historical_completed" type="checkbox" />
+                <span>Historical completed recruitment - mark closed and do not notify HR</span>
+              </label>
               <button className="primary" disabled={projects.length === 0 || loading}>
                 <BadgeCheck size={18} />
-                <span>Add Position And Notify HR</span>
+                <span>Add Position</span>
               </button>
             </form>
           )}
@@ -1032,6 +1065,49 @@ function App() {
                   <span>Delete Position</span>
                 </button>
               </div>
+            </form>
+          )}
+
+          {(canHrManage || canOperate) && selectedNeed && (
+            <form className="panel" onSubmit={(event) => void submitHistoricalHire(event)}>
+              <PanelTitle icon={<BadgeCheck size={18} />} title="Historical Hired Candidate" />
+              <p className="contextLine">{selectedNeed.project_code} · {selectedNeed.position_title}</p>
+              <Field label="Candidate name" name="full_name" required />
+              <Field label="Candidate email" name="email" type="email" required />
+              <Field label="Phone" name="phone" />
+              <Field label="LinkedIn profile URL" name="linkedin_profile_url" />
+              <label className="field">
+                <span>Notes</span>
+                <textarea name="notes" rows={3} />
+              </label>
+              <Field label="Signed contract upload" name="signed_contract" type="file" />
+              <Field label="Next candidate invoice amount" name="invoice_amount" type="number" step="0.01" />
+              <Field label="Currency" name="currency" defaultValue="USD" />
+              <label className="field">
+                <span>Invoice frequency</span>
+                <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
+                  <option value="single">Single</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="quarterly">Quarterly</option>
+                </select>
+              </label>
+              {contractInvoiceFrequency === 'single' ? (
+                <Field label="Next candidate invoice date" name="invoice_date" type="date" defaultValue={endOfCurrentMonth()} />
+              ) : (
+                <>
+                  <Field label="Next candidate invoice reminder date" name="invoice_start_date" type="date" defaultValue={endOfCurrentMonth()} />
+                  <Field label="Reminder end date" name="invoice_end_date" type="date" />
+                </>
+              )}
+              <label className="field">
+                <span>Invoice terms</span>
+                <textarea name="invoice_terms" rows={3} />
+              </label>
+              <button className="secondary" disabled={loading}>
+                <FileCheck2 size={18} />
+                <span>Save Historical Hire</span>
+              </button>
             </form>
           )}
 

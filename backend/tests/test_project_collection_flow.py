@@ -683,6 +683,18 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         interview = interview_response.json()
         assert interview["interviewer_name"] == "Internal Interviewer"
 
+        with SessionLocal() as db:
+            interview_notifications = (
+                db.query(EmailNotification)
+                .filter(EmailNotification.project_id == project["id"], EmailNotification.subject.like("%interview%"))
+                .order_by(EmailNotification.id)
+                .all()
+            )
+            assert [notification.recipient_email for notification in interview_notifications] == ["priya@example.com", "interviewer@example.com"]
+            assert all(notification.cc_email == "hr@example.com" for notification in interview_notifications)
+            assert "https://calendly.com/internal/priya" in interview_notifications[0].body
+            assert f"interview_id={interview['id']}" in interview_notifications[1].body
+
         own_interviews = client.get("/interviews", headers=INTERVIEWER_HEADERS)
         other_interviews = client.get("/interviews", headers={"x-test-email": "other-interviewer@example.com", "x-test-role": "internal_interviewer"})
         assert own_interviews.status_code == 200, own_interviews.text
@@ -699,6 +711,19 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert scorecard_response.status_code == 200, scorecard_response.text
         assert scorecard_response.json()["status"] == "completed"
         assert scorecard_response.json()["evaluation_document_name"] == "scorecard.pdf"
+        scorecard_document_id = scorecard_response.json()["evaluation_document_id"]
+
+        hr_document_response = client.get(f"/documents/{scorecard_document_id}/download", headers=HR_HEADERS)
+        interviewer_document_response = client.get(f"/documents/{scorecard_document_id}/download", headers=INTERVIEWER_HEADERS)
+        other_interviewer_document_response = client.get(
+            f"/documents/{scorecard_document_id}/download",
+            headers={"x-test-email": "other-interviewer@example.com", "x-test-role": "internal_interviewer"},
+        )
+        assert hr_document_response.status_code == 200, hr_document_response.text
+        assert hr_document_response.content == b"scorecard"
+        assert hr_document_response.headers["content-type"] == "application/pdf"
+        assert interviewer_document_response.status_code == 200, interviewer_document_response.text
+        assert other_interviewer_document_response.status_code == 404
 
         send_contract_response = client.patch(
             f"/candidates/{candidate['id']}/status",

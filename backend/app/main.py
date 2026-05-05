@@ -8,7 +8,7 @@ from io import BytesIO
 from os import getenv
 from pathlib import Path
 import re
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 from authlib.integrations.starlette_client import OAuth
@@ -736,13 +736,117 @@ def recruitment_need_email_template(project: ProjectSOW, need: RecruitmentNeed) 
 def notify_hr_for_recruitment_need(db: Session, project: ProjectSOW, need: RecruitmentNeed, operations_manager_email: str | None) -> None:
     subject, text, html = recruitment_need_email_template(project, need)
     cc_emails = [operations_manager_email] if operations_manager_email else []
-    for recipient in hr_manager_emails(db):
+    recipients = hr_manager_emails(db)
+    if not recipients:
+        db.add(
+            EmailNotification(
+                project_id=project.id,
+                recipient_email="",
+                cc_email=",".join(email for email in cc_emails if email) or None,
+                subject=subject,
+                body="No active HR Manager user is assigned in the system.",
+                status="failed",
+            )
+        )
+        return
+    for recipient in recipients:
         status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text, html=html)
         db.add(
             EmailNotification(
                 project_id=project.id,
                 recipient_email=recipient,
                 cc_email=",".join(email for email in cc_emails if email and email != recipient) or None,
+                subject=subject,
+                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                status=status,
+            )
+        )
+
+
+def interview_assignment_email_templates(candidate: Candidate, interviewer: AppUser, interview: Interview, project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[tuple[str, str, str], tuple[str, str, str]]:
+    interview_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': interview.id})}"
+    scheduled_at = interview.scheduled_at.isoformat() if interview.scheduled_at else "To be scheduled"
+    position = need.position_title if need else "Not set"
+    candidate_subject = f"Interview scheduled for {position}"
+    candidate_text = "\n".join(
+        [
+            f"Dear {candidate.full_name},",
+            "",
+            "Your interview has been assigned.",
+            "",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Position: {position}",
+            f"Interviewer: {interviewer.full_name}",
+            f"Scheduled at: {scheduled_at}",
+            f"Interview link: {interview.calendly_url or 'To be shared'}",
+        ]
+    )
+    candidate_html = f"""
+    <h2>Interview assigned</h2>
+    <p>Dear {escape(candidate.full_name)},</p>
+    <p>Your interview has been assigned.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
+      <tr><td><strong>Interviewer</strong></td><td>{escape(interviewer.full_name)}</td></tr>
+      <tr><td><strong>Scheduled at</strong></td><td>{escape(scheduled_at)}</td></tr>
+      <tr><td><strong>Interview link</strong></td><td>{escape(interview.calendly_url or 'To be shared')}</td></tr>
+    </table>
+    """
+    interviewer_subject = f"Candidate interview assigned: {candidate.full_name}"
+    interviewer_text = "\n".join(
+        [
+            f"Dear {interviewer.full_name},",
+            "",
+            "A candidate interview has been assigned to you.",
+            "",
+            f"Candidate: {candidate.full_name}",
+            f"Candidate email: {candidate.email}",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Position: {position}",
+            f"Scheduled at: {scheduled_at}",
+            f"Interview link: {interview.calendly_url or 'To be shared'}",
+            "",
+            f"Log in to review and submit the scorecard: {interview_link}",
+        ]
+    )
+    interviewer_html = f"""
+    <h2>Candidate interview assigned</h2>
+    <p>Dear {escape(interviewer.full_name)},</p>
+    <p>A candidate interview has been assigned to you.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
+      <tr><td><strong>Scheduled at</strong></td><td>{escape(scheduled_at)}</td></tr>
+      <tr><td><strong>Interview link</strong></td><td>{escape(interview.calendly_url or 'To be shared')}</td></tr>
+    </table>
+    <p><a href="{escape(interview_link)}">Log in to review and submit the scorecard</a></p>
+    """
+    return (candidate_subject, candidate_text, candidate_html), (interviewer_subject, interviewer_text, interviewer_html)
+
+
+def notify_interview_assignment(db: Session, candidate: Candidate, interviewer: AppUser, interview: Interview, hr_email: str | None) -> None:
+    project = load_project_for_read(candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    candidate_template, interviewer_template = interview_assignment_email_templates(candidate, interviewer, interview, project, need)
+    notifications = [
+        (candidate.email, [hr_email] if hr_email else [], *candidate_template),
+        (interviewer.email, [hr_email] if hr_email else [], *interviewer_template),
+    ]
+    for recipient, cc_emails, subject, text, html in notifications:
+        cc_emails = [email for email in cc_emails if email and email != recipient]
+        status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text, html=html)
+        db.add(
+            EmailNotification(
+                project_id=candidate.project_id,
+                recipient_email=recipient,
+                cc_email=",".join(cc_emails) if cc_emails else None,
                 subject=subject,
                 body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
                 status=status,
@@ -1031,12 +1135,15 @@ def send_sendgrid_email(
     }
     if attachments:
         payload["attachments"] = attachments
-    response = httpx.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=15,
-    )
+    try:
+        response = httpx.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15,
+        )
+    except httpx.HTTPError as exc:
+        return "failed", str(exc)[:500]
     if response.status_code >= 400:
         return "failed", response.text[:500]
     return "sent", response.headers.get("X-Message-Id")
@@ -1470,6 +1577,46 @@ def get_project(project_id: int, _: AuthContext = Depends(require_login), db: Se
     return serialize_project(load_project_for_read(project_id, db))
 
 
+@app.get("/documents/{document_id}/download")
+def download_document(document_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
+    document = db.get(UploadedDocument, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    allowed = context.active_role in {
+        UserRole.system_admin.value,
+        UserRole.hr_manager.value,
+        UserRole.operations_manager.value,
+        UserRole.finance_manager.value,
+    }
+    if context.active_role == UserRole.internal_interviewer.value:
+        allowed = (
+            db.scalar(
+                select(InterviewScorecard)
+                .join(Interview, Interview.id == InterviewScorecard.interview_id)
+                .where(InterviewScorecard.evaluation_document_id == document.id, Interview.interviewer_user_id == context.user.id)
+            )
+            is not None
+        )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    content = document.content_bytes
+    if content is None and document.storage_uri:
+        path = Path(document.storage_uri)
+        if path.exists():
+            content = path.read_bytes()
+    if content is None:
+        raise HTTPException(status_code=404, detail="Document content not found")
+
+    filename = quote(document.original_filename)
+    return Response(
+        content=content,
+        media_type=document.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
+
+
 @app.post("/projects/{project_id}/recruitment-needs", response_model=RecruitmentNeedRead, status_code=201)
 async def add_recruitment_need(project_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> RecruitmentNeedRead:
     project = load_project_for_read(project_id, db)
@@ -1668,6 +1815,7 @@ def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthC
     db.add(interview)
     db.flush()
     log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="interview_assigned", details=f"{candidate.full_name}: {interviewer.full_name}")
+    notify_interview_assignment(db, candidate, interviewer, interview, context.user.email)
     db.commit()
     db.refresh(interview)
     return serialize_interview(interview, db)

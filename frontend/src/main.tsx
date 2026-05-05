@@ -1,24 +1,22 @@
 import React, { FormEvent, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import {
-  BadgeCheck,
-  Banknote,
-  CalendarPlus,
-  Download,
-  ClipboardList,
-  FileCheck2,
-  FilePlus2,
-  FileText,
-  Pencil,
-  LogOut,
-  RefreshCw,
-  Send,
-  ShieldCheck,
-  Upload,
-  UserCog,
-  UserCheck,
-  Users,
-} from 'lucide-react';
+import BadgeCheck from 'lucide-react/dist/esm/icons/badge-check.mjs';
+import Banknote from 'lucide-react/dist/esm/icons/banknote.mjs';
+import CalendarPlus from 'lucide-react/dist/esm/icons/calendar-plus.mjs';
+import ClipboardList from 'lucide-react/dist/esm/icons/clipboard-list.mjs';
+import Download from 'lucide-react/dist/esm/icons/download.mjs';
+import FileCheck2 from 'lucide-react/dist/esm/icons/file-check-2.mjs';
+import FilePlus2 from 'lucide-react/dist/esm/icons/file-plus-2.mjs';
+import FileText from 'lucide-react/dist/esm/icons/file-text.mjs';
+import LogOut from 'lucide-react/dist/esm/icons/log-out.mjs';
+import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs';
+import RefreshCw from 'lucide-react/dist/esm/icons/refresh-cw.mjs';
+import Send from 'lucide-react/dist/esm/icons/send.mjs';
+import ShieldCheck from 'lucide-react/dist/esm/icons/shield-check.mjs';
+import Upload from 'lucide-react/dist/esm/icons/upload.mjs';
+import UserCheck from 'lucide-react/dist/esm/icons/user-check.mjs';
+import UserCog from 'lucide-react/dist/esm/icons/user-cog.mjs';
+import Users from 'lucide-react/dist/esm/icons/users.mjs';
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8001';
@@ -310,12 +308,31 @@ function roleLabel(role: string): string {
   return ROLE_LABELS[role] ?? role.replaceAll('_', ' ');
 }
 
+function latestContract(candidate: Candidate): CandidateContract | undefined {
+  return candidate.contracts[0];
+}
+
+function contractInvoiceSummary(contract: CandidateContract | undefined): string {
+  if (!contract) return 'Not set';
+  const currency = contract.currency ?? 'USD';
+  const amount = contract.invoice_amount ?? 'Not set';
+  const frequency = contract.invoice_frequency ?? 'not set';
+  return `${currency} ${amount} · ${frequency}`;
+}
+
+function contractInvoiceDates(contract: CandidateContract | undefined): string {
+  if (!contract) return 'Not set';
+  const start = contract.invoice_date ?? contract.invoice_start_date ?? 'Not set';
+  return contract.invoice_end_date ? `${start} to ${contract.invoice_end_date}` : start;
+}
+
 function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const approvalInvoiceId = urlParams.get('approval_invoice_id');
   const approvalError = urlParams.get('approval_error');
   const requestedView = urlParams.get('view');
   const requestedNeedId = Number(urlParams.get('need_id') ?? '');
+  const requestedInterviewId = Number(urlParams.get('interview_id') ?? '');
   const [me, setMe] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<AppUser[]>([]);
   const [clientAccountExecutives, setClientAccountExecutives] = useState<AppUser[]>([]);
@@ -331,7 +348,7 @@ function App() {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
   const [selectedNeedId, setSelectedNeedId] = useState<number | null>(Number.isFinite(requestedNeedId) && requestedNeedId > 0 ? requestedNeedId : null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
-  const [selectedInterviewId, setSelectedInterviewId] = useState<number | null>(null);
+  const [selectedInterviewId, setSelectedInterviewId] = useState<number | null>(Number.isFinite(requestedInterviewId) && requestedInterviewId > 0 ? requestedInterviewId : null);
   const [editingProject, setEditingProject] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
   const [scheduleBackfill, setScheduleBackfill] = useState(false);
@@ -360,6 +377,10 @@ function App() {
   const candidatesForNeed = useMemo(
     () => candidates.filter((candidate) => !selectedNeed || candidate.recruitment_need_id === selectedNeed.id),
     [candidates, selectedNeed],
+  );
+  const hiredCandidates = useMemo(
+    () => candidates.filter((candidate) => candidate.status === 'hired'),
+    [candidates],
   );
   const selectedCandidate = useMemo(
     () => candidates.find((candidate) => candidate.id === selectedCandidateId) ?? candidatesForNeed[0] ?? candidates[0],
@@ -790,6 +811,11 @@ function App() {
   function downloadInvoice() {
     if (!selectedInvoice) return;
     window.open(`${API_BASE}/client-invoices/${selectedInvoice.id}/download`, '_blank', 'noopener,noreferrer');
+  }
+
+  function downloadDocument(documentId: number | null) {
+    if (!documentId) return;
+    window.open(`${API_BASE}/documents/${documentId}/download`, '_blank', 'noopener,noreferrer');
   }
 
   async function submitInvoiceFilters(event: FormEvent<HTMLFormElement>) {
@@ -1225,6 +1251,40 @@ function App() {
                 </button>
               </form>
 
+              <section className="panel wide">
+                <PanelTitle icon={<BadgeCheck size={18} />} title="Hired Candidates" />
+                {hiredCandidates.length > 0 ? (
+                  <div className="grid two">
+                    {hiredCandidates.map((candidate) => {
+                      const contract = latestContract(candidate);
+                      return (
+                        <div className="candidateBlock" key={candidate.id}>
+                          <h2>{candidate.full_name}</h2>
+                          <dl className="facts">
+                            <div><dt>Email</dt><dd>{candidate.email}</dd></div>
+                            <div><dt>Phone</dt><dd>{candidate.phone ?? 'Not set'}</dd></div>
+                            <div><dt>Client</dt><dd>{candidate.client_company_name}</dd></div>
+                            <div><dt>SOW</dt><dd>{candidate.project_code} · {candidate.project_title}</dd></div>
+                            <div><dt>Position</dt><dd>{candidate.position_title ?? 'Not set'}</dd></div>
+                            <div><dt>Invoice</dt><dd>{contractInvoiceSummary(contract)}</dd></div>
+                            <div><dt>Invoice dates</dt><dd>{contractInvoiceDates(contract)}</dd></div>
+                            <div><dt>Contract</dt><dd>{contract?.contract_document_name ?? 'Not uploaded'}</dd></div>
+                          </dl>
+                          {contract?.contract_document_id && (
+                            <button className="secondary" type="button" onClick={() => downloadDocument(contract.contract_document_id)}>
+                              <Download size={18} />
+                              <span>Download Contract</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="empty">No hired candidates yet.</p>
+                )}
+              </section>
+
               <form className="panel" onSubmit={(event) => void submitContract(event)}>
                 <PanelTitle icon={<FileCheck2 size={18} />} title="Signed Contract And Invoice Terms" />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
@@ -1278,7 +1338,19 @@ function App() {
                   <div><dt>Status</dt><dd><Status value={selectedInterview.status} /></dd></div>
                   <div><dt>Score</dt><dd>{selectedInterview.score ?? 'Not submitted'}</dd></div>
                   <div><dt>Recommendation</dt><dd>{selectedInterview.recommendation ?? 'Not submitted'}</dd></div>
-                  <div><dt>Checklist</dt><dd>{selectedInterview.evaluation_document_name ?? 'Not uploaded'}</dd></div>
+                  <div>
+                    <dt>Checklist</dt>
+                    <dd>
+                      {selectedInterview.evaluation_document_id ? (
+                        <button className="secondary" type="button" onClick={() => downloadDocument(selectedInterview.evaluation_document_id)}>
+                          <Download size={18} />
+                          <span>{selectedInterview.evaluation_document_name ?? 'Download checklist'}</span>
+                        </button>
+                      ) : (
+                        'Not uploaded'
+                      )}
+                    </dd>
+                  </div>
                   <div><dt>Calendly</dt><dd>{selectedInterview.calendly_url ?? 'Not set'}</dd></div>
                 </dl>
               ) : (

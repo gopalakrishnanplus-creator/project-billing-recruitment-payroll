@@ -722,6 +722,10 @@ def test_recruitment_flow_from_position_to_hired_candidate():
             assert [notification.recipient_email for notification in interview_notifications] == ["priya@example.com", "interviewer@example.com"]
             assert all(notification.cc_email == "hr@example.com" for notification in interview_notifications)
             assert "https://calendly.com/internal/priya" in interview_notifications[0].body
+            assert "Client</strong>" not in interview_notifications[0].body
+            assert "SOW</strong>" not in interview_notifications[0].body
+            assert "Scheduled at" not in interview_notifications[0].body
+            assert "Scheduled at" not in interview_notifications[1].body
             assert f"interview_id={interview['id']}" in interview_notifications[1].body
 
         own_interviews = client.get("/interviews", headers=INTERVIEWER_HEADERS)

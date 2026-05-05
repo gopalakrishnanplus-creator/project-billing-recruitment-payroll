@@ -770,7 +770,6 @@ def notify_hr_for_recruitment_need(db: Session, project: ProjectSOW, need: Recru
 
 def interview_assignment_email_templates(candidate: Candidate, interviewer: AppUser, interview: Interview, project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[tuple[str, str, str], tuple[str, str, str]]:
     interview_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': interview.id})}"
-    scheduled_at = interview.scheduled_at.isoformat() if interview.scheduled_at else "To be scheduled"
     position = need.position_title if need else "Not set"
     candidate_subject = f"Interview scheduled for {position}"
     candidate_text = "\n".join(
@@ -779,11 +778,8 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer: AppU
             "",
             "Your interview has been assigned.",
             "",
-            f"Client: {project.company.name}",
-            f"SOW: {project.title} ({project.project_code})",
             f"Position: {position}",
             f"Interviewer: {interviewer.full_name}",
-            f"Scheduled at: {scheduled_at}",
             f"Interview link: {interview.calendly_url or 'To be shared'}",
         ]
     )
@@ -792,11 +788,8 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer: AppU
     <p>Dear {escape(candidate.full_name)},</p>
     <p>Your interview has been assigned.</p>
     <table cellpadding="6" cellspacing="0" border="0">
-      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
-      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
       <tr><td><strong>Interviewer</strong></td><td>{escape(interviewer.full_name)}</td></tr>
-      <tr><td><strong>Scheduled at</strong></td><td>{escape(scheduled_at)}</td></tr>
       <tr><td><strong>Interview link</strong></td><td>{escape(interview.calendly_url or 'To be shared')}</td></tr>
     </table>
     """
@@ -812,7 +805,6 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer: AppU
             f"Client: {project.company.name}",
             f"SOW: {project.title} ({project.project_code})",
             f"Position: {position}",
-            f"Scheduled at: {scheduled_at}",
             f"Interview link: {interview.calendly_url or 'To be shared'}",
             "",
             f"Log in to review and submit the scorecard: {interview_link}",
@@ -828,7 +820,6 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer: AppU
       <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
       <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
-      <tr><td><strong>Scheduled at</strong></td><td>{escape(scheduled_at)}</td></tr>
       <tr><td><strong>Interview link</strong></td><td>{escape(interview.calendly_url or 'To be shared')}</td></tr>
     </table>
     <p><a href="{escape(interview_link)}">Log in to review and submit the scorecard</a></p>

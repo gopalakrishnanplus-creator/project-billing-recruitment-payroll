@@ -148,6 +148,27 @@ h2 {
   gap: 8px;
 }
 
+.rolePill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 5px 4px 8px;
+  border-radius: 6px;
+  background: #eef2f6;
+  color: #243244;
+  font-size: 0.8rem;
+}
+
+.rolePill button {
+  min-height: 26px;
+  padding: 4px 7px;
+  border-color: #c94a3a;
+  background: #fff8f6;
+  color: #9f2f24;
+  font-size: 0.72rem;
+}
+
 .field.full {
   grid-column: 1 / -1;
 }

@@ -308,10 +308,15 @@ def auth_context_from_session(request: Request, db: Session) -> AuthContext:
             user = AppUser(full_name="Test User", email=email, role=test_role, is_active=True)
             db.add(user)
             db.flush()
-        ensure_role_assignment(db, user, test_role, "Test")
-        db.commit()
-        db.refresh(user)
-        return AuthContext(user=user, roles=user_roles(user), active_role=test_role)
+            ensure_role_assignment(db, user, test_role, "Test")
+            db.commit()
+            db.refresh(user)
+        roles = user_roles(user)
+        if test_role not in roles:
+            if not roles:
+                raise HTTPException(status_code=403, detail="No roles assigned")
+            raise HTTPException(status_code=403, detail="Role not assigned")
+        return AuthContext(user=user, roles=roles, active_role=test_role)
 
     user_id = request.session.get("user_id")
     if not user_id:
@@ -1344,12 +1349,12 @@ def upsert_user(payload: AppUserUpsert, context: AuthContext = Depends(require_r
     email = normalize_email(str(payload.email))
     user = db.scalar(select(AppUser).where(func.lower(AppUser.email) == email).options(selectinload(AppUser.role_assignments)))
     if user is None:
-        user = AppUser(full_name=payload.full_name, email=email, role=roles[0], is_active=payload.is_active)
+        user = AppUser(full_name=payload.full_name, email=email, role=roles[0] if roles else "unassigned", is_active=payload.is_active)
         db.add(user)
         db.flush()
     user.full_name = payload.full_name
     user.email = email
-    user.role = roles[0]
+    user.role = roles[0] if roles else "unassigned"
     user.is_active = payload.is_active
     db.execute(delete(UserRoleAssignment).where(UserRoleAssignment.user_id == user.id))
     db.flush()

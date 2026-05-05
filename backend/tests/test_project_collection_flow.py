@@ -49,6 +49,35 @@ def provision_user(client: TestClient, *, full_name: str, email: str, roles: lis
     return response.json()
 
 
+def test_system_admin_can_remove_all_roles_from_provisioned_user():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        user = provision_user(client, full_name="Temporary User", email="temp@example.com", roles=["hr_manager", "finance_manager"])
+        assert user["roles"] == ["finance_manager", "hr_manager"]
+
+        remove_one_response = client.post(
+            "/users",
+            headers=ADMIN_HEADERS,
+            json={"full_name": "Temporary User", "email": "temp@example.com", "is_active": True, "roles": ["hr_manager"]},
+        )
+        assert remove_one_response.status_code == 200, remove_one_response.text
+        assert remove_one_response.json()["roles"] == ["hr_manager"]
+
+        remove_final_response = client.post(
+            "/users",
+            headers=ADMIN_HEADERS,
+            json={"full_name": "Temporary User", "email": "temp@example.com", "is_active": True, "roles": []},
+        )
+        assert remove_final_response.status_code == 200, remove_final_response.text
+        assert remove_final_response.json()["roles"] == []
+
+        login_response = client.get("/auth/me", headers={"x-test-email": "temp@example.com", "x-test-role": "hr_manager"})
+        assert login_response.status_code == 403
+        assert "No roles assigned" in login_response.text
+
+
 def test_project_to_client_collection_flow():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)

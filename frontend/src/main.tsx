@@ -778,6 +778,23 @@ function App() {
     await refreshUsers();
   }
 
+  async function removeUserRole(user: AppUser, roleToRemove: string) {
+    const nextRoles = user.roles.filter((role) => role !== roleToRemove);
+    await mutate(async () => {
+      await api<AppUser>('/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          full_name: user.full_name,
+          email: user.email,
+          is_active: user.is_active,
+          roles: nextRoles,
+        }),
+      });
+      return `${roleLabel(roleToRemove)} removed from ${user.full_name}`;
+    });
+    await refreshUsers();
+  }
+
   async function invoiceAction(path: string, body: Record<string, unknown>, message: string) {
     if (!selectedInvoice) return;
     await mutate(async () => {
@@ -952,7 +969,15 @@ function App() {
                     <span>{user.email}</span>
                   </div>
                   <div className="rolePills">
-                    {user.roles.map((role) => <span className="status" key={role}>{roleLabel(role)}</span>)}
+                    {user.roles.map((role) => (
+                      <span className="rolePill" key={role}>
+                        <span>{roleLabel(role)}</span>
+                        <button type="button" onClick={() => void removeUserRole(user, role)} disabled={loading} aria-label={`Remove ${roleLabel(role)} from ${user.full_name}`}>
+                          Remove
+                        </button>
+                      </span>
+                    ))}
+                    {user.roles.length === 0 && <span className="status">no roles</span>}
                     {!user.is_active && <span className="status cancelled">inactive</span>}
                   </div>
                 </div>

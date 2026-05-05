@@ -184,7 +184,7 @@ class AppUserRead(BaseModel):
 class AppUserUpsert(BaseModel):
     full_name: str = Field(min_length=2, max_length=160)
     email: EmailStr
-    roles: list[str] = Field(min_length=1)
+    roles: list[str] = Field(default_factory=list)
     is_active: bool = True
 
 

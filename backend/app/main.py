@@ -1126,8 +1126,9 @@ def send_sendgrid_email(
     if not SENDGRID_API_KEY:
         return "not_configured", None
     personalizations: dict[str, object] = {"to": [{"email": to_email}]}
-    if cc_emails:
-        personalizations["cc"] = [{"email": email} for email in cc_emails if email != to_email]
+    cc_recipients = [{"email": email} for email in sorted(set(cc_emails)) if email and email != to_email]
+    if cc_recipients:
+        personalizations["cc"] = cc_recipients
     payload = {
         "personalizations": [personalizations],
         "from": {"email": SENDGRID_FROM_EMAIL, "name": SENDGRID_FROM_NAME},

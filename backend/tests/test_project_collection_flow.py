@@ -899,3 +899,30 @@ def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):
     assert captured["json"]["reply_to"]["email"] == "finance@flexGCC.com"
     assert captured["json"]["attachments"][0]["filename"] == "2026-015.pdf"
     assert captured["json"]["attachments"][0]["type"] == "application/pdf"
+
+
+def test_sendgrid_omits_empty_duplicate_cc(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 202
+        text = ""
+        headers = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(app_main, "SENDGRID_API_KEY", "test-key")
+    monkeypatch.setattr(app_main.httpx, "post", fake_post)
+
+    status, _ = app_main.send_sendgrid_email(
+        to_email="hr@example.com",
+        cc_emails=["", "hr@example.com", "hr@example.com"],
+        subject="New recruitment position",
+        text="Body",
+        html="<p>Body</p>",
+    )
+
+    assert status == "sent"
+    assert "cc" not in captured["json"]["personalizations"][0]

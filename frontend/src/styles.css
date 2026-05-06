@@ -300,8 +300,14 @@ dd {
 
 .horizontalActions {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 8px;
   min-width: 0;
+}
+
+.horizontalActions select {
+  min-width: 260px;
 }
 
 .status {

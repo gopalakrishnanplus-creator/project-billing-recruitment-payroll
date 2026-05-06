@@ -41,6 +41,10 @@ class ProjectUpdate(BaseModel):
     operations_manager_name: str | None = Field(default=None, min_length=2, max_length=160)
 
 
+class ProjectClientAccountExecutiveUpdate(BaseModel):
+    client_account_executive_id: int
+
+
 class SOWCreate(BaseModel):
     sow_title: str = Field(min_length=2, max_length=255)
     sow_description: str | None = None

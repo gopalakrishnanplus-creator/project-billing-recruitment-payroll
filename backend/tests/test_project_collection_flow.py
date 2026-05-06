@@ -909,6 +909,7 @@ def test_internal_flexgcc_sales_support_historical_hires_without_msa_or_sow():
     Base.metadata.create_all(bind=engine)
 
     with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="FlexGCC Internal CAE", email="internal-cae@example.com", roles=["client_account_executive"])
         project_response = client.post(
             "/projects",
             headers=OPS_HEADERS,
@@ -926,6 +927,16 @@ def test_internal_flexgcc_sales_support_historical_hires_without_msa_or_sow():
         assert project["msa_reference"] is None
         assert project["client_account_executive_id"] is None
         assert project["documents"] == []
+
+        assign_cae_response = client.put(
+            f"/projects/{project['id']}/client-account-executive",
+            headers=ADMIN_HEADERS,
+            json={"client_account_executive_id": cae_user["id"]},
+        )
+        assert assign_cae_response.status_code == 200, assign_cae_response.text
+        assigned_project = assign_cae_response.json()
+        assert assigned_project["client_account_executive_id"] == cae_user["id"]
+        assert assigned_project["client_account_executive_email"] == "internal-cae@example.com"
 
         need_response = client.post(
             f"/projects/{project['id']}/recruitment-needs",

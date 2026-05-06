@@ -441,6 +441,10 @@ function App() {
     () => (selectedCandidate ? latestContract(selectedCandidate) : undefined),
     [selectedCandidate],
   );
+  const flexGccSalesSupportProjects = useMemo(
+    () => projects.filter((project) => project.client_company_name.toLowerCase() === 'flexgcc' && project.title.toLowerCase() === 'flexgcc sales support'),
+    [projects],
+  );
   const selectedInterview = useMemo(
     () => interviews.find((interview) => interview.id === selectedInterviewId) ?? interviews[0],
     [interviews, selectedInterviewId],
@@ -489,6 +493,9 @@ function App() {
         setUpcomingInvoices([]);
       }
       if (current.active_role === 'operations_manager') {
+        setClientAccountExecutives(await api<AppUser[]>('/users/by-role/client_account_executive'));
+      }
+      if (current.active_role === 'system_admin') {
         setClientAccountExecutives(await api<AppUser[]>('/users/by-role/client_account_executive'));
       }
       if (['operations_manager', 'hr_manager', 'system_admin'].includes(current.active_role)) {
@@ -913,6 +920,19 @@ function App() {
     await refreshUsers();
   }
 
+  async function submitInternalProjectClientAccountExecutive(event: FormEvent<HTMLFormElement>, project: Project) {
+    event.preventDefault();
+    const payload = formPayload(event.currentTarget);
+    await mutate(async () => {
+      const updatedProject = await api<Project>(`/projects/${project.id}/client-account-executive`, {
+        method: 'PUT',
+        body: JSON.stringify({ client_account_executive_id: Number(payload.client_account_executive_id) }),
+      });
+      setSelectedProjectId(updatedProject.id);
+      return `Assigned Client Account Executive to ${updatedProject.project_code}`;
+    });
+  }
+
   async function invoiceAction(path: string, body: Record<string, unknown>, message: string) {
     if (!selectedInvoice) return;
     await mutate(async () => {
@@ -1151,6 +1171,36 @@ function App() {
               <span>Save User</span>
             </button>
           </form>
+
+          <section className="panel wide">
+            <PanelTitle icon={<UserCheck size={18} />} title="FlexGCC Sales Support Client Account Executive" />
+            {flexGccSalesSupportProjects.length > 0 ? (
+              <div className="userList">
+                {flexGccSalesSupportProjects.map((project) => (
+                  <form className="userRow" key={project.id} onSubmit={(event) => void submitInternalProjectClientAccountExecutive(event, project)}>
+                    <div>
+                      <strong>{project.project_code} · {project.title}</strong>
+                      <span>Current: {project.client_account_executive_name ?? 'Not assigned'}</span>
+                    </div>
+                    <div className="horizontalActions">
+                      <select name="client_account_executive_id" required defaultValue={project.client_account_executive_id ?? ''}>
+                        <option value="" disabled>Select Client Account Executive</option>
+                        {clientAccountExecutives.map((user) => (
+                          <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
+                        ))}
+                      </select>
+                      <button className="primary" disabled={loading || clientAccountExecutives.length === 0}>
+                        <BadgeCheck size={18} />
+                        <span>Assign</span>
+                      </button>
+                    </div>
+                  </form>
+                ))}
+              </div>
+            ) : (
+              <p className="empty">No FlexGCC sales support project exists yet.</p>
+            )}
+          </section>
 
           <section className="panel wide">
             <PanelTitle icon={<ShieldCheck size={18} />} title="Provisioned Users" />

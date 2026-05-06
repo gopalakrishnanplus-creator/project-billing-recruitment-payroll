@@ -80,6 +80,7 @@ from .schemas import (
     InvoiceScheduleRead,
     PaymentCreate,
     PaymentRead,
+    ProjectClientAccountExecutiveUpdate,
     ProjectCreate,
     ProjectRead,
     ProjectUpdate,
@@ -1945,6 +1946,24 @@ async def update_project(project_id: int, request: Request, _: AuthContext = Dep
         uploaded_by_name=payload.operations_manager_name or project.operations_manager_name,
     )
     log_event(db, project_id=project.id, actor_name=project.operations_manager_name, action="project_updated", details=project.project_code)
+    db.commit()
+    return serialize_project(load_project_for_read(project.id, db))
+
+
+@app.put("/projects/{project_id}/client-account-executive", response_model=ProjectRead)
+def assign_internal_project_client_account_executive(
+    project_id: int,
+    payload: ProjectClientAccountExecutiveUpdate,
+    context: AuthContext = Depends(require_role(UserRole.system_admin.value)),
+    db: Session = Depends(get_db),
+) -> ProjectRead:
+    project = load_project_for_read(project_id, db)
+    is_flexgcc_sales_support = project.company.name.strip().lower() == "flexgcc" and project.title.strip().lower() == "flexgcc sales support"
+    if not is_flexgcc_sales_support:
+        raise HTTPException(status_code=400, detail="System Admin can assign Client Account Executive here only for FlexGCC sales support")
+    validate_client_account_executive(db, payload.client_account_executive_id)
+    project.client_account_executive_id = payload.client_account_executive_id
+    log_event(db, project_id=project.id, actor_name=context.user.full_name, action="internal_project_client_account_executive_assigned", details=project.project_code)
     db.commit()
     return serialize_project(load_project_for_read(project.id, db))
 

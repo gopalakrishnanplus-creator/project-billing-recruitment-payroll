@@ -1402,10 +1402,32 @@ def schema_overview() -> dict[str, list[str]]:
 async def create_project(request: Request, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> ProjectRead:
     data, files = await request_payload_and_files(request)
     payload: ProjectCreate = parse_model(ProjectCreate, data)
-    validate_client_account_executive(db, payload.client_account_executive_id)
-    company = db.scalar(select(ClientCompany).where(ClientCompany.name == payload.client_company_name))
+    is_internal_recruitment = payload.internal_recruitment_project or (payload.sow_title or "").strip().lower() == "flexgcc sales support"
+    if not is_internal_recruitment:
+        missing_fields = [
+            label
+            for label, value in {
+                "client_company_name": payload.client_company_name,
+                "client_contact_name": payload.client_contact_name,
+                "client_contact_email": payload.client_contact_email,
+                "client_account_executive_id": payload.client_account_executive_id,
+                "msa_reference": payload.msa_reference,
+                "sow_title": payload.sow_title,
+                "sow_amount": payload.sow_amount,
+            }.items()
+            if value in (None, "")
+        ]
+        if missing_fields:
+            raise HTTPException(status_code=422, detail=f"Missing required fields: {', '.join(missing_fields)}")
+        validate_client_account_executive(db, payload.client_account_executive_id)
+    company_name = payload.client_company_name or "FlexGCC"
+    contact_name = payload.client_contact_name or "FlexGCC Sales Support"
+    contact_email = str(payload.client_contact_email) if payload.client_contact_email else "finance@flexGCC.com"
+    sow_title = payload.sow_title or "FlexGCC sales support"
+    sow_amount = payload.sow_amount if payload.sow_amount is not None else Decimal("0.00")
+    company = db.scalar(select(ClientCompany).where(ClientCompany.name == company_name))
     if company is None:
-        company = ClientCompany(name=payload.client_company_name)
+        company = ClientCompany(name=company_name)
         db.add(company)
         db.flush()
     if payload.client_billing_address is not None:
@@ -1413,33 +1435,35 @@ async def create_project(request: Request, _: AuthContext = Depends(require_role
 
     contact = ClientContact(
         company_id=company.id,
-        full_name=payload.client_contact_name,
-        email=str(payload.client_contact_email),
+        full_name=contact_name,
+        email=contact_email,
         phone=payload.client_contact_phone,
     )
     db.add(contact)
     db.flush()
 
-    msa = db.scalar(
-        select(MasterServiceAgreement).where(
-            MasterServiceAgreement.company_id == company.id,
-            MasterServiceAgreement.reference == payload.msa_reference,
+    msa = None
+    if not is_internal_recruitment:
+        msa = db.scalar(
+            select(MasterServiceAgreement).where(
+                MasterServiceAgreement.company_id == company.id,
+                MasterServiceAgreement.reference == payload.msa_reference,
+            )
         )
-    )
-    if msa is None:
-        msa = MasterServiceAgreement(company_id=company.id, reference=payload.msa_reference)
-        db.add(msa)
-        db.flush()
+        if msa is None:
+            msa = MasterServiceAgreement(company_id=company.id, reference=payload.msa_reference)
+            db.add(msa)
+            db.flush()
 
     project = ProjectSOW(
         project_code=project_code(db),
         company_id=company.id,
         client_contact_id=contact.id,
-        msa_id=msa.id,
+        msa_id=msa.id if msa else None,
         client_account_executive_id=payload.client_account_executive_id,
-        title=payload.sow_title,
+        title=sow_title,
         description=payload.sow_description,
-        sow_amount=payload.sow_amount,
+        sow_amount=sow_amount,
         currency=payload.currency.upper(),
         start_date=payload.start_date,
         end_date=payload.end_date,
@@ -1455,7 +1479,7 @@ async def create_project(request: Request, _: AuthContext = Depends(require_role
         document_type="msa",
         uploaded_by_name=payload.operations_manager_name,
     )
-    if msa_document:
+    if msa_document and msa:
         msa.document_id = msa_document.id
     await save_uploaded_document(
         db,

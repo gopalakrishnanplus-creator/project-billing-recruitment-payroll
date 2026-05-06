@@ -353,6 +353,7 @@ function App() {
   const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
   const [scheduleBackfill, setScheduleBackfill] = useState(false);
   const [needBillingType, setNeedBillingType] = useState('periodic');
+  const [internalRecruitmentProject, setInternalRecruitmentProject] = useState(false);
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment'>(requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : 'workflow');
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
@@ -550,6 +551,18 @@ function App() {
     event.preventDefault();
     const formElement = event.currentTarget;
     const payload = new FormData(formElement);
+    if (internalRecruitmentProject) {
+      payload.set('internal_recruitment_project', 'true');
+      payload.set('client_company_name', 'FlexGCC');
+      payload.set('client_contact_name', 'FlexGCC Sales Support');
+      payload.set('client_contact_email', 'finance@flexGCC.com');
+      payload.set('sow_title', 'FlexGCC sales support');
+      payload.set('sow_amount', '0');
+      payload.delete('client_account_executive_id');
+      payload.delete('msa_reference');
+      payload.delete('msa_document');
+      payload.delete('sow_document');
+    }
     await mutate(async () => {
       const project = await api<Project>('/projects', {
         method: 'POST',
@@ -557,6 +570,7 @@ function App() {
       });
       setSelectedProjectId(project.id);
       formElement.reset();
+      setInternalRecruitmentProject(false);
       return `Created ${project.project_code}`;
     });
   }
@@ -1494,31 +1508,44 @@ function App() {
       {activeView === 'workflow' && canViewWorkflow && (
         <section className="workspace">
           {canOperate && (
-            <form className="panel wide" onSubmit={(event) => void submitProject(event)}>
+            <form className="panel wide" key={internalRecruitmentProject ? 'internal-project' : 'client-project'} onSubmit={(event) => void submitProject(event)}>
               <PanelTitle icon={<FilePlus2 size={18} />} title="Project And Initial SOW Entry" />
+              <label className="checkField">
+                <input
+                  checked={internalRecruitmentProject}
+                  onChange={(event) => setInternalRecruitmentProject(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Internal FlexGCC sales support recruitment - no MSA or SOW</span>
+              </label>
+              {internalRecruitmentProject && (
+                <p className="contextLine">
+                  Creates an internal project named FlexGCC sales support. After creation, use Recruitment to add historical completed positions and hired candidates.
+                </p>
+              )}
               <div className="grid two">
-                <Field label="Client company" name="client_company_name" required />
+                <Field label="Client company" name="client_company_name" defaultValue={internalRecruitmentProject ? 'FlexGCC' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <label className="field">
                   <span>Client billing address</span>
-                  <textarea name="client_billing_address" rows={3} />
+                  <textarea name="client_billing_address" rows={3} disabled={internalRecruitmentProject} />
                 </label>
-                <Field label="Client contact name" name="client_contact_name" required />
-                <Field label="Client contact email" name="client_contact_email" type="email" required />
-                <Field label="Client contact phone" name="client_contact_phone" />
+                <Field label="Client contact name" name="client_contact_name" defaultValue={internalRecruitmentProject ? 'FlexGCC Sales Support' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={internalRecruitmentProject ? 'finance@flexGCC.com' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="Client contact phone" name="client_contact_phone" disabled={internalRecruitmentProject} />
                 <label className="field">
                   <span>Client Account Executive</span>
-                  <select name="client_account_executive_id" required defaultValue="">
+                  <select name="client_account_executive_id" required={!internalRecruitmentProject} disabled={internalRecruitmentProject} defaultValue="">
                     <option value="" disabled>Select Client Account Executive</option>
                     {clientAccountExecutives.map((user) => (
                       <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
                     ))}
                   </select>
                 </label>
-                <Field label="MSA reference" name="msa_reference" required />
-                <Field label="MSA upload" name="msa_document" type="file" />
-                <Field label="SOW title" name="sow_title" required />
-                <Field label="SOW upload" name="sow_document" type="file" />
-                <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue="12000" required />
+                <Field label="MSA reference" name="msa_reference" disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="MSA upload" name="msa_document" type="file" disabled={internalRecruitmentProject} />
+                <Field label="SOW title" name="sow_title" defaultValue={internalRecruitmentProject ? 'FlexGCC sales support' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="SOW upload" name="sow_document" type="file" disabled={internalRecruitmentProject} />
+                <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue={internalRecruitmentProject ? '0' : '12000'} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <Field label="Currency" name="currency" defaultValue="USD" required />
                 <Field label="Start date" name="start_date" type="date" defaultValue={today()} required />
                 <Field label="End date" name="end_date" type="date" />

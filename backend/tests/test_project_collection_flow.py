@@ -861,6 +861,62 @@ def test_historical_completed_recruitment_backfill_without_hr_notification():
         assert "next future candidate invoice" in past_hire_response.text
 
 
+def test_internal_flexgcc_sales_support_historical_hires_without_msa_or_sow():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        project_response = client.post(
+            "/projects",
+            headers=OPS_HEADERS,
+            json={
+                "internal_recruitment_project": True,
+                "start_date": str(date.today()),
+                "operations_manager_name": "Ops Manager",
+            },
+        )
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        assert project["client_company_name"] == "FlexGCC"
+        assert project["title"] == "FlexGCC sales support"
+        assert project["sow_amount"] == "0.00"
+        assert project["msa_reference"] is None
+        assert project["client_account_executive_id"] is None
+        assert project["documents"] == []
+
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Sales Support Associate",
+                "number_of_positions": "1",
+                "employment_type": "FTE",
+                "description": "Historical FlexGCC sales support recruitment.",
+                "historical_completed": "on",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        need = need_response.json()
+        assert need["status"] == "closed"
+
+        hire_response = client.post(
+            f"/recruitment-needs/{need['id']}/historical-hires",
+            headers=OPS_HEADERS,
+            data={
+                "full_name": "FlexGCC Sales Hire",
+                "email": "sales-hire@example.com",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today() + timedelta(days=30)),
+            },
+        )
+        assert hire_response.status_code == 201, hire_response.text
+        candidate = hire_response.json()
+        assert candidate["status"] == "hired"
+        assert candidate["client_company_name"] == "FlexGCC"
+        assert candidate["project_title"] == "FlexGCC sales support"
+        assert candidate["position_title"] == "Sales Support Associate"
+
+
 def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):
     captured = {}
 

@@ -5,22 +5,23 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class ProjectCreate(BaseModel):
-    client_company_name: str = Field(min_length=2, max_length=255)
+    client_company_name: str | None = Field(default=None, min_length=2, max_length=255)
     client_billing_address: str | None = None
-    client_contact_name: str = Field(min_length=2, max_length=160)
-    client_contact_email: EmailStr
+    client_contact_name: str | None = Field(default=None, min_length=2, max_length=160)
+    client_contact_email: EmailStr | None = None
     client_contact_phone: str | None = None
-    client_account_executive_id: int
-    msa_reference: str = Field(min_length=2, max_length=120)
+    client_account_executive_id: int | None = None
+    msa_reference: str | None = Field(default=None, min_length=2, max_length=120)
     msa_document_name: str | None = None
-    sow_title: str = Field(min_length=2, max_length=255)
+    sow_title: str | None = Field(default=None, min_length=2, max_length=255)
     sow_description: str | None = None
     sow_document_name: str | None = None
-    sow_amount: Decimal = Field(ge=0)
+    sow_amount: Decimal | None = Field(default=None, ge=0)
     currency: str = "USD"
     start_date: date
     end_date: date | None = None
     operations_manager_name: str = Field(min_length=2, max_length=160)
+    internal_recruitment_project: bool = False
 
 
 class ProjectUpdate(BaseModel):

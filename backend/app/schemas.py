@@ -107,7 +107,7 @@ class HistoricalHireCreate(CandidateCreate):
 
 
 class CandidateStatusUpdate(BaseModel):
-    status: str = Field(pattern="^(entered|shortlisted_for_interview|rejected|backup_candidate|interview_scheduled|evaluation_submitted|send_contract|hired)$")
+    status: str = Field(pattern="^(entered|shortlisted_for_interview|rejected|backup_candidate|interview_scheduled|evaluation_submitted|send_contract|hired|terminated|inactive)$")
 
 
 class InterviewCreate(BaseModel):

@@ -853,6 +853,11 @@ function App() {
     });
   }
 
+  function editCandidateInvoiceTerms(candidate: Candidate) {
+    setSelectedCandidateId(candidate.id);
+    if (candidate.recruitment_need_id) setSelectedNeedId(candidate.recruitment_need_id);
+  }
+
   async function submitSchedule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedProject) return;
@@ -1489,6 +1494,10 @@ function App() {
                               <span>Download Contract</span>
                             </button>
                           )}
+                          <button className="primary" type="button" onClick={() => editCandidateInvoiceTerms(candidate)}>
+                            <Pencil size={18} />
+                            <span>Edit Invoice Terms</span>
+                          </button>
                         </div>
                       );
                     })}
@@ -1498,7 +1507,7 @@ function App() {
                 )}
               </section>
 
-              <form className="panel" onSubmit={(event) => void submitContract(event)}>
+              <form className="panel" key={`${selectedCandidate?.id ?? 'none'}-${selectedCandidateContract?.id ?? 'new'}`} onSubmit={(event) => void submitContract(event)}>
                 <PanelTitle icon={<FileCheck2 size={18} />} title={selectedCandidateContract ? 'Edit Candidate Invoice Terms' : 'Signed Contract And Invoice Terms'} />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
                 <Field label="Signed contract upload" name="signed_contract" type="file" />

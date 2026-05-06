@@ -821,12 +821,15 @@ def test_recruitment_flow_from_position_to_hired_candidate():
             },
         )
         assert terminate_contract_response.status_code == 200, terminate_contract_response.text
-        assert terminate_contract_response.json()["contracts"][0]["status"] == "terminated"
+        terminated_candidate = terminate_contract_response.json()
+        assert terminated_candidate["status"] == "terminated"
+        assert terminated_candidate["contracts"][0]["status"] == "terminated"
         with SessionLocal() as db:
             assert db.query(CandidateVendorInvoice).filter(CandidateVendorInvoice.contract_id == contract_id, CandidateVendorInvoice.status == "awaiting_upload").count() == 0
 
         candidates_response = client.get("/recruitment/candidates", headers=HR_HEADERS)
         assert candidates_response.status_code == 200, candidates_response.text
+        assert candidates_response.json()[0]["status"] == "terminated"
         assert candidates_response.json()[0]["interviews"][0]["recommendation"] == "hire"
 
 

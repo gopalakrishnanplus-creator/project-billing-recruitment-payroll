@@ -2297,6 +2297,10 @@ async def update_candidate_contract(contract_id: int, request: Request, context:
         contract.status = payload.status
     elif document and contract.status == "draft":
         contract.status = "signed"
+    if contract.status in {"terminated", "inactive"}:
+        candidate.status = contract.status
+    elif candidate.status in {"terminated", "inactive"} and contract.status == "signed":
+        candidate.status = "hired"
     db.flush()
     reconcile_pending_candidate_invoice_reminders(db, contract)
     if contract.status not in {"terminated", "inactive"}:

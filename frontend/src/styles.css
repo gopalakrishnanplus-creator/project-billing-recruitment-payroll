@@ -372,6 +372,13 @@ dd {
   gap: 14px;
 }
 
+.stackedForm {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 14px;
+}
+
 .authGate {
   width: min(520px, calc(100% - 32px));
   margin: 64px auto;

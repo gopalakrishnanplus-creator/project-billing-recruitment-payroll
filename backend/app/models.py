@@ -339,10 +339,17 @@ class CandidateVendorInvoice(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), nullable=False)
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_contracts.id"))
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("project_sows.id"))
     invoice_document_id: Mapped[int | None] = mapped_column(ForeignKey("uploaded_documents.id"))
+    invoice_due_date: Mapped[date | None] = mapped_column(Date)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(12), default="USD")
     status: Mapped[str] = mapped_column(String(80), default="submitted")
+    upload_token: Mapped[str | None] = mapped_column(String(96), unique=True)
+    upload_token_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    upload_token_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approval_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

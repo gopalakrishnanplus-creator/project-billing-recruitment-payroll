@@ -168,6 +168,19 @@ class PaymentCreate(BaseModel):
     recorded_by_name: str = Field(min_length=2, max_length=160)
 
 
+class CandidateInvoiceApprovalCreate(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected|on-hold)$")
+    comments: str | None = None
+
+
+class CandidatePaymentCreate(BaseModel):
+    amount_paid: Decimal = Field(gt=0)
+    paid_date: date
+    bank_reference: str | None = None
+    recorded_by_name: str = Field(min_length=2, max_length=160)
+    status: str | None = Field(default=None, pattern="^(paid|partially_paid)$")
+
+
 class RoleSelect(BaseModel):
     role: str
 
@@ -394,6 +407,61 @@ class UpcomingInvoiceRead(BaseModel):
     final_invoice_date: date | None
 
 
+class CandidateInvoiceUploadRead(BaseModel):
+    candidate_name: str
+    candidate_email: str
+    project_code: str
+    project_title: str
+    client_company_name: str
+    position_title: str | None
+    invoice_due_date: date | None
+    amount: Decimal
+    currency: str
+    status: str
+    token_used: bool
+
+
+class CandidatePaymentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    vendor_invoice_id: int
+    amount_paid: Decimal
+    paid_date: date
+    bank_reference: str | None
+    recorded_by_name: str
+
+
+class CandidateVendorInvoiceRead(BaseModel):
+    id: int
+    candidate_id: int
+    contract_id: int | None
+    project_id: int | None
+    invoice_document_id: int | None
+    invoice_document_name: str | None = None
+    candidate_name: str
+    candidate_email: str
+    project_code: str
+    project_title: str
+    client_company_name: str
+    client_account_executive_email: str | None
+    position_title: str | None
+    invoice_due_date: date | None
+    amount: Decimal
+    currency: str
+    status: str
+    submitted_at: datetime
+    approval_comments: str | None = None
+    payments: list[CandidatePaymentRead] = Field(default_factory=list)
+    paid_total: Decimal
+    balance_due: Decimal
+
+
 class GenerateInvoicesResult(BaseModel):
     generated_count: int
     invoices: list[ClientInvoiceRead]
+
+
+class CandidateInvoiceReminderResult(BaseModel):
+    reminder_count: int
+    invoices: list[CandidateVendorInvoiceRead]

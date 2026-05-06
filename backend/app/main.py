@@ -33,6 +33,9 @@ from .models import (
     AppUser,
     Candidate,
     CandidateContract,
+    CandidateInvoiceApproval,
+    CandidatePayment,
+    CandidateVendorInvoice,
     ClientCompany,
     ClientContact,
     ClientInvoice,
@@ -59,8 +62,14 @@ from .schemas import (
     CandidateContractCreate,
     CandidateContractRead,
     CandidateCreate,
+    CandidateInvoiceApprovalCreate,
+    CandidateInvoiceReminderResult,
+    CandidateInvoiceUploadRead,
+    CandidatePaymentCreate,
+    CandidatePaymentRead,
     CandidateRead,
     CandidateStatusUpdate,
+    CandidateVendorInvoiceRead,
     ClientInvoiceRead,
     CurrentUserRead,
     GenerateInvoicesResult,
@@ -235,6 +244,18 @@ def ensure_workflow_columns() -> None:
                 "invoice_date": "DATE",
             }.items():
                 add_column(conn, "candidate_contracts", existing, name, definition)
+        if "candidate_vendor_invoices" in tables:
+            existing = {column["name"] for column in inspector.get_columns("candidate_vendor_invoices")}
+            for name, definition in {
+                "contract_id": "INTEGER",
+                "project_id": "INTEGER",
+                "invoice_due_date": "DATE",
+                "upload_token": "VARCHAR(96)",
+                "upload_token_sent_at": "TIMESTAMP",
+                "upload_token_used_at": "TIMESTAMP",
+                "approval_sent_at": "TIMESTAMP",
+            }.items():
+                add_column(conn, "candidate_vendor_invoices", existing, name, definition)
         if "email_notifications" in tables:
             existing = {column["name"] for column in inspector.get_columns("email_notifications")}
             add_column(conn, "email_notifications", existing, "cc_email", "TEXT")
@@ -676,11 +697,73 @@ def serialize_candidate(candidate: Candidate, db: Session) -> CandidateRead:
     )
 
 
+def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) -> CandidateVendorInvoiceRead:
+    candidate = load_candidate(invoice.candidate_id, db)
+    project = load_project_for_read(invoice.project_id or candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    payments = db.scalars(select(CandidatePayment).where(CandidatePayment.vendor_invoice_id == invoice.id).order_by(CandidatePayment.paid_date, CandidatePayment.id)).all()
+    latest_approval = db.scalar(
+        select(CandidateInvoiceApproval)
+        .where(CandidateInvoiceApproval.vendor_invoice_id == invoice.id)
+        .order_by(CandidateInvoiceApproval.decided_at.desc(), CandidateInvoiceApproval.id.desc())
+    )
+    paid_total = sum((payment.amount_paid for payment in payments), Decimal("0.00"))
+    balance_due = max(invoice.amount - paid_total, Decimal("0.00"))
+    return CandidateVendorInvoiceRead(
+        id=invoice.id,
+        candidate_id=invoice.candidate_id,
+        contract_id=invoice.contract_id,
+        project_id=invoice.project_id,
+        invoice_document_id=invoice.invoice_document_id,
+        invoice_document_name=document_name(db, invoice.invoice_document_id),
+        candidate_name=candidate.full_name,
+        candidate_email=candidate.email,
+        project_code=project.project_code,
+        project_title=project.title,
+        client_company_name=project.company.name,
+        client_account_executive_email=project.client_account_executive.email if project.client_account_executive else None,
+        position_title=need.position_title if need else None,
+        invoice_due_date=invoice.invoice_due_date,
+        amount=invoice.amount,
+        currency=invoice.currency,
+        status=invoice.status,
+        submitted_at=invoice.submitted_at,
+        approval_comments=latest_approval.notes if latest_approval else None,
+        payments=[CandidatePaymentRead.model_validate(payment) for payment in payments],
+        paid_total=paid_total,
+        balance_due=balance_due,
+    )
+
+
 def load_candidate(candidate_id: int, db: Session) -> Candidate:
     candidate = db.get(Candidate, candidate_id)
     if candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
     return candidate
+
+
+def load_candidate_invoice(invoice_id: int, db: Session) -> CandidateVendorInvoice:
+    invoice = db.get(CandidateVendorInvoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Candidate invoice not found")
+    return invoice
+
+
+def authorize_candidate_invoice_visibility(invoice: CandidateVendorInvoice, context: AuthContext, db: Session) -> None:
+    candidate = load_candidate(invoice.candidate_id, db)
+    project = load_project_for_read(invoice.project_id or candidate.project_id, db)
+    if context.active_role == UserRole.client_account_executive.value and project.client_account_executive_id != context.user.id:
+        raise HTTPException(status_code=404, detail="Candidate invoice not found")
+
+
+def authorize_candidate_invoice_approval(invoice: CandidateVendorInvoice, context: AuthContext, db: Session) -> None:
+    candidate = load_candidate(invoice.candidate_id, db)
+    project = load_project_for_read(invoice.project_id or candidate.project_id, db)
+    if (
+        UserRole.client_account_executive.value not in context.roles
+        or project.client_account_executive_id != context.user.id
+    ):
+        raise HTTPException(status_code=404, detail="Candidate invoice not found")
 
 
 def validate_internal_interviewer(db: Session, user_id: int) -> AppUser:
@@ -848,6 +931,236 @@ def notify_interview_assignment(db: Session, candidate: Candidate, interviewer: 
                 status=status,
             )
         )
+
+
+def next_candidate_invoice_due_date(contract: CandidateContract, db: Session, as_of: date) -> date | None:
+    if not contract.invoice_frequency:
+        return None
+    candidate_date = contract.invoice_date if contract.invoice_frequency == "single" else contract.invoice_start_date
+    if candidate_date is None:
+        return None
+    issued_dates = {
+        due_date
+        for due_date in db.scalars(
+            select(CandidateVendorInvoice.invoice_due_date).where(
+                CandidateVendorInvoice.contract_id == contract.id,
+                CandidateVendorInvoice.invoice_due_date.is_not(None),
+            )
+        ).all()
+        if due_date is not None
+    }
+    for _ in range(600):
+        if contract.invoice_end_date and candidate_date > contract.invoice_end_date:
+            return None
+        if candidate_date not in issued_dates and candidate_date >= as_of:
+            return candidate_date
+        if contract.invoice_frequency == "single":
+            return None
+        candidate_date = next_date(candidate_date, contract.invoice_frequency)
+    return None
+
+
+def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[str, str, str]:
+    upload_link = f"{FRONTEND_URL}/?{urlencode({'candidate_invoice_token': invoice.upload_token or ''})}"
+    position = need.position_title if need else "Not set"
+    subject = f"Reminder to upload invoice for {position}"
+    text = "\n".join(
+        [
+            f"Dear {candidate.full_name},",
+            "",
+            "This is a reminder to upload your invoice in the FlexGCC system.",
+            "The upload link below is single-use and can be used only once.",
+            "",
+            f"Position: {position}",
+            f"Invoice due date: {invoice.invoice_due_date or 'not set'}",
+            f"Amount: {invoice.currency} {invoice.amount}",
+            "",
+            f"Single-use upload link: {upload_link}",
+        ]
+    )
+    html = f"""
+    <h2>Candidate invoice upload reminder</h2>
+    <p>Dear {escape(candidate.full_name)},</p>
+    <p>This is a reminder to upload your invoice in the FlexGCC system.</p>
+    <p><strong>This upload link is single-use and can be used only once.</strong></p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
+      <tr><td><strong>Invoice due date</strong></td><td>{escape(str(invoice.invoice_due_date or 'not set'))}</td></tr>
+      <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+    </table>
+    <p><a href="{escape(upload_link)}">Upload your invoice using this single-use link</a></p>
+    """
+    return subject, text, html
+
+
+def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[str, str, str]:
+    approval_link = f"{API_BASE_URL}/auth/login?{urlencode({'candidate_invoice_id': invoice.id})}"
+    position = need.position_title if need else "Not set"
+    subject = f"Candidate invoice approval required: {candidate.full_name}"
+    text = "\n".join(
+        [
+            "A candidate invoice has been uploaded and requires Client Account Executive review.",
+            "",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Candidate: {candidate.full_name}",
+            f"Position: {position}",
+            f"Invoice due date: {invoice.invoice_due_date or 'not set'}",
+            f"Amount: {invoice.currency} {invoice.amount}",
+            "",
+            f"Log in to review and approve: {approval_link}",
+        ]
+    )
+    html = f"""
+    <h2>Candidate invoice approval required</h2>
+    <p>A candidate invoice has been uploaded and requires Client Account Executive review.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
+      <tr><td><strong>Invoice due date</strong></td><td>{escape(str(invoice.invoice_due_date or 'not set'))}</td></tr>
+      <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+    </table>
+    <p><a href="{escape(approval_link)}">Log in to review this candidate invoice</a></p>
+    """
+    return subject, text, html
+
+
+def candidate_invoice_finance_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, comments: str | None) -> tuple[str, str, str]:
+    download_link = f"{API_BASE_URL}/candidate-invoices/{invoice.id}/download"
+    position = need.position_title if need else "Not set"
+    subject = f"Candidate invoice approved: {candidate.full_name}"
+    text = "\n".join(
+        [
+            "A candidate invoice has been approved by the Client Account Executive.",
+            "",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Candidate: {candidate.full_name}",
+            f"Position: {position}",
+            f"Amount: {invoice.currency} {invoice.amount}",
+            f"Client Account Executive comments: {comments or 'None'}",
+            "",
+            f"Download uploaded invoice: {download_link}",
+        ]
+    )
+    html = f"""
+    <h2>Candidate invoice approved</h2>
+    <p>A candidate invoice has been approved by the Client Account Executive.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
+      <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+      <tr><td><strong>Client Account Executive comments</strong></td><td>{escape(comments or 'None')}</td></tr>
+    </table>
+    <p><a href="{escape(download_link)}">Download uploaded invoice</a></p>
+    """
+    return subject, text, html
+
+
+def queue_candidate_invoice_approval_email(db: Session, invoice: CandidateVendorInvoice) -> None:
+    candidate = load_candidate(invoice.candidate_id, db)
+    project = load_project_for_read(invoice.project_id or candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    finance_emails = finance_manager_emails(db)
+    if not project.client_account_executive:
+        invoice.status = "approved"
+        subject, text_body, html = candidate_invoice_finance_template(invoice, candidate, project, need, "No Client Account Executive is assigned to this project.")
+        recipients = finance_emails
+        if not recipients:
+            db.add(EmailNotification(project_id=project.id, recipient_email="", subject=subject, body="No active Finance Manager user is assigned in the system.", status="failed"))
+            return
+        for recipient in recipients:
+            status, detail = send_sendgrid_email(to_email=recipient, cc_emails=[], subject=subject, text=text_body, html=html)
+            db.add(EmailNotification(project_id=project.id, recipient_email=recipient, subject=subject, body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}", status=status))
+        return
+
+    recipient = project.client_account_executive.email
+    cc_emails = [email for email in finance_emails if email != recipient]
+    subject, text_body, html = candidate_invoice_approval_template(invoice, candidate, project, need)
+    status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text_body, html=html)
+    invoice.approval_sent_at = utcnow()
+    db.add(
+        EmailNotification(
+            project_id=project.id,
+            recipient_email=recipient,
+            cc_email=",".join(cc_emails) if cc_emails else None,
+            subject=subject,
+            body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+            status=status,
+        )
+    )
+
+
+def queue_candidate_invoice_finance_email(db: Session, invoice: CandidateVendorInvoice, comments: str | None) -> None:
+    candidate = load_candidate(invoice.candidate_id, db)
+    project = load_project_for_read(invoice.project_id or candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    recipients = finance_manager_emails(db)
+    cc_emails = [project.client_account_executive.email] if project.client_account_executive else []
+    subject, text_body, html = candidate_invoice_finance_template(invoice, candidate, project, need, comments)
+    if not recipients:
+        db.add(EmailNotification(project_id=project.id, recipient_email="", cc_email=",".join(cc_emails) or None, subject=subject, body="No active Finance Manager user is assigned in the system.", status="failed"))
+        return
+    for recipient in recipients:
+        filtered_cc = [email for email in cc_emails if email and email != recipient]
+        status, detail = send_sendgrid_email(to_email=recipient, cc_emails=filtered_cc, subject=subject, text=text_body, html=html)
+        db.add(
+            EmailNotification(
+                project_id=project.id,
+                recipient_email=recipient,
+                cc_email=",".join(filtered_cc) if filtered_cc else None,
+                subject=subject,
+                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                status=status,
+            )
+        )
+
+
+def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[CandidateVendorInvoice]:
+    reminder_cutoff = as_of + timedelta(days=2)
+    contracts = db.scalars(select(CandidateContract).order_by(CandidateContract.id)).all()
+    generated: list[CandidateVendorInvoice] = []
+    for contract in contracts:
+        if not contract.invoice_amount or not contract.invoice_frequency:
+            continue
+        candidate = db.get(Candidate, contract.candidate_id)
+        if candidate is None or candidate.status != "hired":
+            continue
+        due_date = next_candidate_invoice_due_date(contract, db, as_of)
+        if due_date is None or due_date > reminder_cutoff:
+            continue
+        project = load_project_for_read(candidate.project_id, db)
+        need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+        invoice = CandidateVendorInvoice(
+            candidate_id=candidate.id,
+            contract_id=contract.id,
+            project_id=candidate.project_id,
+            invoice_due_date=due_date,
+            amount=contract.invoice_amount,
+            currency=(contract.currency or "USD").upper(),
+            status="awaiting_upload",
+            upload_token=uuid4().hex,
+            upload_token_sent_at=utcnow(),
+        )
+        db.add(invoice)
+        db.flush()
+        subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need)
+        status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=[], subject=subject, text=text_body, html=html)
+        db.add(
+            EmailNotification(
+                project_id=candidate.project_id,
+                recipient_email=candidate.email,
+                subject=subject,
+                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                status=status,
+            )
+        )
+        generated.append(invoice)
+    return generated
 
 
 def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
@@ -1224,7 +1537,12 @@ def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
 
 
 @app.get("/auth/login")
-async def auth_login(request: Request, approval_invoice_id: int | None = Query(default=None), db: Session = Depends(get_db)):
+async def auth_login(
+    request: Request,
+    approval_invoice_id: int | None = Query(default=None),
+    candidate_invoice_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
     if not GOOGLE_CONFIGURED:
         raise HTTPException(status_code=503, detail="Google OAuth is not configured")
     if approval_invoice_id is not None:
@@ -1233,8 +1551,14 @@ async def auth_login(request: Request, approval_invoice_id: int | None = Query(d
             return RedirectResponse(f"{FRONTEND_URL}/?auth_error=invoice_not_found")
         request.session.clear()
         request.session["pending_approval_invoice_id"] = approval_invoice_id
+    if candidate_invoice_id is not None:
+        invoice = db.get(CandidateVendorInvoice, candidate_invoice_id)
+        if invoice is None:
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=candidate_invoice_not_found")
+        request.session.clear()
+        request.session["pending_candidate_invoice_id"] = candidate_invoice_id
     redirect_uri = getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
-    kwargs = {"prompt": "select_account"} if approval_invoice_id is not None else {}
+    kwargs = {"prompt": "select_account"} if approval_invoice_id is not None or candidate_invoice_id is not None else {}
     return await oauth.google.authorize_redirect(request, redirect_uri, **kwargs)
 
 
@@ -1274,6 +1598,21 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
             return RedirectResponse(f"{FRONTEND_URL}/?approval_invoice_id={pending_approval_invoice_id}&approval_error=not_authorized")
         request.session["active_role"] = UserRole.client_account_executive.value
         return RedirectResponse(f"{FRONTEND_URL}/?approval_invoice_id={pending_approval_invoice_id}")
+    pending_candidate_invoice_id = request.session.pop("pending_candidate_invoice_id", None)
+    if pending_candidate_invoice_id is not None:
+        invoice = db.get(CandidateVendorInvoice, pending_candidate_invoice_id)
+        candidate = db.get(Candidate, invoice.candidate_id) if invoice else None
+        project = db.get(ProjectSOW, invoice.project_id or candidate.project_id) if invoice and candidate else None
+        if (
+            invoice is None
+            or candidate is None
+            or project is None
+            or UserRole.client_account_executive.value not in roles
+            or project.client_account_executive_id != user.id
+        ):
+            return RedirectResponse(f"{FRONTEND_URL}/?candidate_invoice_id={pending_candidate_invoice_id}&candidate_invoice_error=not_authorized")
+        request.session["active_role"] = UserRole.client_account_executive.value
+        return RedirectResponse(f"{FRONTEND_URL}/?candidate_invoice_id={pending_candidate_invoice_id}")
     if len(roles) == 1:
         request.session["active_role"] = roles[0]
     return RedirectResponse(FRONTEND_URL)
@@ -1386,13 +1725,13 @@ def schema_overview() -> dict[str, list[str]]:
             "interviews",
             "interview_scorecards",
             "candidate_contracts",
+            "candidate_vendor_invoices",
+            "candidate_invoice_approvals",
+            "candidate_payments",
         ],
         "reserved_later_flow_tables": [
             "candidate_screening_forms",
             "candidate_evaluations",
-            "candidate_vendor_invoices",
-            "candidate_invoice_approvals",
-            "candidate_payments",
             "agent_tasks",
         ],
     }
@@ -1798,7 +2137,9 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
     )
     need.status = "closed"
     db.add(contract)
+    db.flush()
     log_event(db, project_id=need.project_id, actor_name=context.user.full_name, action="historical_hire_added", details=candidate.full_name)
+    send_due_candidate_invoice_reminders(db, date.today())
     db.commit()
     db.refresh(candidate)
     return serialize_candidate(candidate, db)
@@ -1898,7 +2239,9 @@ async def upload_candidate_contract(candidate_id: int, request: Request, context
     )
     candidate.status = "hired"
     db.add(contract)
+    db.flush()
     log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_contract_uploaded", details=candidate.full_name)
+    send_due_candidate_invoice_reminders(db, date.today())
     db.commit()
     db.refresh(candidate)
     return serialize_candidate(candidate, db)
@@ -1937,6 +2280,7 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: Aut
 @app.post("/invoices/generate", response_model=GenerateInvoicesResult)
 def generate_due_invoices(as_of: date = Query(default_factory=date.today), _: AuthContext = Depends(require_role(UserRole.system_admin.value)), db: Session = Depends(get_db)) -> GenerateInvoicesResult:
     generated = create_due_invoices(db, as_of)
+    send_due_candidate_invoice_reminders(db, as_of)
     db.commit()
     for invoice in generated:
         db.refresh(invoice)
@@ -1948,10 +2292,164 @@ def generate_due_invoices_system(request: Request, as_of: date = Query(default_f
     if not INVOICE_CRON_TOKEN or request.headers.get("x-system-token") != INVOICE_CRON_TOKEN:
         raise HTTPException(status_code=401, detail="System token required")
     generated = create_due_invoices(db, as_of)
+    send_due_candidate_invoice_reminders(db, as_of)
     db.commit()
     for invoice in generated:
         db.refresh(invoice)
     return GenerateInvoicesResult(generated_count=len(generated), invoices=[ClientInvoiceRead.model_validate(invoice) for invoice in generated])
+
+
+@app.post("/system/candidate-invoices/reminders", response_model=CandidateInvoiceReminderResult)
+def send_candidate_invoice_reminders_system(request: Request, as_of: date = Query(default_factory=date.today), db: Session = Depends(get_db)) -> CandidateInvoiceReminderResult:
+    if not INVOICE_CRON_TOKEN or request.headers.get("x-system-token") != INVOICE_CRON_TOKEN:
+        raise HTTPException(status_code=401, detail="System token required")
+    generated = send_due_candidate_invoice_reminders(db, as_of)
+    db.commit()
+    for invoice in generated:
+        db.refresh(invoice)
+    return CandidateInvoiceReminderResult(reminder_count=len(generated), invoices=[serialize_candidate_invoice(invoice, db) for invoice in generated])
+
+
+@app.post("/candidate-invoices/reminders", response_model=CandidateInvoiceReminderResult)
+def send_candidate_invoice_reminders_admin(as_of: date = Query(default_factory=date.today), _: AuthContext = Depends(require_role(UserRole.system_admin.value)), db: Session = Depends(get_db)) -> CandidateInvoiceReminderResult:
+    generated = send_due_candidate_invoice_reminders(db, as_of)
+    db.commit()
+    for invoice in generated:
+        db.refresh(invoice)
+    return CandidateInvoiceReminderResult(reminder_count=len(generated), invoices=[serialize_candidate_invoice(invoice, db) for invoice in generated])
+
+
+@app.get("/candidate-invoices/upload/{token}", response_model=CandidateInvoiceUploadRead)
+def get_candidate_invoice_upload(token: str, db: Session = Depends(get_db)) -> CandidateInvoiceUploadRead:
+    invoice = db.scalar(select(CandidateVendorInvoice).where(CandidateVendorInvoice.upload_token == token))
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice upload link not found")
+    candidate = load_candidate(invoice.candidate_id, db)
+    project = load_project_for_read(invoice.project_id or candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    return CandidateInvoiceUploadRead(
+        candidate_name=candidate.full_name,
+        candidate_email=candidate.email,
+        project_code=project.project_code,
+        project_title=project.title,
+        client_company_name=project.company.name,
+        position_title=need.position_title if need else None,
+        invoice_due_date=invoice.invoice_due_date,
+        amount=invoice.amount,
+        currency=invoice.currency,
+        status=invoice.status,
+        token_used=invoice.upload_token_used_at is not None or invoice.invoice_document_id is not None,
+    )
+
+
+@app.post("/candidate-invoices/upload/{token}", response_model=CandidateInvoiceUploadRead)
+async def upload_candidate_invoice(token: str, request: Request, db: Session = Depends(get_db)) -> CandidateInvoiceUploadRead:
+    invoice = db.scalar(select(CandidateVendorInvoice).where(CandidateVendorInvoice.upload_token == token))
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice upload link not found")
+    if invoice.upload_token_used_at is not None or invoice.invoice_document_id is not None:
+        raise HTTPException(status_code=400, detail="This single-use invoice upload link has already been used")
+    data, files = await request_payload_and_files(request)
+    document = await save_uploaded_document(db, file=files.get("invoice_document"), project_id=invoice.project_id, document_type="candidate_vendor_invoice", uploaded_by_name="Candidate")
+    if document is None:
+        raise HTTPException(status_code=422, detail="Invoice upload file is required")
+    invoice.invoice_document_id = document.id
+    invoice.upload_token_used_at = utcnow()
+    invoice.submitted_at = utcnow()
+    invoice.status = "submitted"
+    queue_candidate_invoice_approval_email(db, invoice)
+    log_event(db, project_id=invoice.project_id, actor_name="Candidate", action="candidate_invoice_uploaded", details=str(invoice.id))
+    db.commit()
+    db.refresh(invoice)
+    return get_candidate_invoice_upload(token, db)
+
+
+@app.get("/candidate-invoices", response_model=list[CandidateVendorInvoiceRead])
+def list_candidate_invoices(
+    context: AuthContext = Depends(require_login),
+    status: str | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[CandidateVendorInvoiceRead]:
+    query = select(CandidateVendorInvoice).where(CandidateVendorInvoice.status != "awaiting_upload").order_by(CandidateVendorInvoice.invoice_due_date.asc(), CandidateVendorInvoice.id.asc())
+    if context.active_role == UserRole.client_account_executive.value:
+        query = query.join(ProjectSOW, ProjectSOW.id == CandidateVendorInvoice.project_id).where(ProjectSOW.client_account_executive_id == context.user.id)
+    if status:
+        query = query.where(CandidateVendorInvoice.status == status)
+    if date_from:
+        query = query.where(CandidateVendorInvoice.invoice_due_date >= date_from)
+    if date_to:
+        query = query.where(CandidateVendorInvoice.invoice_due_date <= date_to)
+    query = query.offset((page - 1) * page_size).limit(page_size)
+    invoices = db.scalars(query).all()
+    return [serialize_candidate_invoice(invoice, db) for invoice in invoices]
+
+
+@app.get("/candidate-invoices/{invoice_id}/client-account-approval-view", response_model=CandidateVendorInvoiceRead)
+def get_candidate_invoice_approval(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> CandidateVendorInvoiceRead:
+    invoice = load_candidate_invoice(invoice_id, db)
+    authorize_candidate_invoice_approval(invoice, context, db)
+    return serialize_candidate_invoice(invoice, db)
+
+
+@app.get("/candidate-invoices/{invoice_id}/download")
+def download_candidate_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
+    invoice = load_candidate_invoice(invoice_id, db)
+    authorize_candidate_invoice_visibility(invoice, context, db)
+    if invoice.invoice_document_id is None:
+        raise HTTPException(status_code=404, detail="Uploaded invoice document not found")
+    document = db.get(UploadedDocument, invoice.invoice_document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Uploaded invoice document not found")
+    content = document.content_bytes
+    if content is None and document.storage_uri:
+        path = Path(document.storage_uri)
+        if path.exists():
+            content = path.read_bytes()
+    if content is None:
+        raise HTTPException(status_code=404, detail="Document content not found")
+    return Response(
+        content=content,
+        media_type=document.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{quote(document.original_filename)}"'},
+    )
+
+
+@app.post("/candidate-invoices/{invoice_id}/client-account-approval", response_model=CandidateVendorInvoiceRead)
+def decide_candidate_invoice(invoice_id: int, payload: CandidateInvoiceApprovalCreate, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> CandidateVendorInvoiceRead:
+    invoice = load_candidate_invoice(invoice_id, db)
+    authorize_candidate_invoice_approval(invoice, context, db)
+    if invoice.status in {"paid", "partially_paid"}:
+        raise HTTPException(status_code=400, detail=f"Candidate invoice cannot be changed after payment status: {invoice.status}")
+    if invoice.status == "awaiting_upload":
+        raise HTTPException(status_code=400, detail="Candidate invoice has not been uploaded yet")
+    invoice.status = payload.decision
+    db.add(CandidateInvoiceApproval(vendor_invoice_id=invoice.id, approver_name=context.user.full_name, decision=payload.decision, notes=payload.comments))
+    if payload.decision == "approved":
+        queue_candidate_invoice_finance_email(db, invoice, payload.comments)
+    log_event(db, project_id=invoice.project_id, actor_name=context.user.full_name, action="candidate_invoice_decision", details=f"{invoice.id}: {payload.decision}")
+    db.commit()
+    db.refresh(invoice)
+    return serialize_candidate_invoice(invoice, db)
+
+
+@app.post("/candidate-invoices/{invoice_id}/payments", response_model=CandidateVendorInvoiceRead, status_code=201)
+def record_candidate_invoice_payment(invoice_id: int, payload: CandidatePaymentCreate, _: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> CandidateVendorInvoiceRead:
+    invoice = load_candidate_invoice(invoice_id, db)
+    if invoice.status not in {"approved", "partially_paid", "paid"}:
+        raise HTTPException(status_code=400, detail=f"Candidate invoice must be approved before payment can be recorded: {invoice.status}")
+    payment = CandidatePayment(vendor_invoice_id=invoice.id, amount_paid=payload.amount_paid, paid_date=payload.paid_date, bank_reference=payload.bank_reference, recorded_by_name=payload.recorded_by_name)
+    db.add(payment)
+    db.flush()
+    paid_total = (db.scalar(select(func.coalesce(func.sum(CandidatePayment.amount_paid), 0)).where(CandidatePayment.vendor_invoice_id == invoice.id)) or Decimal("0.00"))
+    invoice.status = payload.status or (("paid" if paid_total >= invoice.amount else "partially_paid"))
+    log_event(db, project_id=invoice.project_id, actor_name=payload.recorded_by_name, action="candidate_invoice_payment_recorded", details=str(payload.amount_paid))
+    db.commit()
+    db.refresh(invoice)
+    return serialize_candidate_invoice(invoice, db)
 
 
 @app.get("/client-invoices", response_model=list[InvoiceDetailRead])

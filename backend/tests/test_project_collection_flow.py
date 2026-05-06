@@ -6,7 +6,7 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 from app.database import Base, engine
 from app import main as app_main
 from app.main import app
-from app.models import EmailNotification
+from app.models import CandidateVendorInvoice, EmailNotification
 from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
@@ -915,6 +915,147 @@ def test_internal_flexgcc_sales_support_historical_hires_without_msa_or_sow():
         assert candidate["client_company_name"] == "FlexGCC"
         assert candidate["project_title"] == "FlexGCC sales support"
         assert candidate["position_title"] == "Sales Support Associate"
+
+
+def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Candidate Invoice Consultant",
+                "number_of_positions": "1",
+                "employment_type": "Fractional Consultant",
+                "description": "Candidate invoice workflow recruitment.",
+                "historical_completed": "on",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        hire_response = client.post(
+            f"/recruitment-needs/{need_response.json()['id']}/historical-hires",
+            headers=HR_HEADERS,
+            data={
+                "full_name": "Invoice Candidate",
+                "email": "candidate-invoice@example.com",
+                "invoice_terms": "Monthly candidate invoice.",
+                "invoice_amount": "1500.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today() + timedelta(days=1)),
+                "invoice_end_date": str(date.today() + timedelta(days=60)),
+            },
+            files={"signed_contract": ("candidate-contract.pdf", b"signed", "application/pdf")},
+        )
+        assert hire_response.status_code == 201, hire_response.text
+
+        with SessionLocal() as db:
+            reminder_invoice = db.query(CandidateVendorInvoice).one()
+            assert reminder_invoice.status == "awaiting_upload"
+            assert reminder_invoice.upload_token is not None
+            token = reminder_invoice.upload_token
+            reminder_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "candidate-invoice@example.com").one()
+            assert "single-use" in reminder_email.body
+            assert token in reminder_email.body
+
+        upload_view = client.get(f"/candidate-invoices/upload/{token}")
+        assert upload_view.status_code == 200, upload_view.text
+        assert upload_view.json()["token_used"] is False
+        upload_response = client.post(
+            f"/candidate-invoices/upload/{token}",
+            files={"invoice_document": ("candidate-invoice.pdf", b"invoice", "application/pdf")},
+        )
+        assert upload_response.status_code == 200, upload_response.text
+        assert upload_response.json()["token_used"] is True
+        assert upload_response.json()["status"] == "submitted"
+        repeat_upload = client.post(
+            f"/candidate-invoices/upload/{token}",
+            files={"invoice_document": ("candidate-invoice.pdf", b"invoice", "application/pdf")},
+        )
+        assert repeat_upload.status_code == 400
+
+        candidate_invoices = client.get("/candidate-invoices", headers=FINANCE_HEADERS)
+        assert candidate_invoices.status_code == 200, candidate_invoices.text
+        candidate_invoice = candidate_invoices.json()[0]
+        invoice_id = candidate_invoice["id"]
+        assert candidate_invoice["candidate_name"] == "Invoice Candidate"
+        assert candidate_invoice["status"] == "submitted"
+
+        with SessionLocal() as db:
+            approval_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "cae@example.com").one()
+            assert f"/auth/login?candidate_invoice_id={invoice_id}" in approval_email.body
+            assert "finance@example.com" in (approval_email.cc_email or "")
+
+        wrong_cae_response = client.get(
+            f"/candidate-invoices/{invoice_id}/client-account-approval-view",
+            headers={"x-test-email": "other-cae@example.com", "x-test-role": "client_account_executive"},
+        )
+        assert wrong_cae_response.status_code == 404
+        approval_view = client.get(f"/candidate-invoices/{invoice_id}/client-account-approval-view", headers=CAE_HEADERS)
+        assert approval_view.status_code == 200, approval_view.text
+        assert approval_view.json()["invoice_document_name"] == "candidate-invoice.pdf"
+        download_response = client.get(f"/candidate-invoices/{invoice_id}/download", headers=CAE_HEADERS)
+        assert download_response.status_code == 200
+        assert download_response.content == b"invoice"
+
+        on_hold_response = client.post(
+            f"/candidate-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"decision": "on-hold", "comments": "Need corrected invoice number."},
+        )
+        assert on_hold_response.status_code == 200, on_hold_response.text
+        assert on_hold_response.json()["status"] == "on-hold"
+        approved_response = client.post(
+            f"/candidate-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"decision": "approved", "comments": "Approved for payment."},
+        )
+        assert approved_response.status_code == 200, approved_response.text
+        assert approved_response.json()["status"] == "approved"
+
+        with SessionLocal() as db:
+            finance_email = (
+                db.query(EmailNotification)
+                .filter(EmailNotification.recipient_email == "finance@example.com", EmailNotification.subject.like("%approved%"))
+                .one()
+            )
+            assert "Approved for payment." in finance_email.body
+            assert "cae@example.com" in (finance_email.cc_email or "")
+
+        partial_response = client.post(
+            f"/candidate-invoices/{invoice_id}/payments",
+            headers=FINANCE_HEADERS,
+            json={
+                "amount_paid": "500.00",
+                "paid_date": str(date.today()),
+                "bank_reference": "BANK-1",
+                "recorded_by_name": "Finance Manager",
+                "status": "partially_paid",
+            },
+        )
+        assert partial_response.status_code == 201, partial_response.text
+        assert partial_response.json()["status"] == "partially_paid"
+        assert partial_response.json()["paid_total"] == "500.00"
+        paid_response = client.post(
+            f"/candidate-invoices/{invoice_id}/payments",
+            headers=FINANCE_HEADERS,
+            json={
+                "amount_paid": "1000.00",
+                "paid_date": str(date.today()),
+                "recorded_by_name": "Finance Manager",
+            },
+        )
+        assert paid_response.status_code == 201, paid_response.text
+        assert paid_response.json()["status"] == "paid"
+        assert paid_response.json()["balance_due"] == "0.00"
 
 
 def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):

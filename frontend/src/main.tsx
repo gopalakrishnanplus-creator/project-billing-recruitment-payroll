@@ -44,6 +44,7 @@ const INVOICE_STATUSES = [
   'cancelled',
 ];
 const UPCOMING_INVOICES_FILTER = 'upcoming_invoices';
+const CANDIDATE_INVOICE_STATUSES = ['submitted', 'on-hold', 'rejected', 'approved', 'paid', 'partially_paid'];
 
 type Project = {
   id: number;
@@ -211,6 +212,44 @@ type Candidate = {
   contracts: CandidateContract[];
 };
 
+type CandidateInvoiceUpload = {
+  candidate_name: string;
+  candidate_email: string;
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  position_title: string | null;
+  invoice_due_date: string | null;
+  amount: string;
+  currency: string;
+  status: string;
+  token_used: boolean;
+};
+
+type CandidateInvoice = {
+  id: number;
+  candidate_id: number;
+  contract_id: number | null;
+  project_id: number | null;
+  invoice_document_id: number | null;
+  invoice_document_name: string | null;
+  candidate_name: string;
+  candidate_email: string;
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  client_account_executive_email: string | null;
+  position_title: string | null;
+  invoice_due_date: string | null;
+  amount: string;
+  currency: string;
+  status: string;
+  submitted_at: string;
+  approval_comments: string | null;
+  paid_total: string;
+  balance_due: string;
+};
+
 type CurrentUser = {
   authenticated: boolean;
   id: number | null;
@@ -330,6 +369,9 @@ function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const approvalInvoiceId = urlParams.get('approval_invoice_id');
   const approvalError = urlParams.get('approval_error');
+  const candidateInvoiceToken = urlParams.get('candidate_invoice_token');
+  const candidateInvoiceId = urlParams.get('candidate_invoice_id');
+  const candidateInvoiceError = urlParams.get('candidate_invoice_error');
   const requestedView = urlParams.get('view');
   const requestedNeedId = Number(urlParams.get('need_id') ?? '');
   const requestedInterviewId = Number(urlParams.get('interview_id') ?? '');
@@ -341,11 +383,15 @@ function App() {
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
   const [upcomingInvoices, setUpcomingInvoices] = useState<UpcomingInvoice[]>([]);
   const [approvalInvoice, setApprovalInvoice] = useState<ClientInvoice | null>(null);
+  const [candidateInvoices, setCandidateInvoices] = useState<CandidateInvoice[]>([]);
+  const [candidateInvoiceUpload, setCandidateInvoiceUpload] = useState<CandidateInvoiceUpload | null>(null);
+  const [candidateApprovalInvoice, setCandidateApprovalInvoice] = useState<CandidateInvoice | null>(null);
   const [recruitmentNeeds, setRecruitmentNeeds] = useState<RecruitmentNeedDetail[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [interviews, setInterviews] = useState<Interview[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
+  const [selectedCandidateInvoiceId, setSelectedCandidateInvoiceId] = useState<number | null>(null);
   const [selectedNeedId, setSelectedNeedId] = useState<number | null>(Number.isFinite(requestedNeedId) && requestedNeedId > 0 ? requestedNeedId : null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
   const [selectedInterviewId, setSelectedInterviewId] = useState<number | null>(Number.isFinite(requestedInterviewId) && requestedInterviewId > 0 ? requestedInterviewId : null);
@@ -370,6 +416,10 @@ function App() {
   const selectedInvoice = useMemo(
     () => invoices.find((invoice) => invoice.id === selectedInvoiceId) ?? invoices[0],
     [invoices, selectedInvoiceId],
+  );
+  const selectedCandidateInvoice = useMemo(
+    () => candidateInvoices.find((invoice) => invoice.id === selectedCandidateInvoiceId) ?? candidateInvoices[0],
+    [candidateInvoices, selectedCandidateInvoiceId],
   );
   const selectedNeed = useMemo(
     () => recruitmentNeeds.find((need) => need.id === selectedNeedId) ?? recruitmentNeeds[0],
@@ -457,6 +507,11 @@ function App() {
       }
       if (!selectedProjectId && projectData[0]) setSelectedProjectId(projectData[0].id);
       if (!showingUpcomingInvoices && !selectedInvoiceId && invoiceData[0]) setSelectedInvoiceId((invoiceData[0] as ClientInvoice).id);
+      if (['finance_manager', 'operations_manager', 'hr_manager', 'client_account_executive', 'system_admin'].includes(current.active_role)) {
+        const candidateInvoiceData = await api<CandidateInvoice[]>('/candidate-invoices');
+        setCandidateInvoices(candidateInvoiceData);
+        if (!selectedCandidateInvoiceId && candidateInvoiceData[0]) setSelectedCandidateInvoiceId(candidateInvoiceData[0].id);
+      }
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to load data' });
     } finally {
@@ -500,11 +555,41 @@ function App() {
     }
   }
 
+  async function loadCandidateInvoiceUpload() {
+    if (!candidateInvoiceToken) return;
+    setLoading(true);
+    try {
+      const invoice = await api<CandidateInvoiceUpload>(`/candidate-invoices/upload/${encodeURIComponent(candidateInvoiceToken)}`);
+      setCandidateInvoiceUpload(invoice);
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'This candidate invoice upload link is not available.' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadCandidateApprovalInvoice() {
+    if (!candidateInvoiceId) return;
+    setLoading(true);
+    try {
+      const invoice = await api<CandidateInvoice>(`/candidate-invoices/${candidateInvoiceId}/client-account-approval-view`);
+      setCandidateApprovalInvoice(invoice);
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'This candidate invoice approval link is not available for this account.' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     const error = new URLSearchParams(window.location.search).get('auth_error');
     if (error) {
       setNotice({ tone: 'error', message: error === 'not_provisioned' ? 'This Google account has not been added by the system admin.' : 'No roles are assigned to this account.' });
       window.history.replaceState({}, '', window.location.pathname);
+    }
+    if (candidateInvoiceToken) {
+      void loadCandidateInvoiceUpload();
+      return;
     }
     void refreshAll();
   }, []);
@@ -512,6 +597,10 @@ function App() {
   useEffect(() => {
     if (approvalInvoiceId && me?.authenticated) void loadApprovalInvoice();
   }, [approvalInvoiceId, me?.authenticated]);
+
+  useEffect(() => {
+    if (candidateInvoiceId && me?.authenticated) void loadCandidateApprovalInvoice();
+  }, [candidateInvoiceId, me?.authenticated]);
 
   useEffect(() => {
     if (me?.active_role === 'system_admin') void refreshUsers();
@@ -545,6 +634,7 @@ function App() {
       setCandidates([]);
       setInterviews([]);
       setUpcomingInvoices([]);
+      setCandidateInvoices([]);
   }
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
@@ -839,9 +929,57 @@ function App() {
     }
   }
 
+  async function submitCandidateInvoiceUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!candidateInvoiceToken) return;
+    const formElement = event.currentTarget;
+    await mutate(async () => {
+      const invoice = await api<CandidateInvoiceUpload>(`/candidate-invoices/upload/${encodeURIComponent(candidateInvoiceToken)}`, {
+        method: 'POST',
+        body: new FormData(formElement),
+      });
+      setCandidateInvoiceUpload(invoice);
+      return 'Candidate invoice uploaded. The approval request has been sent.';
+    });
+  }
+
+  async function candidateApprovalInvoiceAction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!candidateApprovalInvoice) return;
+    const payload = formPayload(event.currentTarget);
+    await mutate(async () => {
+      const invoice = await api<CandidateInvoice>(`/candidate-invoices/${candidateApprovalInvoice.id}/client-account-approval`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setCandidateApprovalInvoice(invoice);
+      return `Candidate invoice marked ${invoice.status}`;
+    });
+  }
+
+  async function candidateInvoicePaymentAction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedCandidateInvoice) return;
+    const formElement = event.currentTarget;
+    await mutate(async () => {
+      const invoice = await api<CandidateInvoice>(`/candidate-invoices/${selectedCandidateInvoice.id}/payments`, {
+        method: 'POST',
+        body: JSON.stringify(formPayload(formElement)),
+      });
+      setSelectedCandidateInvoiceId(invoice.id);
+      formElement.reset();
+      return 'Candidate invoice payment recorded';
+    });
+  }
+
   function downloadInvoice() {
     if (!selectedInvoice) return;
     window.open(`${API_BASE}/client-invoices/${selectedInvoice.id}/download`, '_blank', 'noopener,noreferrer');
+  }
+
+  function downloadCandidateInvoice(invoiceId: number | undefined) {
+    if (!invoiceId) return;
+    window.open(`${API_BASE}/candidate-invoices/${invoiceId}/download`, '_blank', 'noopener,noreferrer');
   }
 
   function downloadDocument(documentId: number | null) {
@@ -870,8 +1008,20 @@ function App() {
     }
   }
 
+  if (candidateInvoiceToken) {
+    return (
+      <CandidateInvoiceUploadShell
+        loading={loading}
+        notice={notice}
+        invoice={candidateInvoiceUpload}
+        onSubmit={(event) => void submitCandidateInvoiceUpload(event)}
+      />
+    );
+  }
+
   if (me === null) {
     if (approvalInvoiceId) return <ApprovalShell loading={loading} notice={notice} />;
+    if (candidateInvoiceId) return <CandidateApprovalShell loading={loading} notice={notice} />;
     return (
       <main>
         <ShellHeader loading={loading} onRefresh={() => void refreshAll()} />
@@ -895,6 +1045,21 @@ function App() {
         approvalError={approvalError}
         approvalInvoice={approvalInvoice}
         onApprove={() => void approvalInvoiceAction()}
+      />
+    );
+  }
+
+  if (candidateInvoiceId) {
+    return (
+      <CandidateApprovalShell
+        loading={loading}
+        notice={notice}
+        me={me}
+        candidateInvoiceId={candidateInvoiceId}
+        candidateInvoiceError={candidateInvoiceError}
+        invoice={candidateApprovalInvoice}
+        onSubmit={(event) => void candidateApprovalInvoiceAction(event)}
+        onDownload={() => downloadCandidateInvoice(candidateApprovalInvoice?.id)}
       />
     );
   }
@@ -1502,6 +1667,65 @@ function App() {
               </>
             )}
           </section>
+
+          <section className="panel wide">
+            <PanelTitle icon={<Banknote size={18} />} title="Candidate Invoices" />
+            {candidateInvoices.length > 0 ? (
+              <>
+                <select value={selectedCandidateInvoice?.id ?? ''} onChange={(event) => setSelectedCandidateInvoiceId(Number(event.target.value))}>
+                  {candidateInvoices.map((invoice) => (
+                    <option key={invoice.id} value={invoice.id}>
+                      {invoice.invoice_due_date ?? invoice.submitted_at.slice(0, 10)} · {invoice.candidate_name} · {invoice.status}
+                    </option>
+                  ))}
+                </select>
+                {selectedCandidateInvoice && (
+                  <div className="invoiceGrid">
+                    <dl className="facts">
+                      <div><dt>Candidate</dt><dd>{selectedCandidateInvoice.candidate_name}</dd></div>
+                      <div><dt>Client</dt><dd>{selectedCandidateInvoice.client_company_name}</dd></div>
+                      <div><dt>SOW</dt><dd>{selectedCandidateInvoice.project_code} · {selectedCandidateInvoice.project_title}</dd></div>
+                      <div><dt>Position</dt><dd>{selectedCandidateInvoice.position_title ?? 'Not set'}</dd></div>
+                      <div><dt>Invoice due date</dt><dd>{selectedCandidateInvoice.invoice_due_date ?? 'Not set'}</dd></div>
+                      <div><dt>Amount</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.amount}</dd></div>
+                      <div><dt>Status</dt><dd><Status value={selectedCandidateInvoice.status} /></dd></div>
+                      <div><dt>Paid</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.paid_total}</dd></div>
+                      <div><dt>Balance</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.balance_due}</dd></div>
+                      <div><dt>CAE comments</dt><dd>{selectedCandidateInvoice.approval_comments ?? 'None'}</dd></div>
+                    </dl>
+                    <div className="actions">
+                      <button className="secondary" type="button" onClick={() => downloadCandidateInvoice(selectedCandidateInvoice.id)} disabled={!selectedCandidateInvoice.invoice_document_id}>
+                        <Download size={18} />
+                        <span>Download Invoice</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {canFinance && selectedCandidateInvoice && (
+                  <form className="grid four" onSubmit={(event) => void candidateInvoicePaymentAction(event)}>
+                    <Field label="Amount paid" name="amount_paid" type="number" step="0.01" required />
+                    <Field label="Paid date" name="paid_date" type="date" defaultValue={today()} required />
+                    <Field label="Bank reference" name="bank_reference" />
+                    <label className="field">
+                      <span>Status</span>
+                      <select name="status" defaultValue="">
+                        <option value="">Calculate from paid amount</option>
+                        <option value="paid">Paid</option>
+                        <option value="partially_paid">Partially paid</option>
+                      </select>
+                    </label>
+                    <input type="hidden" name="recorded_by_name" value={me.full_name ?? 'Finance Manager'} />
+                    <button className="primary" disabled={loading || !['approved', 'partially_paid', 'paid'].includes(selectedCandidateInvoice.status)}>
+                      <Banknote size={18} />
+                      <span>Record Payment</span>
+                    </button>
+                  </form>
+                )}
+              </>
+            ) : (
+              <p className="empty">No candidate invoices have been submitted yet.</p>
+            )}
+          </section>
         </section>
       )}
 
@@ -1978,6 +2202,155 @@ function ApprovalShell({
               <span>Approve Invoice</span>
             </button>
           </>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function CandidateInvoiceUploadShell({
+  loading,
+  notice,
+  invoice,
+  onSubmit,
+}: {
+  loading: boolean;
+  notice: Notice;
+  invoice: CandidateInvoiceUpload | null;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <main className="approvalOnly">
+      {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+      <section className="authGate approvalPanel">
+        <Upload size={42} />
+        <h2>Upload Candidate Invoice</h2>
+        {!invoice && <p>{loading ? 'Loading upload link...' : 'This candidate invoice upload link is not available.'}</p>}
+        {invoice && (
+          <>
+            <dl className="facts">
+              <div><dt>Candidate</dt><dd>{invoice.candidate_name}</dd></div>
+              <div><dt>Position</dt><dd>{invoice.position_title ?? 'Not set'}</dd></div>
+              <div><dt>Invoice due date</dt><dd>{invoice.invoice_due_date ?? 'Not set'}</dd></div>
+              <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>
+              <div><dt>Status</dt><dd><Status value={invoice.status} /></dd></div>
+            </dl>
+            {invoice.token_used ? (
+              <p className="empty">This single-use upload link has already been used.</p>
+            ) : (
+              <form className="stackedForm" onSubmit={onSubmit}>
+                <p className="contextLine">This link is single-use and can be used only once.</p>
+                <Field label="Invoice file" name="invoice_document" type="file" required />
+                <button className="primary" disabled={loading}>
+                  <Upload size={18} />
+                  <span>Upload Invoice</span>
+                </button>
+              </form>
+            )}
+          </>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function CandidateApprovalShell({
+  loading,
+  notice,
+  me,
+  candidateInvoiceId,
+  candidateInvoiceError,
+  invoice,
+  onSubmit,
+  onDownload,
+}: {
+  loading: boolean;
+  notice: Notice;
+  me?: CurrentUser | null;
+  candidateInvoiceId?: string;
+  candidateInvoiceError?: string | null;
+  invoice?: CandidateInvoice | null;
+  onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
+  onDownload?: () => void;
+}) {
+  if (!me) {
+    return (
+      <main className="approvalOnly">
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Candidate Invoice Approval Login</h2>
+          <p>Sign in with the Google account assigned as Client Account Executive for this project.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!me.authenticated) {
+    return (
+      <main className="approvalOnly">
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Candidate Invoice Approval Login</h2>
+          <p>Sign in with the Google account assigned as Client Account Executive for this project.</p>
+          <a className="primary linkButton" href={`${API_BASE}/auth/login?candidate_invoice_id=${encodeURIComponent(candidateInvoiceId ?? '')}`}>Continue with Google</a>
+        </section>
+      </main>
+    );
+  }
+
+  if (candidateInvoiceError === 'not_authorized') {
+    return (
+      <main className="approvalOnly">
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Candidate Invoice Not Available</h2>
+          <p>This approval link is only available to the Client Account Executive assigned to the project.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="approvalOnly">
+      {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+      <section className="authGate approvalPanel">
+        <FileCheck2 size={42} />
+        <h2>Candidate Invoice Approval</h2>
+        {!invoice && <p>{loading ? 'Loading candidate invoice...' : 'This candidate invoice approval link is not available for this account.'}</p>}
+        {invoice && (
+          <form className="stackedForm" onSubmit={onSubmit}>
+            <dl className="facts">
+              <div><dt>Project</dt><dd>{invoice.project_code}</dd></div>
+              <div><dt>SOW</dt><dd>{invoice.project_title}</dd></div>
+              <div><dt>Client</dt><dd>{invoice.client_company_name}</dd></div>
+              <div><dt>Candidate</dt><dd>{invoice.candidate_name}</dd></div>
+              <div><dt>Position</dt><dd>{invoice.position_title ?? 'Not set'}</dd></div>
+              <div><dt>Invoice due date</dt><dd>{invoice.invoice_due_date ?? 'Not set'}</dd></div>
+              <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>
+              <div><dt>Status</dt><dd><Status value={invoice.status} /></dd></div>
+            </dl>
+            <button className="secondary" type="button" onClick={onDownload} disabled={!invoice.invoice_document_id}>
+              <Download size={18} />
+              <span>Download Invoice</span>
+            </button>
+            <label className="field">
+              <span>Comments</span>
+              <textarea name="comments" rows={4} defaultValue={invoice.approval_comments ?? ''} />
+            </label>
+            <label className="field">
+              <span>Decision</span>
+              <select name="decision" defaultValue="approved">
+                <option value="approved">Invoice approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="on-hold">On-hold</option>
+              </select>
+            </label>
+            <button className="primary" disabled={loading || ['paid', 'partially_paid'].includes(invoice.status)}>
+              <BadgeCheck size={18} />
+              <span>Submit Decision</span>
+            </button>
+          </form>
         )}
       </section>
     </main>

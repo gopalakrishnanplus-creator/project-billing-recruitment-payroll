@@ -61,6 +61,7 @@ from .schemas import (
     CancelInvoiceCreate,
     CandidateContractCreate,
     CandidateContractRead,
+    CandidateContractUpdate,
     CandidateCreate,
     CandidateInvoiceApprovalCreate,
     CandidateInvoiceReminderResult,
@@ -1163,6 +1164,32 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
     return generated
 
 
+def reconcile_pending_candidate_invoice_reminders(db: Session, contract: CandidateContract) -> None:
+    candidate = load_candidate(contract.candidate_id, db)
+    pending_invoices = db.scalars(
+        select(CandidateVendorInvoice).where(
+            CandidateVendorInvoice.contract_id == contract.id,
+            CandidateVendorInvoice.status == "awaiting_upload",
+            CandidateVendorInvoice.invoice_document_id.is_(None),
+        )
+    ).all()
+    for invoice in pending_invoices:
+        if contract.status in {"terminated", "inactive"}:
+            db.delete(invoice)
+            continue
+        if contract.invoice_end_date and invoice.invoice_due_date and invoice.invoice_due_date > contract.invoice_end_date:
+            db.delete(invoice)
+            continue
+        if contract.invoice_frequency == "single" and contract.invoice_date and invoice.invoice_due_date != contract.invoice_date:
+            db.delete(invoice)
+            continue
+        if contract.invoice_amount is not None:
+            invoice.amount = contract.invoice_amount
+        if contract.currency:
+            invoice.currency = contract.currency.upper()
+        invoice.project_id = candidate.project_id
+
+
 def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
     approval_link = f"{API_BASE_URL}/auth/login?{urlencode({'approval_invoice_id': invoice.id})}"
     subject = f"Invoice {invoice.invoice_number} ready for approval"
@@ -2242,6 +2269,39 @@ async def upload_candidate_contract(candidate_id: int, request: Request, context
     db.flush()
     log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_contract_uploaded", details=candidate.full_name)
     send_due_candidate_invoice_reminders(db, date.today())
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
+@app.put("/candidate-contracts/{contract_id}", response_model=CandidateRead)
+async def update_candidate_contract(contract_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> CandidateRead:
+    contract = db.get(CandidateContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Candidate contract not found")
+    candidate = load_candidate(contract.candidate_id, db)
+    data, files = await request_payload_and_files(request)
+    payload: CandidateContractUpdate = parse_model(CandidateContractUpdate, data)
+    document = await save_uploaded_document(db, file=files.get("signed_contract"), project_id=candidate.project_id, document_type="signed_candidate_contract", uploaded_by_name=context.user.full_name)
+    if document:
+        contract.contract_document_id = document.id
+        contract.signed_at = utcnow()
+    contract.invoice_terms = payload.invoice_terms
+    contract.invoice_amount = payload.invoice_amount
+    contract.currency = payload.currency.upper() if payload.currency else None
+    contract.invoice_frequency = payload.invoice_frequency
+    contract.invoice_start_date = payload.invoice_start_date
+    contract.invoice_end_date = payload.invoice_end_date
+    contract.invoice_date = payload.invoice_date
+    if payload.status:
+        contract.status = payload.status
+    elif document and contract.status == "draft":
+        contract.status = "signed"
+    db.flush()
+    reconcile_pending_candidate_invoice_reminders(db, contract)
+    if contract.status not in {"terminated", "inactive"}:
+        send_due_candidate_invoice_reminders(db, date.today())
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_contract_terms_updated", details=candidate.full_name)
     db.commit()
     db.refresh(candidate)
     return serialize_candidate(candidate, db)

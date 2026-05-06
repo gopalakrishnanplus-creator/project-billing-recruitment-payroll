@@ -132,6 +132,10 @@ class CandidateContractCreate(BaseModel):
     invoice_date: date | None = None
 
 
+class CandidateContractUpdate(CandidateContractCreate):
+    status: str | None = Field(default=None, pattern="^(draft|signed|terminated|inactive)$")
+
+
 class InvoiceScheduleCreate(BaseModel):
     label: str = Field(min_length=2, max_length=180)
     item_description: str | None = Field(default=None, min_length=2)

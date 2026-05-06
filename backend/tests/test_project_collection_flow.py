@@ -784,6 +784,46 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert hired_candidate["status"] == "hired"
         assert hired_candidate["contracts"][0]["contract_document_name"] == "signed-contract.pdf"
         assert hired_candidate["contracts"][0]["invoice_amount"] == "2500.00"
+        contract_id = hired_candidate["contracts"][0]["id"]
+
+        update_contract_response = client.put(
+            f"/candidate-contracts/{contract_id}",
+            headers=HR_HEADERS,
+            data={
+                "invoice_terms": "Updated monthly consultant invoice after compensation change.",
+                "invoice_amount": "2800.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today()),
+                "invoice_end_date": str(date.today() + timedelta(days=45)),
+            },
+        )
+        assert update_contract_response.status_code == 200, update_contract_response.text
+        updated_candidate = update_contract_response.json()
+        assert updated_candidate["contracts"][0]["invoice_amount"] == "2800.00"
+        assert updated_candidate["contracts"][0]["invoice_end_date"] == str(date.today() + timedelta(days=45))
+
+        with SessionLocal() as db:
+            pending_invoice = db.query(CandidateVendorInvoice).filter(CandidateVendorInvoice.contract_id == contract_id).one()
+            assert str(pending_invoice.amount) == "2800.00"
+
+        terminate_contract_response = client.put(
+            f"/candidate-contracts/{contract_id}",
+            headers=HR_HEADERS,
+            data={
+                "invoice_terms": "Terminated early.",
+                "invoice_amount": "2800.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today()),
+                "invoice_end_date": str(date.today()),
+                "status": "terminated",
+            },
+        )
+        assert terminate_contract_response.status_code == 200, terminate_contract_response.text
+        assert terminate_contract_response.json()["contracts"][0]["status"] == "terminated"
+        with SessionLocal() as db:
+            assert db.query(CandidateVendorInvoice).filter(CandidateVendorInvoice.contract_id == contract_id, CandidateVendorInvoice.status == "awaiting_upload").count() == 0
 
         candidates_response = client.get("/recruitment/candidates", headers=HR_HEADERS)
         assert candidates_response.status_code == 200, candidates_response.text

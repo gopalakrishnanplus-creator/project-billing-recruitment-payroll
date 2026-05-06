@@ -437,6 +437,10 @@ function App() {
     () => candidates.find((candidate) => candidate.id === selectedCandidateId) ?? candidatesForNeed[0] ?? candidates[0],
     [candidates, candidatesForNeed, selectedCandidateId],
   );
+  const selectedCandidateContract = useMemo(
+    () => (selectedCandidate ? latestContract(selectedCandidate) : undefined),
+    [selectedCandidate],
+  );
   const selectedInterview = useMemo(
     () => interviews.find((interview) => interview.id === selectedInterviewId) ?? interviews[0],
     [interviews, selectedInterviewId],
@@ -610,6 +614,10 @@ function App() {
   useEffect(() => {
     setEditingProject(false);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    setContractInvoiceFrequency(selectedCandidateContract?.invoice_frequency ?? 'monthly');
+  }, [selectedCandidateContract?.id, selectedCandidateContract?.invoice_frequency]);
 
   async function chooseRole(role: string) {
     await mutate(async () => {
@@ -834,13 +842,14 @@ function App() {
     const formElement = event.currentTarget;
     const payload = new FormData(formElement);
     await mutate(async () => {
-      const candidate = await api<Candidate>(`/candidates/${selectedCandidate.id}/contract`, {
-        method: 'POST',
+      const existingContract = latestContract(selectedCandidate);
+      const candidate = await api<Candidate>(existingContract ? `/candidate-contracts/${existingContract.id}` : `/candidates/${selectedCandidate.id}/contract`, {
+        method: existingContract ? 'PUT' : 'POST',
         body: payload,
       });
       setSelectedCandidateId(candidate.id);
       formElement.reset();
-      return 'Candidate contract and invoice terms saved';
+      return existingContract ? 'Candidate invoice terms updated' : 'Candidate contract and invoice terms saved';
     });
   }
 
@@ -1490,11 +1499,11 @@ function App() {
               </section>
 
               <form className="panel" onSubmit={(event) => void submitContract(event)}>
-                <PanelTitle icon={<FileCheck2 size={18} />} title="Signed Contract And Invoice Terms" />
+                <PanelTitle icon={<FileCheck2 size={18} />} title={selectedCandidateContract ? 'Edit Candidate Invoice Terms' : 'Signed Contract And Invoice Terms'} />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
                 <Field label="Signed contract upload" name="signed_contract" type="file" />
-                <Field label="Invoice amount" name="invoice_amount" type="number" step="0.01" />
-                <Field label="Currency" name="currency" defaultValue="USD" />
+                <Field label="Invoice amount" name="invoice_amount" type="number" step="0.01" defaultValue={selectedCandidateContract?.invoice_amount ?? ''} />
+                <Field label="Currency" name="currency" defaultValue={selectedCandidateContract?.currency ?? 'USD'} />
                 <label className="field">
                   <span>Invoice frequency</span>
                   <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
@@ -1505,20 +1514,31 @@ function App() {
                   </select>
                 </label>
                 {contractInvoiceFrequency === 'single' ? (
-                  <Field label="Invoice date" name="invoice_date" type="date" />
+                  <Field label="Invoice date" name="invoice_date" type="date" defaultValue={selectedCandidateContract?.invoice_date ?? ''} />
                 ) : (
                   <>
-                    <Field label="Invoice start" name="invoice_start_date" type="date" />
-                    <Field label="Invoice end" name="invoice_end_date" type="date" />
+                    <Field label="Invoice start" name="invoice_start_date" type="date" defaultValue={selectedCandidateContract?.invoice_start_date ?? ''} />
+                    <Field label="Invoice end" name="invoice_end_date" type="date" defaultValue={selectedCandidateContract?.invoice_end_date ?? ''} />
                   </>
+                )}
+                {selectedCandidateContract && (
+                  <label className="field">
+                    <span>Contract status</span>
+                    <select name="status" defaultValue={selectedCandidateContract.status}>
+                      <option value="signed">Signed</option>
+                      <option value="terminated">Terminated</option>
+                      <option value="inactive">Inactive</option>
+                      <option value="draft">Draft</option>
+                    </select>
+                  </label>
                 )}
                 <label className="field">
                   <span>Invoice terms</span>
-                  <textarea name="invoice_terms" rows={3} />
+                  <textarea name="invoice_terms" rows={3} defaultValue={selectedCandidateContract?.invoice_terms ?? ''} />
                 </label>
                 <button className="primary" disabled={!selectedCandidate || loading}>
                   <BadgeCheck size={18} />
-                  <span>Mark Hired</span>
+                  <span>{selectedCandidateContract ? 'Update Terms' : 'Mark Hired'}</span>
                 </button>
               </form>
             </>

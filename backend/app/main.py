@@ -775,6 +775,13 @@ def validate_internal_interviewer(db: Session, user_id: int) -> AppUser:
     return user
 
 
+def validate_internal_interviewer_email(db: Session, email: str) -> AppUser:
+    user = db.scalar(select(AppUser).where(func.lower(AppUser.email) == normalize_email(email), AppUser.is_active.is_(True)).options(selectinload(AppUser.role_assignments)))
+    if user is None or UserRole.internal_interviewer.value not in user_roles(user):
+        raise HTTPException(status_code=400, detail=f"Select an active Internal Interviewer: {email}")
+    return user
+
+
 def hr_manager_emails(db: Session) -> list[str]:
     return sorted({user.email for user in users_with_role(db, UserRole.hr_manager.value)})
 
@@ -853,9 +860,14 @@ def notify_hr_for_recruitment_need(db: Session, project: ProjectSOW, need: Recru
         )
 
 
-def interview_assignment_email_templates(candidate: Candidate, interviewer: AppUser, interview: Interview, project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[tuple[str, str, str], tuple[str, str, str]]:
-    interview_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': interview.id})}"
+def interview_assignment_email_templates(candidate: Candidate, interviewer_records: list[tuple[AppUser, Interview]], project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[tuple[str, str, str], list[tuple[AppUser, Interview, str, str, str]]]:
     position = need.position_title if need else "Not set"
+    interviewer_lines = [f"{interviewer.full_name} ({interviewer.email})" for interviewer, _ in interviewer_records]
+    interviewer_text = "\n".join(f"- {line}" for line in interviewer_lines)
+    interviewer_html_rows = "\n".join(
+        f"<tr><td>{escape(interviewer.full_name)}</td><td>{escape(interviewer.email)}</td></tr>"
+        for interviewer, _ in interviewer_records
+    )
     candidate_subject = f"Interview scheduled for {position}"
     candidate_text = "\n".join(
         [
@@ -864,8 +876,13 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer: AppU
             "Your interview has been assigned.",
             "",
             f"Position: {position}",
-            f"Interviewer: {interviewer.full_name}",
-            f"Interview link: {interview.calendly_url or 'To be shared'}",
+            f"Candidate: {candidate.full_name}",
+            f"Candidate email: {candidate.email}",
+            "",
+            "Internal interviewers:",
+            interviewer_text,
+            "",
+            "Each interviewer will interview you separately. Please coordinate directly with the interviewers copied here to schedule the interviews.",
         ]
     )
     candidate_html = f"""
@@ -874,52 +891,58 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer: AppU
     <p>Your interview has been assigned.</p>
     <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
-      <tr><td><strong>Interviewer</strong></td><td>{escape(interviewer.full_name)}</td></tr>
-      <tr><td><strong>Interview link</strong></td><td>{escape(interview.calendly_url or 'To be shared')}</td></tr>
-    </table>
-    """
-    interviewer_subject = f"Candidate interview assigned: {candidate.full_name}"
-    interviewer_text = "\n".join(
-        [
-            f"Dear {interviewer.full_name},",
-            "",
-            "A candidate interview has been assigned to you.",
-            "",
-            f"Candidate: {candidate.full_name}",
-            f"Candidate email: {candidate.email}",
-            f"Client: {project.company.name}",
-            f"SOW: {project.title} ({project.project_code})",
-            f"Position: {position}",
-            f"Interview link: {interview.calendly_url or 'To be shared'}",
-            "",
-            f"Log in to review and submit the scorecard: {interview_link}",
-        ]
-    )
-    interviewer_html = f"""
-    <h2>Candidate interview assigned</h2>
-    <p>Dear {escape(interviewer.full_name)},</p>
-    <p>A candidate interview has been assigned to you.</p>
-    <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
       <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
-      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
-      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
-      <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
-      <tr><td><strong>Interview link</strong></td><td>{escape(interview.calendly_url or 'To be shared')}</td></tr>
     </table>
-    <p><a href="{escape(interview_link)}">Log in to review and submit the scorecard</a></p>
+    <p>Each interviewer will interview you separately. Please coordinate directly with the interviewers copied here to schedule the interviews.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><th align="left">Interviewer</th><th align="left">Email</th></tr>
+      {interviewer_html_rows}
+    </table>
     """
-    return (candidate_subject, candidate_text, candidate_html), (interviewer_subject, interviewer_text, interviewer_html)
+    interviewer_templates: list[tuple[AppUser, Interview, str, str, str]] = []
+    for interviewer, interview in interviewer_records:
+        interview_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': interview.id})}"
+        subject = f"Candidate interview scorecard and review: {candidate.full_name}"
+        text_body = "\n".join(
+            [
+                f"Dear {interviewer.full_name},",
+                "",
+                "A candidate interview scorecard and review has been assigned to you.",
+                "",
+                f"Candidate: {candidate.full_name}",
+                f"Candidate email: {candidate.email}",
+                f"Client: {project.company.name}",
+                f"SOW: {project.title} ({project.project_code})",
+                f"Position: {position}",
+                "",
+                f"Log in to review and submit the scorecard: {interview_link}",
+            ]
+        )
+        html = f"""
+        <h2>Candidate interview scorecard and review</h2>
+        <p>Dear {escape(interviewer.full_name)},</p>
+        <p>A candidate interview scorecard and review has been assigned to you.</p>
+        <table cellpadding="6" cellspacing="0" border="0">
+          <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+          <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
+          <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+          <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+          <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
+        </table>
+        <p><a href="{escape(interview_link)}">Log in to review and submit the scorecard</a></p>
+        """
+        interviewer_templates.append((interviewer, interview, subject, text_body, html))
+    return (candidate_subject, candidate_text, candidate_html), interviewer_templates
 
 
-def notify_interview_assignment(db: Session, candidate: Candidate, interviewer: AppUser, interview: Interview, hr_email: str | None) -> None:
+def notify_interview_assignment(db: Session, candidate: Candidate, interviewer_records: list[tuple[AppUser, Interview]], hr_email: str | None) -> None:
     project = load_project_for_read(candidate.project_id, db)
     need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
-    candidate_template, interviewer_template = interview_assignment_email_templates(candidate, interviewer, interview, project, need)
-    notifications = [
-        (candidate.email, [hr_email] if hr_email else [], *candidate_template),
-        (interviewer.email, [hr_email] if hr_email else [], *interviewer_template),
-    ]
+    candidate_template, interviewer_templates = interview_assignment_email_templates(candidate, interviewer_records, project, need)
+    interviewer_emails = [interviewer.email for interviewer, _ in interviewer_records]
+    notifications = [(candidate.email, [*(interviewer_emails), *([hr_email] if hr_email else [])], *candidate_template)]
+    notifications.extend((interviewer.email, [hr_email] if hr_email else [], subject, text_body, html) for interviewer, _, subject, text_body, html in interviewer_templates)
     for recipient, cc_emails, subject, text, html in notifications:
         cc_emails = [email for email in cc_emails if email and email != recipient]
         status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text, html=html)
@@ -2207,26 +2230,44 @@ def update_candidate_status(candidate_id: int, payload: CandidateStatusUpdate, c
     return serialize_candidate(candidate, db)
 
 
-@app.post("/candidates/{candidate_id}/interviews", response_model=InterviewRead, status_code=201)
-def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> InterviewRead:
+@app.post("/candidates/{candidate_id}/interviews", response_model=list[InterviewRead], status_code=201)
+def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> list[InterviewRead]:
     candidate = load_candidate(candidate_id, db)
-    interviewer = validate_internal_interviewer(db, payload.interviewer_user_id)
-    interview = Interview(
-        candidate_id=candidate.id,
-        interviewer_user_id=interviewer.id,
-        interviewer_name=interviewer.full_name,
-        calendly_url=payload.calendly_url,
-        scheduled_at=payload.scheduled_at,
-        status="pending",
-    )
+    interviewers: list[AppUser] = []
+    if payload.interviewer_emails:
+        seen_emails: set[str] = set()
+        for email in payload.interviewer_emails:
+            normalized = normalize_email(str(email))
+            if normalized in seen_emails:
+                continue
+            seen_emails.add(normalized)
+            interviewers.append(validate_internal_interviewer_email(db, normalized))
+    elif payload.interviewer_user_id is not None:
+        interviewers.append(validate_internal_interviewer(db, payload.interviewer_user_id))
+    if not interviewers:
+        raise HTTPException(status_code=422, detail="At least one internal interviewer email is required")
+    if len(interviewers) > 3:
+        raise HTTPException(status_code=422, detail="A maximum of 3 internal interviewers can be assigned")
+    interviewer_records: list[tuple[AppUser, Interview]] = []
+    for interviewer in interviewers:
+        interview = Interview(
+            candidate_id=candidate.id,
+            interviewer_user_id=interviewer.id,
+            interviewer_name=interviewer.full_name,
+            calendly_url=None,
+            scheduled_at=None,
+            status="pending",
+        )
+        db.add(interview)
+        db.flush()
+        interviewer_records.append((interviewer, interview))
     candidate.status = "interview_scheduled"
-    db.add(interview)
-    db.flush()
-    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="interview_assigned", details=f"{candidate.full_name}: {interviewer.full_name}")
-    notify_interview_assignment(db, candidate, interviewer, interview, context.user.email)
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="interview_assigned", details=f"{candidate.full_name}: {', '.join(interviewer.full_name for interviewer in interviewers)}")
+    notify_interview_assignment(db, candidate, interviewer_records, context.user.email)
     db.commit()
-    db.refresh(interview)
-    return serialize_interview(interview, db)
+    for _, interview in interviewer_records:
+        db.refresh(interview)
+    return [serialize_interview(interview, db) for _, interview in interviewer_records]
 
 
 @app.get("/interviews", response_model=list[InterviewRead])

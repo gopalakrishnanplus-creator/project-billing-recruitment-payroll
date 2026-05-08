@@ -706,11 +706,12 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         interview_response = client.post(
             f"/candidates/{candidate['id']}/interviews",
             headers=HR_HEADERS,
-            json={"interviewer_user_id": interviewer["id"], "calendly_url": "https://calendly.com/internal/priya"},
+            json={"interviewer_emails": ["interviewer@example.com", "other-interviewer@example.com"]},
         )
         assert interview_response.status_code == 201, interview_response.text
-        interview = interview_response.json()
-        assert interview["interviewer_name"] == "Internal Interviewer"
+        interviews = interview_response.json()
+        assert [interview["interviewer_name"] for interview in interviews] == ["Internal Interviewer", "Other Interviewer"]
+        interview = interviews[0]
 
         with SessionLocal() as db:
             interview_notifications = (
@@ -719,13 +720,21 @@ def test_recruitment_flow_from_position_to_hired_candidate():
                 .order_by(EmailNotification.id)
                 .all()
             )
-            assert [notification.recipient_email for notification in interview_notifications] == ["priya@example.com", "interviewer@example.com"]
-            assert all(notification.cc_email == "hr@example.com" for notification in interview_notifications)
-            assert "https://calendly.com/internal/priya" in interview_notifications[0].body
+            assert [notification.recipient_email for notification in interview_notifications] == ["priya@example.com", "interviewer@example.com", "other-interviewer@example.com"]
+            assert interview_notifications[0].cc_email == "interviewer@example.com,other-interviewer@example.com,hr@example.com"
+            assert interview_notifications[1].cc_email == "hr@example.com"
+            assert interview_notifications[2].cc_email == "hr@example.com"
+            assert "Please coordinate directly" in interview_notifications[0].body
+            assert "Interviewer</th>" in interview_notifications[0].body
+            assert "interviewer@example.com" in interview_notifications[0].body
+            assert "other-interviewer@example.com" in interview_notifications[0].body
             assert "Client</strong>" not in interview_notifications[0].body
             assert "SOW</strong>" not in interview_notifications[0].body
             assert "Scheduled at" not in interview_notifications[0].body
             assert "Scheduled at" not in interview_notifications[1].body
+            assert "Interview link" not in interview_notifications[0].body
+            assert "Interview link" not in interview_notifications[1].body
+            assert "Candidate interview scorecard and review" in interview_notifications[1].subject
             assert f"interview_id={interview['id']}" in interview_notifications[1].body
 
         own_interviews = client.get("/interviews", headers=INTERVIEWER_HEADERS)
@@ -733,7 +742,7 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert own_interviews.status_code == 200, own_interviews.text
         assert len(own_interviews.json()) == 1
         assert other_interviews.status_code == 200, other_interviews.text
-        assert other_interviews.json() == []
+        assert len(other_interviews.json()) == 1
 
         scorecard_response = client.post(
             f"/interviews/{interview['id']}/scorecard",
@@ -830,7 +839,7 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         candidates_response = client.get("/recruitment/candidates", headers=HR_HEADERS)
         assert candidates_response.status_code == 200, candidates_response.text
         assert candidates_response.json()[0]["status"] == "terminated"
-        assert candidates_response.json()[0]["interviews"][0]["recommendation"] == "hire"
+        assert any(interview["recommendation"] == "hire" for interview in candidates_response.json()[0]["interviews"])
 
 
 def test_historical_completed_recruitment_backfill_without_hr_notification():

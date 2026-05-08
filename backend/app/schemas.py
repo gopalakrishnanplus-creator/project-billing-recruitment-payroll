@@ -115,9 +115,8 @@ class CandidateStatusUpdate(BaseModel):
 
 
 class InterviewCreate(BaseModel):
-    interviewer_user_id: int
-    calendly_url: str | None = None
-    scheduled_at: datetime | None = None
+    interviewer_emails: list[EmailStr] = Field(default_factory=list, max_length=3)
+    interviewer_user_id: int | None = None
 
 
 class ScorecardCreate(BaseModel):

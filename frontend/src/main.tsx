@@ -816,13 +816,16 @@ function App() {
     event.preventDefault();
     if (!selectedCandidate) return;
     const formElement = event.currentTarget;
-    const payload = formPayload(formElement);
+    const formData = new FormData(formElement);
+    const interviewer_emails = ['interviewer_email_1', 'interviewer_email_2', 'interviewer_email_3']
+      .map((name) => String(formData.get(name) ?? '').trim())
+      .filter(Boolean);
     await mutate(async () => {
-      const interview = await api<Interview>(`/candidates/${selectedCandidate.id}/interviews`, {
+      const interviews = await api<Interview[]>(`/candidates/${selectedCandidate.id}/interviews`, {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ interviewer_emails }),
       });
-      setSelectedInterviewId(interview.id);
+      if (interviews[0]) setSelectedInterviewId(interviews[0].id);
       formElement.reset();
       return 'Interview assigned';
     });
@@ -1502,17 +1505,14 @@ function App() {
               <form className="panel" onSubmit={(event) => void submitInterview(event)}>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Interview Assignment" />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
-                <label className="field">
-                  <span>Internal interviewer</span>
-                  <select name="interviewer_user_id" required defaultValue="">
-                    <option value="" disabled>Select interviewer</option>
-                    {internalInterviewers.map((user) => (
-                      <option key={user.id} value={user.id}>{user.full_name} · {user.email}</option>
-                    ))}
-                  </select>
-                </label>
-                <Field label="Calendly URL" name="calendly_url" />
-                <Field label="Scheduled at" name="scheduled_at" type="datetime-local" />
+                <Field label="Internal interviewer email 1" name="interviewer_email_1" type="email" list="internal-interviewer-emails" required />
+                <Field label="Internal interviewer email 2" name="interviewer_email_2" type="email" list="internal-interviewer-emails" />
+                <Field label="Internal interviewer email 3" name="interviewer_email_3" type="email" list="internal-interviewer-emails" />
+                <datalist id="internal-interviewer-emails">
+                  {internalInterviewers.map((user) => (
+                    <option key={user.id} value={user.email}>{user.full_name}</option>
+                  ))}
+                </datalist>
                 <button className="secondary" disabled={!selectedCandidate || loading}>
                   <CalendarPlus size={18} />
                   <span>Assign Interview</span>

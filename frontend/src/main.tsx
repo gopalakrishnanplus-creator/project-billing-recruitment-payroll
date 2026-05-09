@@ -166,6 +166,7 @@ type Interview = {
   candidate_id: number;
   interviewer_user_id: number | null;
   interviewer_name: string;
+  interview_order: number | null;
   calendly_url: string | null;
   scheduled_at: string | null;
   status: string;
@@ -1505,9 +1506,9 @@ function App() {
               <form className="panel" onSubmit={(event) => void submitInterview(event)}>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Interview Assignment" />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
-                <Field label="Internal interviewer email 1" name="interviewer_email_1" type="email" list="internal-interviewer-emails" required />
-                <Field label="Internal interviewer email 2" name="interviewer_email_2" type="email" list="internal-interviewer-emails" />
-                <Field label="Internal interviewer email 3" name="interviewer_email_3" type="email" list="internal-interviewer-emails" />
+                <Field label="First interview - interviewer email" name="interviewer_email_1" type="email" list="internal-interviewer-emails" required />
+                <Field label="Second interview - interviewer email" name="interviewer_email_2" type="email" list="internal-interviewer-emails" />
+                <Field label="Third interview - interviewer email" name="interviewer_email_3" type="email" list="internal-interviewer-emails" />
                 <datalist id="internal-interviewer-emails">
                   {internalInterviewers.map((user) => (
                     <option key={user.id} value={user.email}>{user.full_name}</option>
@@ -1611,13 +1612,14 @@ function App() {
                 <select value={selectedInterview?.id ?? ''} onChange={(event) => setSelectedInterviewId(Number(event.target.value))}>
                   {interviews.map((interview) => {
                     const candidate = candidates.find((item) => item.id === interview.candidate_id);
-                    return <option key={interview.id} value={interview.id}>{candidate?.full_name ?? `Candidate ${interview.candidate_id}`} · {interview.interviewer_name} · {interview.status}</option>;
+                    return <option key={interview.id} value={interview.id}>{candidate?.full_name ?? `Candidate ${interview.candidate_id}`} · #{interview.interview_order ?? '-'} · {interview.interviewer_name} · {interview.status}</option>;
                   })}
                 </select>
               </label>
               {selectedInterview ? (
                 <dl className="facts">
                   <div><dt>Interviewer</dt><dd>{selectedInterview.interviewer_name}</dd></div>
+                  <div><dt>Interview order</dt><dd>{selectedInterview.interview_order ?? 'Not set'}</dd></div>
                   <div><dt>Status</dt><dd><Status value={selectedInterview.status} /></dd></div>
                   <div><dt>Score</dt><dd>{selectedInterview.score ?? 'Not submitted'}</dd></div>
                   <div><dt>Recommendation</dt><dd>{selectedInterview.recommendation ?? 'Not submitted'}</dd></div>

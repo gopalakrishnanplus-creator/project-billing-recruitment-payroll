@@ -299,6 +299,7 @@ class Interview(Base):
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), nullable=False)
     interviewer_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"))
     interviewer_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    interview_order: Mapped[int | None] = mapped_column()
     calendly_url: Mapped[str | None] = mapped_column(String(500))
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(80), default="pending")

@@ -711,6 +711,7 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert interview_response.status_code == 201, interview_response.text
         interviews = interview_response.json()
         assert [interview["interviewer_name"] for interview in interviews] == ["Internal Interviewer", "Other Interviewer"]
+        assert [interview["interview_order"] for interview in interviews] == [1, 2]
         interview = interviews[0]
 
         with SessionLocal() as db:
@@ -725,6 +726,9 @@ def test_recruitment_flow_from_position_to_hired_candidate():
             assert interview_notifications[1].cc_email == "hr@example.com"
             assert interview_notifications[2].cc_email == "hr@example.com"
             assert "Please coordinate directly" in interview_notifications[0].body
+            assert "Please schedule the interviews in the order listed below" in interview_notifications[0].body
+            assert "<td>1</td><td>Internal Interviewer</td><td>interviewer@example.com</td>" in interview_notifications[0].body
+            assert "<td>2</td><td>Other Interviewer</td><td>other-interviewer@example.com</td>" in interview_notifications[0].body
             assert "Interviewer</th>" in interview_notifications[0].body
             assert "interviewer@example.com" in interview_notifications[0].body
             assert "other-interviewer@example.com" in interview_notifications[0].body
@@ -736,6 +740,10 @@ def test_recruitment_flow_from_position_to_hired_candidate():
             assert "Interview link" not in interview_notifications[1].body
             assert "Candidate interview scorecard and review" in interview_notifications[1].subject
             assert f"interview_id={interview['id']}" in interview_notifications[1].body
+            assert "Your interview order</strong></td><td>1</td>" in interview_notifications[1].body
+            assert "Please conduct your interview before the later interviewers" in interview_notifications[1].body
+            assert "Your interview order</strong></td><td>2</td>" in interview_notifications[2].body
+            assert "Please conduct your interview only after Internal Interviewer (interviewer@example.com)" in interview_notifications[2].body
 
         own_interviews = client.get("/interviews", headers=INTERVIEWER_HEADERS)
         other_interviews = client.get("/interviews", headers={"x-test-email": "other-interviewer@example.com", "x-test-role": "internal_interviewer"})

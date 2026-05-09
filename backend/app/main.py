@@ -232,6 +232,7 @@ def ensure_workflow_columns() -> None:
         if "interviews" in tables:
             existing = {column["name"] for column in inspector.get_columns("interviews")}
             add_column(conn, "interviews", existing, "interviewer_user_id", "INTEGER")
+            add_column(conn, "interviews", existing, "interview_order", "INTEGER")
         if "interview_scorecards" in tables:
             existing = {column["name"] for column in inspector.get_columns("interview_scorecards")}
             add_column(conn, "interview_scorecards", existing, "evaluation_document_id", "INTEGER")
@@ -644,6 +645,7 @@ def serialize_interview(interview: Interview, db: Session) -> InterviewRead:
         candidate_id=interview.candidate_id,
         interviewer_user_id=interview.interviewer_user_id,
         interviewer_name=interview.interviewer_name,
+        interview_order=interview.interview_order,
         calendly_url=interview.calendly_url,
         scheduled_at=interview.scheduled_at,
         status=interview.status,
@@ -862,11 +864,11 @@ def notify_hr_for_recruitment_need(db: Session, project: ProjectSOW, need: Recru
 
 def interview_assignment_email_templates(candidate: Candidate, interviewer_records: list[tuple[AppUser, Interview]], project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[tuple[str, str, str], list[tuple[AppUser, Interview, str, str, str]]]:
     position = need.position_title if need else "Not set"
-    interviewer_lines = [f"{interviewer.full_name} ({interviewer.email})" for interviewer, _ in interviewer_records]
+    interviewer_lines = [f"{index}. {interviewer.full_name} ({interviewer.email})" for index, (interviewer, _) in enumerate(interviewer_records, start=1)]
     interviewer_text = "\n".join(f"- {line}" for line in interviewer_lines)
     interviewer_html_rows = "\n".join(
-        f"<tr><td>{escape(interviewer.full_name)}</td><td>{escape(interviewer.email)}</td></tr>"
-        for interviewer, _ in interviewer_records
+        f"<tr><td>{index}</td><td>{escape(interviewer.full_name)}</td><td>{escape(interviewer.email)}</td></tr>"
+        for index, (interviewer, _) in enumerate(interviewer_records, start=1)
     )
     candidate_subject = f"Interview scheduled for {position}"
     candidate_text = "\n".join(
@@ -882,7 +884,8 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer_recor
             "Internal interviewers:",
             interviewer_text,
             "",
-            "Each interviewer will interview you separately. Please coordinate directly with the interviewers copied here to schedule the interviews.",
+            "Each interviewer will interview you separately. Please schedule the interviews in the order listed above.",
+            "Please coordinate directly with the interviewers copied here to schedule the interviews.",
         ]
     )
     candidate_html = f"""
@@ -894,15 +897,27 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer_recor
       <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
       <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
     </table>
-    <p>Each interviewer will interview you separately. Please coordinate directly with the interviewers copied here to schedule the interviews.</p>
+    <p>Each interviewer will interview you separately. Please schedule the interviews in the order listed below.</p>
+    <p>Please coordinate directly with the interviewers copied here to schedule the interviews.</p>
     <table cellpadding="6" cellspacing="0" border="0">
-      <tr><th align="left">Interviewer</th><th align="left">Email</th></tr>
+      <tr><th align="left">Order</th><th align="left">Interviewer</th><th align="left">Email</th></tr>
       {interviewer_html_rows}
     </table>
     """
     interviewer_templates: list[tuple[AppUser, Interview, str, str, str]] = []
-    for interviewer, interview in interviewer_records:
+    for index, (interviewer, interview) in enumerate(interviewer_records, start=1):
         interview_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': interview.id})}"
+        previous_interviewer = interviewer_records[index - 2][0] if index > 1 else None
+        order_text = "\n".join(f"{order}. {user.full_name} ({user.email})" for order, (user, _) in enumerate(interviewer_records, start=1))
+        order_rows = "\n".join(
+            f"<tr><td>{order}</td><td>{escape(user.full_name)}</td><td>{escape(user.email)}</td></tr>"
+            for order, (user, _) in enumerate(interviewer_records, start=1)
+        )
+        sequence_instruction = (
+            "You are first in the interview order. Please conduct your interview before the later interviewers."
+            if previous_interviewer is None
+            else f"You are interview {index}. Please conduct your interview only after {previous_interviewer.full_name} ({previous_interviewer.email}) has already conducted the previous interview."
+        )
         subject = f"Candidate interview scorecard and review: {candidate.full_name}"
         text_body = "\n".join(
             [
@@ -915,6 +930,12 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer_recor
                 f"Client: {project.company.name}",
                 f"SOW: {project.title} ({project.project_code})",
                 f"Position: {position}",
+                "",
+                f"Your interview order: {index}",
+                "Full interview order:",
+                order_text,
+                "",
+                sequence_instruction,
                 "",
                 f"Log in to review and submit the scorecard: {interview_link}",
             ]
@@ -929,6 +950,12 @@ def interview_assignment_email_templates(candidate: Candidate, interviewer_recor
           <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
           <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
           <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
+          <tr><td><strong>Your interview order</strong></td><td>{index}</td></tr>
+        </table>
+        <p>{escape(sequence_instruction)}</p>
+        <table cellpadding="6" cellspacing="0" border="0">
+          <tr><th align="left">Order</th><th align="left">Interviewer</th><th align="left">Email</th></tr>
+          {order_rows}
         </table>
         <p><a href="{escape(interview_link)}">Log in to review and submit the scorecard</a></p>
         """
@@ -2249,11 +2276,12 @@ def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthC
     if len(interviewers) > 3:
         raise HTTPException(status_code=422, detail="A maximum of 3 internal interviewers can be assigned")
     interviewer_records: list[tuple[AppUser, Interview]] = []
-    for interviewer in interviewers:
+    for index, interviewer in enumerate(interviewers, start=1):
         interview = Interview(
             candidate_id=candidate.id,
             interviewer_user_id=interviewer.id,
             interviewer_name=interviewer.full_name,
+            interview_order=index,
             calendly_url=None,
             scheduled_at=None,
             status="pending",

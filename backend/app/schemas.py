@@ -256,6 +256,7 @@ class InterviewRead(BaseModel):
     candidate_id: int
     interviewer_user_id: int | None
     interviewer_name: str
+    interview_order: int | None = None
     calendly_url: str | None
     scheduled_at: datetime | None
     status: str

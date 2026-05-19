@@ -108,6 +108,7 @@ class HistoricalHireCreate(CandidateCreate):
     invoice_start_date: date | None = None
     invoice_end_date: date | None = None
     invoice_date: date | None = None
+    contracting_entity: str = Field(default="flexgcc_direct", pattern="^(flexgcc_direct|mbox_india)$")
 
 
 class CandidateStatusUpdate(BaseModel):
@@ -133,6 +134,7 @@ class CandidateContractCreate(BaseModel):
     invoice_start_date: date | None = None
     invoice_end_date: date | None = None
     invoice_date: date | None = None
+    contracting_entity: str = Field(default="flexgcc_direct", pattern="^(flexgcc_direct|mbox_india)$")
 
 
 class CandidateContractUpdate(CandidateContractCreate):
@@ -279,6 +281,9 @@ class CandidateContractRead(BaseModel):
     invoice_start_date: date | None
     invoice_end_date: date | None
     invoice_date: date | None
+    contracting_entity: str
+    billing_entity_name: str
+    billing_entity_address: str | None = None
     signed_at: datetime | None
     status: str
 
@@ -425,6 +430,8 @@ class CandidateInvoiceUploadRead(BaseModel):
     invoice_due_date: date | None
     amount: Decimal
     currency: str
+    billing_entity_name: str
+    billing_entity_address: str | None = None
     status: str
     token_used: bool
 
@@ -457,6 +464,8 @@ class CandidateVendorInvoiceRead(BaseModel):
     invoice_due_date: date | None
     amount: Decimal
     currency: str
+    billing_entity_name: str
+    billing_entity_address: str | None = None
     status: str
     submitted_at: datetime
     approval_comments: str | None = None

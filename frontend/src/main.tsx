@@ -46,6 +46,10 @@ const INVOICE_STATUSES = [
 ];
 const UPCOMING_INVOICES_FILTER = 'upcoming_invoices';
 const CANDIDATE_INVOICE_STATUSES = ['submitted', 'on-hold', 'rejected', 'approved', 'paid', 'partially_paid'];
+const CONTRACTING_ENTITY_LABELS: Record<string, string> = {
+  flexgcc_direct: 'FlexGCC direct hire',
+  mbox_india: 'India hire - Mbox Contract Solutions Pvt. Ltd.',
+};
 
 type Project = {
   id: number;
@@ -190,6 +194,9 @@ type CandidateContract = {
   invoice_start_date: string | null;
   invoice_end_date: string | null;
   invoice_date: string | null;
+  contracting_entity: string;
+  billing_entity_name: string;
+  billing_entity_address: string | null;
   signed_at: string | null;
   status: string;
 };
@@ -224,6 +231,8 @@ type CandidateInvoiceUpload = {
   invoice_due_date: string | null;
   amount: string;
   currency: string;
+  billing_entity_name: string;
+  billing_entity_address: string | null;
   status: string;
   token_used: boolean;
 };
@@ -245,6 +254,8 @@ type CandidateInvoice = {
   invoice_due_date: string | null;
   amount: string;
   currency: string;
+  billing_entity_name: string;
+  billing_entity_address: string | null;
   status: string;
   submitted_at: string;
   approval_comments: string | null;
@@ -365,6 +376,10 @@ function contractInvoiceDates(contract: CandidateContract | undefined): string {
   if (!contract) return 'Not set';
   const start = contract.invoice_date ?? contract.invoice_start_date ?? 'Not set';
   return contract.invoice_end_date ? `${start} to ${contract.invoice_end_date}` : start;
+}
+
+function contractingEntityLabel(value: string | undefined): string {
+  return CONTRACTING_ENTITY_LABELS[value ?? 'flexgcc_direct'] ?? 'FlexGCC direct hire';
 }
 
 function App() {
@@ -1516,6 +1531,13 @@ function App() {
                 <textarea name="notes" rows={3} />
               </label>
               <Field label="Signed contract upload" name="signed_contract" type="file" />
+              <label className="field">
+                <span>Hire type</span>
+                <select name="contracting_entity" defaultValue="flexgcc_direct">
+                  <option value="flexgcc_direct">FlexGCC direct hire</option>
+                  <option value="mbox_india">India hire - invoice to Mbox</option>
+                </select>
+              </label>
               <Field label="Next candidate invoice amount" name="invoice_amount" type="number" step="0.01" />
               <Field label="Currency" name="currency" defaultValue="USD" />
               <label className="field">
@@ -1639,6 +1661,8 @@ function App() {
                             <div><dt>Client</dt><dd>{candidate.client_company_name}</dd></div>
                             <div><dt>SOW</dt><dd>{candidate.project_code} · {candidate.project_title}</dd></div>
                             <div><dt>Position</dt><dd>{candidate.position_title ?? 'Not set'}</dd></div>
+                            <div><dt>Hire type</dt><dd>{contractingEntityLabel(contract?.contracting_entity)}</dd></div>
+                            <div><dt>Invoice to</dt><dd>{contract?.billing_entity_address ? `${contract.billing_entity_name}, ${contract.billing_entity_address}` : contract?.billing_entity_name ?? 'FlexGCC'}</dd></div>
                             <div><dt>Invoice</dt><dd>{contractInvoiceSummary(contract)}</dd></div>
                             <div><dt>Invoice dates</dt><dd>{contractInvoiceDates(contract)}</dd></div>
                             <div><dt>Contract</dt><dd>{contract?.contract_document_name ?? 'Not uploaded'}</dd></div>
@@ -1666,6 +1690,13 @@ function App() {
                 <PanelTitle icon={<FileCheck2 size={18} />} title={selectedCandidateContract ? 'Edit Candidate Invoice Terms' : 'Signed Contract And Invoice Terms'} />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
                 <Field label="Signed contract upload" name="signed_contract" type="file" />
+                <label className="field">
+                  <span>Hire type</span>
+                  <select name="contracting_entity" defaultValue={selectedCandidateContract?.contracting_entity ?? 'flexgcc_direct'}>
+                    <option value="flexgcc_direct">FlexGCC direct hire</option>
+                    <option value="mbox_india">India hire - invoice to Mbox</option>
+                  </select>
+                </label>
                 <Field label="Invoice amount" name="invoice_amount" type="number" step="0.01" defaultValue={selectedCandidateContract?.invoice_amount ?? ''} />
                 <Field label="Currency" name="currency" defaultValue={selectedCandidateContract?.currency ?? 'USD'} />
                 <label className="field">
@@ -1871,6 +1902,7 @@ function App() {
                       <div><dt>Client</dt><dd>{selectedCandidateInvoice.client_company_name}</dd></div>
                       <div><dt>SOW</dt><dd>{selectedCandidateInvoice.project_code} · {selectedCandidateInvoice.project_title}</dd></div>
                       <div><dt>Position</dt><dd>{selectedCandidateInvoice.position_title ?? 'Not set'}</dd></div>
+                      <div><dt>Invoice to</dt><dd>{selectedCandidateInvoice.billing_entity_address ? `${selectedCandidateInvoice.billing_entity_name}, ${selectedCandidateInvoice.billing_entity_address}` : selectedCandidateInvoice.billing_entity_name}</dd></div>
                       <div><dt>Invoice due date</dt><dd>{selectedCandidateInvoice.invoice_due_date ?? 'Not set'}</dd></div>
                       <div><dt>Amount</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.amount}</dd></div>
                       <div><dt>Status</dt><dd><Status value={selectedCandidateInvoice.status} /></dd></div>
@@ -2420,6 +2452,7 @@ function CandidateInvoiceUploadShell({
             <dl className="facts">
               <div><dt>Candidate</dt><dd>{invoice.candidate_name}</dd></div>
               <div><dt>Position</dt><dd>{invoice.position_title ?? 'Not set'}</dd></div>
+              <div><dt>Invoice to</dt><dd>{invoice.billing_entity_address ? `${invoice.billing_entity_name}, ${invoice.billing_entity_address}` : invoice.billing_entity_name}</dd></div>
               <div><dt>Invoice due date</dt><dd>{invoice.invoice_due_date ?? 'Not set'}</dd></div>
               <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>
               <div><dt>Status</dt><dd><Status value={invoice.status} /></dd></div>
@@ -2428,7 +2461,7 @@ function CandidateInvoiceUploadShell({
               <p className="empty">This single-use upload link has already been used.</p>
             ) : (
               <form className="stackedForm" onSubmit={onSubmit}>
-                <p className="contextLine">This link is single-use and can be used only once.</p>
+                <p className="contextLine">This link is single-use and can be used only once. The invoice should be raised on {invoice.billing_entity_name}{invoice.billing_entity_address ? `, ${invoice.billing_entity_address}` : ''}.</p>
                 <Field label="Invoice file" name="invoice_document" type="file" required />
                 <button className="primary" disabled={loading}>
                   <Upload size={18} />
@@ -2515,6 +2548,7 @@ function CandidateApprovalShell({
               <div><dt>Client</dt><dd>{invoice.client_company_name}</dd></div>
               <div><dt>Candidate</dt><dd>{invoice.candidate_name}</dd></div>
               <div><dt>Position</dt><dd>{invoice.position_title ?? 'Not set'}</dd></div>
+              <div><dt>Invoice to</dt><dd>{invoice.billing_entity_address ? `${invoice.billing_entity_name}, ${invoice.billing_entity_address}` : invoice.billing_entity_name}</dd></div>
               <div><dt>Invoice due date</dt><dd>{invoice.invoice_due_date ?? 'Not set'}</dd></div>
               <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>
               <div><dt>Status</dt><dd><Status value={invoice.status} /></dd></div>

@@ -1139,10 +1139,15 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
                 "invoice_frequency": "monthly",
                 "invoice_start_date": str(date.today() + timedelta(days=1)),
                 "invoice_end_date": str(date.today() + timedelta(days=60)),
+                "contracting_entity": "mbox_india",
             },
             files={"signed_contract": ("candidate-contract.pdf", b"signed", "application/pdf")},
         )
         assert hire_response.status_code == 201, hire_response.text
+        contract = hire_response.json()["contracts"][0]
+        assert contract["contracting_entity"] == "mbox_india"
+        assert contract["billing_entity_name"] == "Mbox Contract Solutions Pvt. Ltd."
+        assert contract["billing_entity_address"] == "M-68, Sector 7, Vashi, Navi Mumbai"
 
         with SessionLocal() as db:
             reminder_invoice = db.query(CandidateVendorInvoice).one()
@@ -1151,11 +1156,15 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
             token = reminder_invoice.upload_token
             reminder_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "candidate-invoice@example.com").one()
             assert "single-use" in reminder_email.body
+            assert "Mbox Contract Solutions Pvt. Ltd." in reminder_email.body
+            assert "M-68, Sector 7, Vashi, Navi Mumbai" in reminder_email.body
             assert token in reminder_email.body
 
         upload_view = client.get(f"/candidate-invoices/upload/{token}")
         assert upload_view.status_code == 200, upload_view.text
         assert upload_view.json()["token_used"] is False
+        assert upload_view.json()["billing_entity_name"] == "Mbox Contract Solutions Pvt. Ltd."
+        assert upload_view.json()["billing_entity_address"] == "M-68, Sector 7, Vashi, Navi Mumbai"
         upload_response = client.post(
             f"/candidate-invoices/upload/{token}",
             files={"invoice_document": ("candidate-invoice.pdf", b"invoice", "application/pdf")},
@@ -1175,10 +1184,12 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         invoice_id = candidate_invoice["id"]
         assert candidate_invoice["candidate_name"] == "Invoice Candidate"
         assert candidate_invoice["status"] == "submitted"
+        assert candidate_invoice["billing_entity_name"] == "Mbox Contract Solutions Pvt. Ltd."
 
         with SessionLocal() as db:
             approval_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "cae@example.com").one()
             assert f"/auth/login?candidate_invoice_id={invoice_id}" in approval_email.body
+            assert "Mbox Contract Solutions Pvt. Ltd." in approval_email.body
             assert "finance@example.com" in (approval_email.cc_email or "")
 
         wrong_cae_response = client.get(
@@ -1189,6 +1200,7 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         approval_view = client.get(f"/candidate-invoices/{invoice_id}/client-account-approval-view", headers=CAE_HEADERS)
         assert approval_view.status_code == 200, approval_view.text
         assert approval_view.json()["invoice_document_name"] == "candidate-invoice.pdf"
+        assert approval_view.json()["billing_entity_address"] == "M-68, Sector 7, Vashi, Navi Mumbai"
         download_response = client.get(f"/candidate-invoices/{invoice_id}/download", headers=CAE_HEADERS)
         assert download_response.status_code == 200
         assert download_response.content == b"invoice"

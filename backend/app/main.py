@@ -117,6 +117,10 @@ FINANCE_MANAGER_EMAIL = getenv("FINANCE_MANAGER_EMAIL", "")
 INVOICE_CRON_TOKEN = getenv("INVOICE_CRON_TOKEN", "")
 INVOICE_SERIAL_START = int(getenv("INVOICE_SERIAL_START", "15"))
 INVOICE_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "invoice_logo.png"
+DIRECT_HIRE_ENTITY = "flexgcc_direct"
+INDIA_HIRE_ENTITY = "mbox_india"
+MBOX_BILLING_NAME = "Mbox Contract Solutions Pvt. Ltd."
+MBOX_BILLING_ADDRESS = "M-68, Sector 7, Vashi, Navi Mumbai"
 
 
 @asynccontextmanager
@@ -247,8 +251,10 @@ def ensure_workflow_columns() -> None:
                 "invoice_start_date": "DATE",
                 "invoice_end_date": "DATE",
                 "invoice_date": "DATE",
+                "contracting_entity": "VARCHAR(40) DEFAULT 'flexgcc_direct'",
             }.items():
                 add_column(conn, "candidate_contracts", existing, name, definition)
+            conn.execute(text("UPDATE candidate_contracts SET contracting_entity = 'flexgcc_direct' WHERE contracting_entity IS NULL"))
         if "candidate_vendor_invoices" in tables:
             existing = {column["name"] for column in inspector.get_columns("candidate_vendor_invoices")}
             for name, definition in {
@@ -668,7 +674,18 @@ def serialize_interview(interview: Interview, db: Session) -> InterviewRead:
     )
 
 
+def contract_entity(contract: CandidateContract | None) -> str:
+    return (contract.contracting_entity if contract and contract.contracting_entity else DIRECT_HIRE_ENTITY)
+
+
+def billing_entity_for_contract(contract: CandidateContract | None) -> tuple[str, str | None]:
+    if contract_entity(contract) == INDIA_HIRE_ENTITY:
+        return MBOX_BILLING_NAME, MBOX_BILLING_ADDRESS
+    return "FlexGCC", None
+
+
 def serialize_candidate_contract(contract: CandidateContract, db: Session) -> CandidateContractRead:
+    billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
     return CandidateContractRead(
         id=contract.id,
         candidate_id=contract.candidate_id,
@@ -681,6 +698,9 @@ def serialize_candidate_contract(contract: CandidateContract, db: Session) -> Ca
         invoice_start_date=contract.invoice_start_date,
         invoice_end_date=contract.invoice_end_date,
         invoice_date=contract.invoice_date,
+        contracting_entity=contract_entity(contract),
+        billing_entity_name=billing_entity_name,
+        billing_entity_address=billing_entity_address,
         signed_at=contract.signed_at,
         status=contract.status,
     )
@@ -716,6 +736,8 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
     candidate = load_candidate(invoice.candidate_id, db)
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
     need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    contract = db.get(CandidateContract, invoice.contract_id) if invoice.contract_id else None
+    billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
     payments = db.scalars(select(CandidatePayment).where(CandidatePayment.vendor_invoice_id == invoice.id).order_by(CandidatePayment.paid_date, CandidatePayment.id)).all()
     latest_approval = db.scalar(
         select(CandidateInvoiceApproval)
@@ -741,6 +763,8 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         invoice_due_date=invoice.invoice_due_date,
         amount=invoice.amount,
         currency=invoice.currency,
+        billing_entity_name=billing_entity_name,
+        billing_entity_address=billing_entity_address,
         status=invoice.status,
         submitted_at=invoice.submitted_at,
         approval_comments=latest_approval.notes if latest_approval else None,
@@ -1023,9 +1047,11 @@ def next_candidate_invoice_due_date(contract: CandidateContract, db: Session, as
     return None
 
 
-def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[str, str, str]:
+def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, contract: CandidateContract | None) -> tuple[str, str, str]:
     upload_link = f"{FRONTEND_URL}/?{urlencode({'candidate_invoice_token': invoice.upload_token or ''})}"
     position = need.position_title if need else "Not set"
+    billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
+    billing_address_line = f"Invoice to address: {billing_entity_address}" if billing_entity_address else "Invoice to address: as instructed by FlexGCC"
     subject = f"Reminder to upload invoice for {position}"
     text = "\n".join(
         [
@@ -1034,6 +1060,8 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
             "This is a reminder to upload your invoice in the FlexGCC system.",
             "The upload link below is single-use and can be used only once.",
             "",
+            f"Invoice to: {billing_entity_name}",
+            billing_address_line,
             f"Position: {position}",
             f"Invoice due date: {invoice.invoice_due_date or 'not set'}",
             f"Amount: {invoice.currency} {invoice.amount}",
@@ -1047,6 +1075,8 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
     <p>This is a reminder to upload your invoice in the FlexGCC system.</p>
     <p><strong>This upload link is single-use and can be used only once.</strong></p>
     <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Invoice to</strong></td><td>{escape(billing_entity_name)}</td></tr>
+      <tr><td><strong>Invoice to address</strong></td><td>{escape(billing_entity_address or 'As instructed by FlexGCC')}</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
       <tr><td><strong>Invoice due date</strong></td><td>{escape(str(invoice.invoice_due_date or 'not set'))}</td></tr>
       <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
@@ -1056,9 +1086,10 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
     return subject, text, html
 
 
-def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[str, str, str]:
+def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, contract: CandidateContract | None) -> tuple[str, str, str]:
     approval_link = f"{API_BASE_URL}/auth/login?{urlencode({'candidate_invoice_id': invoice.id})}"
     position = need.position_title if need else "Not set"
+    billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
     subject = f"Candidate invoice approval required: {candidate.full_name}"
     text = "\n".join(
         [
@@ -1067,6 +1098,8 @@ def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candida
             f"Client: {project.company.name}",
             f"SOW: {project.title} ({project.project_code})",
             f"Candidate: {candidate.full_name}",
+            f"Invoice to: {billing_entity_name}",
+            f"Invoice to address: {billing_entity_address or 'As instructed by FlexGCC'}",
             f"Position: {position}",
             f"Invoice due date: {invoice.invoice_due_date or 'not set'}",
             f"Amount: {invoice.currency} {invoice.amount}",
@@ -1081,6 +1114,8 @@ def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candida
       <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
       <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
       <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Invoice to</strong></td><td>{escape(billing_entity_name)}</td></tr>
+      <tr><td><strong>Invoice to address</strong></td><td>{escape(billing_entity_address or 'As instructed by FlexGCC')}</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
       <tr><td><strong>Invoice due date</strong></td><td>{escape(str(invoice.invoice_due_date or 'not set'))}</td></tr>
       <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
@@ -1090,9 +1125,10 @@ def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candida
     return subject, text, html
 
 
-def candidate_invoice_finance_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, comments: str | None) -> tuple[str, str, str]:
+def candidate_invoice_finance_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, contract: CandidateContract | None, comments: str | None) -> tuple[str, str, str]:
     download_link = f"{API_BASE_URL}/candidate-invoices/{invoice.id}/download"
     position = need.position_title if need else "Not set"
+    billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
     subject = f"Candidate invoice approved: {candidate.full_name}"
     text = "\n".join(
         [
@@ -1101,6 +1137,8 @@ def candidate_invoice_finance_template(invoice: CandidateVendorInvoice, candidat
             f"Client: {project.company.name}",
             f"SOW: {project.title} ({project.project_code})",
             f"Candidate: {candidate.full_name}",
+            f"Invoice to: {billing_entity_name}",
+            f"Invoice to address: {billing_entity_address or 'As instructed by FlexGCC'}",
             f"Position: {position}",
             f"Amount: {invoice.currency} {invoice.amount}",
             f"Client Account Executive comments: {comments or 'None'}",
@@ -1115,6 +1153,8 @@ def candidate_invoice_finance_template(invoice: CandidateVendorInvoice, candidat
       <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
       <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
       <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Invoice to</strong></td><td>{escape(billing_entity_name)}</td></tr>
+      <tr><td><strong>Invoice to address</strong></td><td>{escape(billing_entity_address or 'As instructed by FlexGCC')}</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
       <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
       <tr><td><strong>Client Account Executive comments</strong></td><td>{escape(comments or 'None')}</td></tr>
@@ -1128,10 +1168,11 @@ def queue_candidate_invoice_approval_email(db: Session, invoice: CandidateVendor
     candidate = load_candidate(invoice.candidate_id, db)
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
     need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    contract = db.get(CandidateContract, invoice.contract_id) if invoice.contract_id else None
     finance_emails = finance_manager_emails(db)
     if not project.client_account_executive:
         invoice.status = "approved"
-        subject, text_body, html = candidate_invoice_finance_template(invoice, candidate, project, need, "No Client Account Executive is assigned to this project.")
+        subject, text_body, html = candidate_invoice_finance_template(invoice, candidate, project, need, contract, "No Client Account Executive is assigned to this project.")
         recipients = finance_emails
         if not recipients:
             db.add(EmailNotification(project_id=project.id, recipient_email="", subject=subject, body="No active Finance Manager user is assigned in the system.", status="failed"))
@@ -1143,7 +1184,7 @@ def queue_candidate_invoice_approval_email(db: Session, invoice: CandidateVendor
 
     recipient = project.client_account_executive.email
     cc_emails = [email for email in finance_emails if email != recipient]
-    subject, text_body, html = candidate_invoice_approval_template(invoice, candidate, project, need)
+    subject, text_body, html = candidate_invoice_approval_template(invoice, candidate, project, need, contract)
     status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text_body, html=html)
     invoice.approval_sent_at = utcnow()
     db.add(
@@ -1162,9 +1203,10 @@ def queue_candidate_invoice_finance_email(db: Session, invoice: CandidateVendorI
     candidate = load_candidate(invoice.candidate_id, db)
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
     need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    contract = db.get(CandidateContract, invoice.contract_id) if invoice.contract_id else None
     recipients = finance_manager_emails(db)
     cc_emails = [project.client_account_executive.email] if project.client_account_executive else []
-    subject, text_body, html = candidate_invoice_finance_template(invoice, candidate, project, need, comments)
+    subject, text_body, html = candidate_invoice_finance_template(invoice, candidate, project, need, contract, comments)
     if not recipients:
         db.add(EmailNotification(project_id=project.id, recipient_email="", cc_email=",".join(cc_emails) or None, subject=subject, body="No active Finance Manager user is assigned in the system.", status="failed"))
         return
@@ -1213,7 +1255,7 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
         )
         db.add(invoice)
         db.flush()
-        subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need)
+        subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need, contract)
         status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=[], subject=subject, text=text_body, html=html)
         db.add(
             EmailNotification(
@@ -2288,6 +2330,7 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
         invoice_start_date=payload.invoice_start_date,
         invoice_end_date=payload.invoice_end_date,
         invoice_date=payload.invoice_date,
+        contracting_entity=payload.contracting_entity,
         signed_at=utcnow() if document else None,
         status="signed" if document else "draft",
     )
@@ -2445,6 +2488,7 @@ async def upload_candidate_contract(candidate_id: int, request: Request, context
         invoice_start_date=payload.invoice_start_date,
         invoice_end_date=payload.invoice_end_date,
         invoice_date=payload.invoice_date,
+        contracting_entity=payload.contracting_entity,
         signed_at=utcnow() if document else None,
         status="signed" if document else "draft",
     )
@@ -2477,6 +2521,7 @@ async def update_candidate_contract(contract_id: int, request: Request, context:
     contract.invoice_start_date = payload.invoice_start_date
     contract.invoice_end_date = payload.invoice_end_date
     contract.invoice_date = payload.invoice_date
+    contract.contracting_entity = payload.contracting_entity
     if payload.status:
         contract.status = payload.status
     elif document and contract.status == "draft":
@@ -2576,6 +2621,8 @@ def get_candidate_invoice_upload(token: str, db: Session = Depends(get_db)) -> C
     candidate = load_candidate(invoice.candidate_id, db)
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
     need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    contract = db.get(CandidateContract, invoice.contract_id) if invoice.contract_id else None
+    billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
     return CandidateInvoiceUploadRead(
         candidate_name=candidate.full_name,
         candidate_email=candidate.email,
@@ -2586,6 +2633,8 @@ def get_candidate_invoice_upload(token: str, db: Session = Depends(get_db)) -> C
         invoice_due_date=invoice.invoice_due_date,
         amount=invoice.amount,
         currency=invoice.currency,
+        billing_entity_name=billing_entity_name,
+        billing_entity_address=billing_entity_address,
         status=invoice.status,
         token_used=invoice.upload_token_used_at is not None or invoice.invoice_document_id is not None,
     )

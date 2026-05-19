@@ -331,6 +331,7 @@ class CandidateContract(Base):
     invoice_start_date: Mapped[date | None] = mapped_column(Date)
     invoice_end_date: Mapped[date | None] = mapped_column(Date)
     invoice_date: Mapped[date | None] = mapped_column(Date)
+    contracting_entity: Mapped[str] = mapped_column(String(40), default="flexgcc_direct")
     signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(80), default="draft")
 

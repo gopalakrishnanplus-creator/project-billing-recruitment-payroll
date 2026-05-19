@@ -13,6 +13,7 @@ import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs';
 import RefreshCw from 'lucide-react/dist/esm/icons/refresh-cw.mjs';
 import Send from 'lucide-react/dist/esm/icons/send.mjs';
 import ShieldCheck from 'lucide-react/dist/esm/icons/shield-check.mjs';
+import Trash2 from 'lucide-react/dist/esm/icons/trash-2.mjs';
 import Upload from 'lucide-react/dist/esm/icons/upload.mjs';
 import UserCheck from 'lucide-react/dist/esm/icons/user-check.mjs';
 import UserCog from 'lucide-react/dist/esm/icons/user-cog.mjs';
@@ -381,6 +382,8 @@ function App() {
   const [clientAccountExecutives, setClientAccountExecutives] = useState<AppUser[]>([]);
   const [internalInterviewers, setInternalInterviewers] = useState<AppUser[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [inactiveProjects, setInactiveProjects] = useState<Project[]>([]);
+  const [showInactiveProjects, setShowInactiveProjects] = useState(false);
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
   const [upcomingInvoices, setUpcomingInvoices] = useState<UpcomingInvoice[]>([]);
   const [approvalInvoice, setApprovalInvoice] = useState<ClientInvoice | null>(null);
@@ -642,6 +645,8 @@ function App() {
     await api('/auth/logout', { method: 'POST' });
     setMe({ authenticated: false, id: null, full_name: null, email: null, roles: [], active_role: null });
     setProjects([]);
+    setInactiveProjects([]);
+    setShowInactiveProjects(false);
     setInvoices([]);
     setUsers([]);
       setClientAccountExecutives([]);
@@ -694,6 +699,17 @@ function App() {
       setSelectedProjectId(project.id);
       setEditingProject(false);
       return `Updated ${project.project_code}`;
+    });
+  }
+
+  async function inactivateSelectedProject() {
+    if (!selectedProject) return;
+    if (!window.confirm(`Inactivate ${selectedProject.project_code} · ${selectedProject.title}? It will be hidden from normal project lists but can be restored by System Admin.`)) return;
+    await mutate(async () => {
+      await api<Project>(`/projects/${selectedProject.id}/inactivate`, { method: 'POST' });
+      setEditingProject(false);
+      setSelectedProjectId(null);
+      return `Inactivated ${selectedProject.project_code}`;
     });
   }
 
@@ -767,6 +783,15 @@ function App() {
     await mutate(async () => {
       await api(`/recruitment-needs/${selectedNeed.id}`, { method: 'DELETE' });
       return 'Recruitment need deleted';
+    });
+  }
+
+  async function deleteCandidate(candidate: Candidate) {
+    if (!window.confirm(`Permanently delete ${candidate.full_name} and all candidate invoicing linked to this candidate? This cannot be undone.`)) return;
+    await mutate(async () => {
+      await api(`/candidates/${candidate.id}`, { method: 'DELETE' });
+      if (selectedCandidateId === candidate.id) setSelectedCandidateId(null);
+      return `Deleted ${candidate.full_name}`;
     });
   }
 
@@ -922,6 +947,29 @@ function App() {
       return `${roleLabel(roleToRemove)} removed from ${user.full_name}`;
     });
     await refreshUsers();
+  }
+
+  async function loadInactiveProjects() {
+    setLoading(true);
+    setNotice(null);
+    try {
+      const data = await api<Project[]>('/projects/inactive');
+      setInactiveProjects(data);
+      setShowInactiveProjects(true);
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to load inactive projects' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function reactivateProject(project: Project) {
+    await mutate(async () => {
+      const updatedProject = await api<Project>(`/projects/${project.id}/reactivate`, { method: 'POST' });
+      setInactiveProjects((items) => items.filter((item) => item.id !== project.id));
+      return `Reactivated ${updatedProject.project_code}`;
+    });
+    await loadInactiveProjects();
   }
 
   async function submitInternalProjectClientAccountExecutive(event: FormEvent<HTMLFormElement>, project: Project) {
@@ -1207,6 +1255,38 @@ function App() {
           </section>
 
           <section className="panel wide">
+            <PanelTitle icon={<ClipboardList size={18} />} title="Inactivated Projects" />
+            <div className="toolbar">
+              <button className="secondary" type="button" onClick={() => void loadInactiveProjects()} disabled={loading}>
+                <RefreshCw size={18} />
+                <span>View Inactivated Projects</span>
+              </button>
+            </div>
+            {showInactiveProjects ? (
+              inactiveProjects.length > 0 ? (
+                <div className="userList">
+                  {inactiveProjects.map((project) => (
+                    <div className="userRow" key={project.id}>
+                      <div>
+                        <strong>{project.project_code} · {project.title}</strong>
+                        <span>{project.client_company_name} · {project.client_contact_email}</span>
+                      </div>
+                      <button className="primary" type="button" onClick={() => void reactivateProject(project)} disabled={loading}>
+                        <BadgeCheck size={18} />
+                        <span>Reactivate</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty">No inactivated projects.</p>
+              )
+            ) : (
+              <p className="empty">Use this view to restore projects hidden by Operations Manager.</p>
+            )}
+          </section>
+
+          <section className="panel wide">
             <PanelTitle icon={<ShieldCheck size={18} />} title="Provisioned Users" />
             <div className="userList">
               {users.map((user) => (
@@ -1397,6 +1477,30 @@ function App() {
                 </button>
               </div>
             </form>
+          )}
+
+          {canOperate && selectedNeed && (
+            <section className="panel wide">
+              <PanelTitle icon={<Trash2 size={18} />} title="Candidate Cleanup" />
+              {candidatesForNeed.length > 0 ? (
+                <div className="userList">
+                  {candidatesForNeed.map((candidate) => (
+                    <div className="userRow" key={candidate.id}>
+                      <div>
+                        <strong>{candidate.full_name}</strong>
+                        <span>{candidate.email} · {candidate.status} · {candidate.position_title ?? selectedNeed.position_title}</span>
+                      </div>
+                      <button className="secondary danger" type="button" onClick={() => void deleteCandidate(candidate)} disabled={loading}>
+                        <Trash2 size={18} />
+                        <span>Delete Candidate And Invoices</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty">No candidates are linked to the selected recruitment position.</p>
+              )}
+            </section>
           )}
 
           {(canHrManage || canOperate) && selectedNeed && (
@@ -1915,6 +2019,10 @@ function App() {
                   <button className="primary" disabled={loading}>
                     <FileCheck2 size={18} />
                     <span>Save Changes</span>
+                  </button>
+                  <button className="secondary danger" type="button" onClick={() => void inactivateSelectedProject()} disabled={loading}>
+                    <Trash2 size={18} />
+                    <span>Inactivate Project</span>
                   </button>
                   <button className="secondary" type="button" onClick={() => setEditingProject(false)} disabled={loading}>
                     <span>Cancel</span>

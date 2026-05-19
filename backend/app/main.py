@@ -33,8 +33,10 @@ from .models import (
     AppUser,
     Candidate,
     CandidateContract,
+    CandidateEvaluation,
     CandidateInvoiceApproval,
     CandidatePayment,
+    CandidateScreeningForm,
     CandidateVendorInvoice,
     ClientCompany,
     ClientContact,
@@ -614,6 +616,15 @@ def load_project_for_read(project_id: int, db: Session) -> ProjectSOW:
     return project
 
 
+def active_project_filter():
+    return ProjectSOW.status != "inactive"
+
+
+def ensure_project_active(project: ProjectSOW) -> None:
+    if project.status == "inactive":
+        raise HTTPException(status_code=400, detail="Project is inactive")
+
+
 def document_name(db: Session, document_id: int | None) -> str | None:
     if document_id is None:
         return None
@@ -1182,10 +1193,12 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
         candidate = db.get(Candidate, contract.candidate_id)
         if candidate is None or candidate.status != "hired":
             continue
+        project = load_project_for_read(candidate.project_id, db)
+        if project.status == "inactive":
+            continue
         due_date = next_candidate_invoice_due_date(contract, db, as_of)
         if due_date is None or due_date > reminder_cutoff:
             continue
-        project = load_project_for_read(candidate.project_id, db)
         need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
         invoice = CandidateVendorInvoice(
             candidate_id=candidate.id,
@@ -1581,6 +1594,8 @@ def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
     generated: list[ClientInvoice] = []
 
     for schedule in schedules:
+        if schedule.project.status == "inactive":
+            continue
         candidate_date = schedule.next_invoice_generation_date or schedule.first_invoice_date
         while candidate_date - timedelta(days=2) <= as_of:
             if schedule.final_invoice_date and candidate_date > schedule.final_invoice_date:
@@ -1915,6 +1930,7 @@ async def create_project(request: Request, _: AuthContext = Depends(require_role
 @app.post("/projects/{project_id}/sows", response_model=ProjectRead, status_code=201)
 async def add_sow_to_msa(project_id: int, request: Request, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> ProjectRead:
     source = load_project_for_read(project_id, db)
+    ensure_project_active(source)
     data, files = await request_payload_and_files(request)
     payload: SOWCreate = parse_model(SOWCreate, data)
     project = ProjectSOW(
@@ -1948,6 +1964,7 @@ async def add_sow_to_msa(project_id: int, request: Request, _: AuthContext = Dep
 @app.put("/projects/{project_id}", response_model=ProjectRead)
 async def update_project(project_id: int, request: Request, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> ProjectRead:
     project = load_project_for_read(project_id, db)
+    ensure_project_active(project)
     data, files = await request_payload_and_files(request)
     payload: ProjectUpdate = parse_model(ProjectUpdate, data)
     if payload.client_company_name is not None:
@@ -2018,10 +2035,42 @@ def assign_internal_project_client_account_executive(
     return serialize_project(load_project_for_read(project.id, db))
 
 
+@app.post("/projects/{project_id}/inactivate", response_model=ProjectRead)
+def inactivate_project(project_id: int, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> ProjectRead:
+    project = load_project_for_read(project_id, db)
+    if project.status != "inactive":
+        project.status = "inactive"
+        log_event(db, project_id=project.id, actor_name=context.user.full_name, action="project_inactivated", details=project.project_code)
+        db.commit()
+    return serialize_project(load_project_for_read(project.id, db))
+
+
+@app.post("/projects/{project_id}/reactivate", response_model=ProjectRead)
+def reactivate_project(project_id: int, context: AuthContext = Depends(require_role(UserRole.system_admin.value)), db: Session = Depends(get_db)) -> ProjectRead:
+    project = load_project_for_read(project_id, db)
+    if project.status == "inactive":
+        project.status = "active"
+        log_event(db, project_id=project.id, actor_name=context.user.full_name, action="project_reactivated", details=project.project_code)
+        db.commit()
+    return serialize_project(load_project_for_read(project.id, db))
+
+
+@app.get("/projects/inactive", response_model=list[ProjectRead])
+def list_inactive_projects(_: AuthContext = Depends(require_role(UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[ProjectRead]:
+    projects = db.scalars(
+        select(ProjectSOW)
+        .where(ProjectSOW.status == "inactive")
+        .order_by(ProjectSOW.created_at.desc())
+        .options(*project_options())
+    ).all()
+    return [serialize_project(project) for project in projects]
+
+
 @app.get("/projects", response_model=list[ProjectRead])
 def list_projects(_: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> list[ProjectRead]:
     projects = db.scalars(
         select(ProjectSOW)
+        .where(active_project_filter())
         .order_by(ProjectSOW.created_at.desc())
         .options(*project_options())
     ).all()
@@ -2076,6 +2125,7 @@ def download_document(document_id: int, context: AuthContext = Depends(require_l
 @app.post("/projects/{project_id}/recruitment-needs", response_model=RecruitmentNeedRead, status_code=201)
 async def add_recruitment_need(project_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> RecruitmentNeedRead:
     project = load_project_for_read(project_id, db)
+    ensure_project_active(project)
     data, files = await request_payload_and_files(request)
     payload: RecruitmentNeedCreate = parse_model(RecruitmentNeedCreate, data)
     payload_data = payload.model_dump()
@@ -2108,6 +2158,7 @@ async def update_recruitment_need(need_id: int, request: Request, context: AuthC
     if need is None:
         raise HTTPException(status_code=404, detail="Recruitment need not found")
     project = load_project_for_read(need.project_id, db)
+    ensure_project_active(project)
     data, files = await request_payload_and_files(request)
     payload: RecruitmentNeedUpdate = parse_model(RecruitmentNeedUpdate, data)
     for field, value in payload.model_dump(exclude_unset=True).items():
@@ -2142,7 +2193,12 @@ def delete_recruitment_need(need_id: int, _: AuthContext = Depends(require_role(
 
 @app.get("/recruitment/needs", response_model=list[RecruitmentNeedDetailRead])
 def list_recruitment_needs(_: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.hr_manager.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[RecruitmentNeedDetailRead]:
-    needs = db.scalars(select(RecruitmentNeed).order_by(RecruitmentNeed.created_at.desc(), RecruitmentNeed.id.desc())).all()
+    needs = db.scalars(
+        select(RecruitmentNeed)
+        .join(ProjectSOW, ProjectSOW.id == RecruitmentNeed.project_id)
+        .where(active_project_filter())
+        .order_by(RecruitmentNeed.created_at.desc(), RecruitmentNeed.id.desc())
+    ).all()
     return [serialize_recruitment_need_detail(need, db) for need in needs]
 
 
@@ -2175,6 +2231,8 @@ def add_candidate(need_id: int, payload: CandidateCreate, context: AuthContext =
     need = db.get(RecruitmentNeed, need_id)
     if need is None:
         raise HTTPException(status_code=404, detail="Recruitment need not found")
+    project = load_project_for_read(need.project_id, db)
+    ensure_project_active(project)
     candidate = Candidate(
         project_id=need.project_id,
         recruitment_need_id=need.id,
@@ -2199,6 +2257,8 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
     need = db.get(RecruitmentNeed, need_id)
     if need is None:
         raise HTTPException(status_code=404, detail="Recruitment need not found")
+    project = load_project_for_read(need.project_id, db)
+    ensure_project_active(project)
     data, files = await request_payload_and_files(request)
     payload: HistoricalHireCreate = parse_model(HistoricalHireCreate, data)
     next_candidate_invoice_date = payload.invoice_date if payload.invoice_frequency == "single" else payload.invoice_start_date
@@ -2243,8 +2303,37 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
 
 @app.get("/recruitment/candidates", response_model=list[CandidateRead])
 def list_candidates(_: AuthContext = Depends(require_role(UserRole.hr_manager.value, UserRole.operations_manager.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[CandidateRead]:
-    candidates = db.scalars(select(Candidate).order_by(Candidate.created_at.desc(), Candidate.id.desc())).all()
+    candidates = db.scalars(
+        select(Candidate)
+        .join(ProjectSOW, ProjectSOW.id == Candidate.project_id)
+        .where(active_project_filter())
+        .order_by(Candidate.created_at.desc(), Candidate.id.desc())
+    ).all()
     return [serialize_candidate(candidate, db) for candidate in candidates]
+
+
+@app.delete("/candidates/{candidate_id}")
+def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> dict[str, str]:
+    candidate = load_candidate(candidate_id, db)
+    project_id = candidate.project_id
+    candidate_name = candidate.full_name
+    vendor_invoice_ids = db.scalars(select(CandidateVendorInvoice.id).where(CandidateVendorInvoice.candidate_id == candidate.id)).all()
+    interview_ids = db.scalars(select(Interview.id).where(Interview.candidate_id == candidate.id)).all()
+
+    if vendor_invoice_ids:
+        db.execute(delete(CandidatePayment).where(CandidatePayment.vendor_invoice_id.in_(vendor_invoice_ids)))
+        db.execute(delete(CandidateInvoiceApproval).where(CandidateInvoiceApproval.vendor_invoice_id.in_(vendor_invoice_ids)))
+        db.execute(delete(CandidateVendorInvoice).where(CandidateVendorInvoice.id.in_(vendor_invoice_ids)))
+    if interview_ids:
+        db.execute(delete(InterviewScorecard).where(InterviewScorecard.interview_id.in_(interview_ids)))
+        db.execute(delete(Interview).where(Interview.id.in_(interview_ids)))
+    db.execute(delete(CandidateScreeningForm).where(CandidateScreeningForm.candidate_id == candidate.id))
+    db.execute(delete(CandidateEvaluation).where(CandidateEvaluation.candidate_id == candidate.id))
+    db.execute(delete(CandidateContract).where(CandidateContract.candidate_id == candidate.id))
+    db.delete(candidate)
+    log_event(db, project_id=project_id, actor_name=context.user.full_name, action="candidate_deleted", details=f"{candidate_name} and associated candidate invoicing deleted")
+    db.commit()
+    return {"status": "deleted"}
 
 
 @app.patch("/candidates/{candidate_id}/status", response_model=CandidateRead)
@@ -2260,6 +2349,7 @@ def update_candidate_status(candidate_id: int, payload: CandidateStatusUpdate, c
 @app.post("/candidates/{candidate_id}/interviews", response_model=list[InterviewRead], status_code=201)
 def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> list[InterviewRead]:
     candidate = load_candidate(candidate_id, db)
+    ensure_project_active(load_project_for_read(candidate.project_id, db))
     interviewers: list[AppUser] = []
     if payload.interviewer_emails:
         seen_emails: set[str] = set()
@@ -2300,7 +2390,13 @@ def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthC
 
 @app.get("/interviews", response_model=list[InterviewRead])
 def list_interviews(context: AuthContext = Depends(require_role(UserRole.hr_manager.value, UserRole.internal_interviewer.value, UserRole.system_admin.value)), db: Session = Depends(get_db)) -> list[InterviewRead]:
-    query = select(Interview).order_by(Interview.id.desc())
+    query = (
+        select(Interview)
+        .join(Candidate, Candidate.id == Interview.candidate_id)
+        .join(ProjectSOW, ProjectSOW.id == Candidate.project_id)
+        .where(active_project_filter())
+        .order_by(Interview.id.desc())
+    )
     if context.active_role == UserRole.internal_interviewer.value:
         query = query.where(Interview.interviewer_user_id == context.user.id)
     interviews = db.scalars(query).all()
@@ -2404,6 +2500,7 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: Aut
     project = db.get(ProjectSOW, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
+    ensure_project_active(project)
     if payload.frequency == "single":
         payload.final_invoice_date = None
     if payload.final_invoice_date and payload.final_invoice_date < payload.first_invoice_date:
@@ -2658,6 +2755,8 @@ def list_upcoming_invoices(
 
     upcoming_by_project: dict[int, UpcomingInvoiceRead] = {}
     for schedule in schedules:
+        if schedule.project.status == "inactive":
+            continue
         next_invoice_date = next_unraised_invoice_date(schedule)
         if next_invoice_date is None:
             continue

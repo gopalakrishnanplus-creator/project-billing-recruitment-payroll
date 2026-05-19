@@ -6,7 +6,7 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 from app.database import Base, engine
 from app import main as app_main
 from app.main import app
-from app.models import CandidateVendorInvoice, EmailNotification
+from app.models import Candidate, CandidateContract, CandidateVendorInvoice, EmailNotification
 from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
@@ -226,6 +226,122 @@ def test_role_separated_permissions_and_admin_user_provisioning():
         )
         assert admin_user_response.status_code == 200, admin_user_response.text
         assert admin_user_response.json()["roles"] == ["finance_manager", "operations_manager"]
+
+
+def test_operations_can_inactivate_projects_and_admin_can_reactivate_them():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+
+        future_invoice_date = date.today() + timedelta(days=30)
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Future test billing",
+                "item_description": "Test billing that should be hidden after inactivation",
+                "amount": "2500.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(future_invoice_date),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+
+        finance_inactivate_response = client.post(f"/projects/{project['id']}/inactivate", headers=FINANCE_HEADERS)
+        assert finance_inactivate_response.status_code == 403
+
+        inactivate_response = client.post(f"/projects/{project['id']}/inactivate", headers=OPS_HEADERS)
+        assert inactivate_response.status_code == 200, inactivate_response.text
+        assert inactivate_response.json()["status"] == "inactive"
+
+        normal_project_list = client.get("/projects", headers=OPS_HEADERS)
+        assert normal_project_list.status_code == 200, normal_project_list.text
+        assert all(item["id"] != project["id"] for item in normal_project_list.json())
+
+        upcoming_response = client.get("/upcoming-invoices", headers=FINANCE_HEADERS)
+        assert upcoming_response.status_code == 200, upcoming_response.text
+        assert all(item["project_id"] != project["id"] for item in upcoming_response.json())
+
+        inactive_ops_response = client.get("/projects/inactive", headers=OPS_HEADERS)
+        assert inactive_ops_response.status_code == 403
+
+        inactive_admin_response = client.get("/projects/inactive", headers=ADMIN_HEADERS)
+        assert inactive_admin_response.status_code == 200, inactive_admin_response.text
+        assert [item["id"] for item in inactive_admin_response.json()] == [project["id"]]
+
+        ops_reactivate_response = client.post(f"/projects/{project['id']}/reactivate", headers=OPS_HEADERS)
+        assert ops_reactivate_response.status_code == 403
+
+        reactivate_response = client.post(f"/projects/{project['id']}/reactivate", headers=ADMIN_HEADERS)
+        assert reactivate_response.status_code == 200, reactivate_response.text
+        assert reactivate_response.json()["status"] == "active"
+
+        restored_project_list = client.get("/projects", headers=OPS_HEADERS)
+        assert any(item["id"] == project["id"] for item in restored_project_list.json())
+
+
+def test_operations_can_hard_delete_candidate_and_candidate_invoicing():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            json={
+                "position_title": "Temporary Test Candidate",
+                "number_of_positions": 1,
+                "employment_type": "FTE",
+                "description": "Temporary candidate created for deletion testing.",
+                "historical_completed": True,
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        need = need_response.json()
+
+        hire_response = client.post(
+            f"/recruitment-needs/{need['id']}/historical-hires",
+            headers=OPS_HEADERS,
+            data={
+                "full_name": "Candidate To Delete",
+                "email": "candidate-delete@example.com",
+                "invoice_amount": "1200.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today()),
+            },
+        )
+        assert hire_response.status_code == 201, hire_response.text
+        candidate = hire_response.json()
+
+        with SessionLocal() as db:
+            assert db.query(Candidate).filter(Candidate.id == candidate["id"]).count() == 1
+            assert db.query(CandidateContract).filter(CandidateContract.candidate_id == candidate["id"]).count() == 1
+            assert db.query(CandidateVendorInvoice).filter(CandidateVendorInvoice.candidate_id == candidate["id"]).count() == 1
+
+        hr_delete_response = client.delete(f"/candidates/{candidate['id']}", headers=HR_HEADERS)
+        assert hr_delete_response.status_code == 403
+
+        delete_response = client.delete(f"/candidates/{candidate['id']}", headers=OPS_HEADERS)
+        assert delete_response.status_code == 200, delete_response.text
+        assert delete_response.json()["status"] == "deleted"
+
+        with SessionLocal() as db:
+            assert db.query(Candidate).filter(Candidate.id == candidate["id"]).count() == 0
+            assert db.query(CandidateContract).filter(CandidateContract.candidate_id == candidate["id"]).count() == 0
+            assert db.query(CandidateVendorInvoice).filter(CandidateVendorInvoice.candidate_id == candidate["id"]).count() == 0
 
 
 def test_project_file_upload_update_and_additional_sow():

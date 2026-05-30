@@ -6,7 +6,7 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 from app.database import Base, engine
 from app import main as app_main
 from app.main import app
-from app.models import Candidate, CandidateContract, CandidateVendorInvoice, EmailNotification
+from app.models import Candidate, CandidateContract, CandidateInvoiceSchedule, CandidateVendorInvoice, EmailNotification
 from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
@@ -1269,6 +1269,109 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         assert paid_response.status_code == 201, paid_response.text
         assert paid_response.json()["status"] == "paid"
         assert paid_response.json()["balance_due"] == "0.00"
+
+
+def test_candidate_invoice_schedules_support_reimbursements_and_auto_reimbursements():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Reimbursement Consultant",
+                "number_of_positions": "1",
+                "employment_type": "Fractional Consultant",
+                "description": "Candidate reimbursement workflow recruitment.",
+                "historical_completed": "on",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        hire_response = client.post(
+            f"/recruitment-needs/{need_response.json()['id']}/historical-hires",
+            headers=HR_HEADERS,
+            data={
+                "full_name": "Expense Candidate",
+                "email": "expense-candidate@example.com",
+                "invoice_terms": "Monthly consulting and reimbursement terms.",
+            },
+            files={"signed_contract": ("candidate-contract.pdf", b"signed", "application/pdf")},
+        )
+        assert hire_response.status_code == 201, hire_response.text
+        contract_id = hire_response.json()["contracts"][0]["id"]
+
+        missing_amount_response = client.post(
+            f"/candidate-contracts/{contract_id}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "item_description": "Auto internet reimbursement",
+                "invoice_type": "auto_reimbursement",
+                "currency": "USD",
+                "frequency": "single",
+                "invoice_date": str(date.today() + timedelta(days=1)),
+            },
+        )
+        assert missing_amount_response.status_code == 422
+
+        reimbursement_response = client.post(
+            f"/candidate-contracts/{contract_id}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "item_description": "Rental equipment reimbursement",
+                "invoice_type": "reimbursement",
+                "amount": "120.00",
+                "currency": "USD",
+                "frequency": "single",
+                "invoice_date": str(date.today() + timedelta(days=1)),
+            },
+        )
+        assert reimbursement_response.status_code == 201, reimbursement_response.text
+        auto_response = client.post(
+            f"/candidate-contracts/{contract_id}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "item_description": "Auto internet reimbursement",
+                "invoice_type": "auto_reimbursement",
+                "amount": "50.00",
+                "currency": "USD",
+                "frequency": "single",
+                "invoice_date": str(date.today() + timedelta(days=1)),
+            },
+        )
+        assert auto_response.status_code == 201, auto_response.text
+
+        with SessionLocal() as db:
+            schedules = db.query(CandidateInvoiceSchedule).order_by(CandidateInvoiceSchedule.id.asc()).all()
+            assert [schedule.item_description for schedule in schedules] == ["Rental equipment reimbursement", "Auto internet reimbursement"]
+            invoices = db.query(CandidateVendorInvoice).order_by(CandidateVendorInvoice.amount.desc()).all()
+            assert len(invoices) == 2
+            reimbursement_invoice = next(invoice for invoice in invoices if invoice.invoice_type == "reimbursement")
+            auto_invoice = next(invoice for invoice in invoices if invoice.invoice_type == "auto_reimbursement")
+            assert reimbursement_invoice.status == "awaiting_upload"
+            assert reimbursement_invoice.upload_token is not None
+            assert reimbursement_invoice.item_description == "Rental equipment reimbursement"
+            assert auto_invoice.status == "submitted"
+            assert auto_invoice.upload_token is None
+            assert auto_invoice.item_description == "Auto internet reimbursement"
+            candidate_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "expense-candidate@example.com").one()
+            assert "Rental equipment reimbursement" in candidate_email.body
+            assert "reimbursement" in candidate_email.body
+            cae_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "cae@example.com").one()
+            assert "Auto internet reimbursement" in cae_email.body
+            assert "auto reimbursement" in cae_email.body.replace("-", " ")
+            assert "finance@example.com" in (cae_email.cc_email or "")
+
+        candidate_response = client.get("/recruitment/candidates", headers=OPS_HEADERS)
+        assert candidate_response.status_code == 200, candidate_response.text
+        contract = candidate_response.json()[0]["contracts"][0]
+        assert len(contract["invoice_schedules"]) == 2
 
 
 def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):

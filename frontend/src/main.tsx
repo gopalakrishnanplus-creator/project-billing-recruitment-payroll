@@ -50,6 +50,11 @@ const CONTRACTING_ENTITY_LABELS: Record<string, string> = {
   flexgcc_direct: 'FlexGCC direct hire',
   mbox_india: 'India hire - Mbox Contract Solutions Pvt. Ltd.',
 };
+const CANDIDATE_INVOICE_TYPE_LABELS: Record<string, string> = {
+  invoice: 'Invoice',
+  reimbursement: 'Reimbursement',
+  auto_reimbursement: 'Auto-reimbursement',
+};
 
 type Project = {
   id: number;
@@ -182,12 +187,30 @@ type Interview = {
   evaluation_document_name: string | null;
 };
 
+type CandidateInvoiceSchedule = {
+  id: number;
+  candidate_id: number;
+  contract_id: number;
+  project_id: number;
+  item_description: string;
+  invoice_type: string;
+  amount: string;
+  currency: string;
+  frequency: string;
+  invoice_start_date: string | null;
+  invoice_end_date: string | null;
+  invoice_date: string | null;
+  status: string;
+};
+
 type CandidateContract = {
   id: number;
   candidate_id: number;
   contract_document_id: number | null;
   contract_document_name: string | null;
   invoice_terms: string | null;
+  invoice_description: string | null;
+  invoice_type: string;
   invoice_amount: string | null;
   currency: string | null;
   invoice_frequency: string | null;
@@ -199,6 +222,7 @@ type CandidateContract = {
   billing_entity_address: string | null;
   signed_at: string | null;
   status: string;
+  invoice_schedules: CandidateInvoiceSchedule[];
 };
 
 type Candidate = {
@@ -228,6 +252,8 @@ type CandidateInvoiceUpload = {
   project_title: string;
   client_company_name: string;
   position_title: string | null;
+  item_description: string | null;
+  invoice_type: string;
   invoice_due_date: string | null;
   amount: string;
   currency: string;
@@ -241,6 +267,7 @@ type CandidateInvoice = {
   id: number;
   candidate_id: number;
   contract_id: number | null;
+  schedule_id: number | null;
   project_id: number | null;
   invoice_document_id: number | null;
   invoice_document_name: string | null;
@@ -251,6 +278,8 @@ type CandidateInvoice = {
   client_company_name: string;
   client_account_executive_email: string | null;
   position_title: string | null;
+  item_description: string | null;
+  invoice_type: string;
   invoice_due_date: string | null;
   amount: string;
   currency: string;
@@ -382,6 +411,10 @@ function contractingEntityLabel(value: string | undefined): string {
   return CONTRACTING_ENTITY_LABELS[value ?? 'flexgcc_direct'] ?? 'FlexGCC direct hire';
 }
 
+function candidateInvoiceTypeLabel(value: string | undefined | null): string {
+  return CANDIDATE_INVOICE_TYPE_LABELS[value ?? 'invoice'] ?? (value ?? 'invoice').replaceAll('_', ' ');
+}
+
 function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const approvalInvoiceId = urlParams.get('approval_invoice_id');
@@ -421,6 +454,7 @@ function App() {
   const [needBillingType, setNeedBillingType] = useState('periodic');
   const [internalRecruitmentProject, setInternalRecruitmentProject] = useState(false);
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
+  const [candidateScheduleFrequency, setCandidateScheduleFrequency] = useState('monthly');
   const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment'>(requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : 'workflow');
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState('');
@@ -457,9 +491,17 @@ function App() {
     () => candidates.find((candidate) => candidate.id === selectedCandidateId) ?? candidatesForNeed[0] ?? candidates[0],
     [candidates, candidatesForNeed, selectedCandidateId],
   );
+  const selectedHiredCandidate = useMemo(
+    () => (selectedCandidate?.status === 'hired' ? selectedCandidate : hiredCandidates[0]),
+    [hiredCandidates, selectedCandidate],
+  );
   const selectedCandidateContract = useMemo(
     () => (selectedCandidate ? latestContract(selectedCandidate) : undefined),
     [selectedCandidate],
+  );
+  const selectedHiredCandidateContract = useMemo(
+    () => (selectedHiredCandidate ? latestContract(selectedHiredCandidate) : undefined),
+    [selectedHiredCandidate],
   );
   const flexGccSalesSupportProjects = useMemo(
     () => projects.filter((project) => project.client_company_name.toLowerCase() === 'flexgcc' && project.title.toLowerCase() === 'flexgcc sales support'),
@@ -906,6 +948,22 @@ function App() {
       setSelectedCandidateId(candidate.id);
       formElement.reset();
       return existingContract ? 'Candidate invoice terms updated' : 'Candidate contract and invoice terms saved';
+    });
+  }
+
+  async function submitCandidateInvoiceSchedule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedHiredCandidateContract) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    await mutate(async () => {
+      await api<CandidateInvoiceSchedule>(`/candidate-contracts/${selectedHiredCandidateContract.id}/invoice-schedules`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      formElement.reset();
+      setCandidateScheduleFrequency('monthly');
+      return 'Candidate invoice item added';
     });
   }
 
@@ -1550,6 +1608,15 @@ function App() {
               </label>
               <Field label="Next candidate invoice amount" name="invoice_amount" type="number" step="0.01" />
               <Field label="Currency" name="currency" defaultValue="USD" />
+              <Field label="Invoice description" name="invoice_description" />
+              <label className="field">
+                <span>Invoice type</span>
+                <select name="invoice_type" defaultValue="invoice">
+                  <option value="invoice">Invoice</option>
+                  <option value="reimbursement">Reimbursement</option>
+                  <option value="auto_reimbursement">Auto-reimbursement</option>
+                </select>
+              </label>
               <label className="field">
                 <span>Invoice frequency</span>
                 <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
@@ -1709,6 +1776,15 @@ function App() {
                 </label>
                 <Field label="Invoice amount" name="invoice_amount" type="number" step="0.01" defaultValue={selectedCandidateContract?.invoice_amount ?? ''} />
                 <Field label="Currency" name="currency" defaultValue={selectedCandidateContract?.currency ?? 'USD'} />
+                <Field label="Primary invoice description" name="invoice_description" defaultValue={selectedCandidateContract?.invoice_description ?? ''} />
+                <label className="field">
+                  <span>Primary invoice type</span>
+                  <select name="invoice_type" defaultValue={selectedCandidateContract?.invoice_type ?? 'invoice'}>
+                    <option value="invoice">Invoice</option>
+                    <option value="reimbursement">Reimbursement</option>
+                    <option value="auto_reimbursement">Auto-reimbursement</option>
+                  </select>
+                </label>
                 <label className="field">
                   <span>Invoice frequency</span>
                   <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
@@ -1747,6 +1823,80 @@ function App() {
                 </button>
               </form>
             </>
+          )}
+
+          {(canHrManage || canOperate) && (
+            <section className="panel wide">
+              <PanelTitle icon={<Banknote size={18} />} title="Candidate Invoice Items" />
+              <label className="field">
+                <span>Hired candidate</span>
+                <select value={selectedHiredCandidate?.id ?? ''} onChange={(event) => setSelectedCandidateId(Number(event.target.value))}>
+                  {hiredCandidates.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>{candidate.full_name} · {candidate.position_title ?? 'No position'} · {candidate.status}</option>
+                  ))}
+                </select>
+              </label>
+              {selectedHiredCandidateContract ? (
+                <>
+                  <dl className="facts">
+                    <div><dt>Candidate</dt><dd>{selectedHiredCandidate?.full_name}</dd></div>
+                    <div><dt>Project</dt><dd>{selectedHiredCandidate?.project_code} · {selectedHiredCandidate?.project_title}</dd></div>
+                    <div><dt>Invoice to</dt><dd>{selectedHiredCandidateContract.billing_entity_address ? `${selectedHiredCandidateContract.billing_entity_name}, ${selectedHiredCandidateContract.billing_entity_address}` : selectedHiredCandidateContract.billing_entity_name}</dd></div>
+                  </dl>
+                  {selectedHiredCandidateContract.invoice_schedules.length > 0 && (
+                    <div className="userList">
+                      {selectedHiredCandidateContract.invoice_schedules.map((schedule) => (
+                        <div className="userRow" key={schedule.id}>
+                          <div>
+                            <strong>{schedule.item_description}</strong>
+                            <span>
+                              {candidateInvoiceTypeLabel(schedule.invoice_type)} · {schedule.currency} {schedule.amount} · {schedule.frequency} · {schedule.invoice_date ?? schedule.invoice_start_date ?? 'No start'}{schedule.invoice_end_date ? ` to ${schedule.invoice_end_date}` : ''} · {schedule.status}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <form className="grid four" onSubmit={(event) => void submitCandidateInvoiceSchedule(event)}>
+                    <Field label="Description" name="item_description" required />
+                    <label className="field">
+                      <span>Invoice type</span>
+                      <select name="invoice_type" defaultValue="invoice">
+                        <option value="invoice">Invoice</option>
+                        <option value="reimbursement">Reimbursement</option>
+                        <option value="auto_reimbursement">Auto-reimbursement</option>
+                      </select>
+                    </label>
+                    <Field label="Amount" name="amount" type="number" step="0.01" required />
+                    <Field label="Currency" name="currency" defaultValue={selectedHiredCandidateContract.currency ?? 'USD'} required />
+                    <label className="field">
+                      <span>Frequency</span>
+                      <select name="frequency" value={candidateScheduleFrequency} onChange={(event) => setCandidateScheduleFrequency(event.target.value)}>
+                        <option value="single">Single</option>
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                        <option value="quarterly">Quarterly</option>
+                      </select>
+                    </label>
+                    {candidateScheduleFrequency === 'single' ? (
+                      <Field label="Invoice date" name="invoice_date" type="date" defaultValue={endOfCurrentMonth()} required />
+                    ) : (
+                      <>
+                        <Field label="Invoice start" name="invoice_start_date" type="date" defaultValue={endOfCurrentMonth()} required />
+                        <Field label="Invoice end" name="invoice_end_date" type="date" />
+                      </>
+                    )}
+                    <input type="hidden" name="status" value="active" />
+                    <button className="primary" disabled={loading}>
+                      <FilePlus2 size={18} />
+                      <span>Add Invoice Item</span>
+                    </button>
+                  </form>
+                </>
+              ) : (
+                <p className="empty">Select a hired candidate with a signed contract to add invoice items.</p>
+              )}
+            </section>
           )}
 
           {(canInterview || canHrManage) && (
@@ -1912,6 +2062,8 @@ function App() {
                       <div><dt>Client</dt><dd>{selectedCandidateInvoice.client_company_name}</dd></div>
                       <div><dt>SOW</dt><dd>{selectedCandidateInvoice.project_code} · {selectedCandidateInvoice.project_title}</dd></div>
                       <div><dt>Position</dt><dd>{selectedCandidateInvoice.position_title ?? 'Not set'}</dd></div>
+                      <div><dt>Type</dt><dd>{candidateInvoiceTypeLabel(selectedCandidateInvoice.invoice_type)}</dd></div>
+                      <div><dt>Description</dt><dd>{selectedCandidateInvoice.item_description ?? 'Not set'}</dd></div>
                       <div><dt>Invoice to</dt><dd>{selectedCandidateInvoice.billing_entity_address ? `${selectedCandidateInvoice.billing_entity_name}, ${selectedCandidateInvoice.billing_entity_address}` : selectedCandidateInvoice.billing_entity_name}</dd></div>
                       <div><dt>Invoice due date</dt><dd>{selectedCandidateInvoice.invoice_due_date ?? 'Not set'}</dd></div>
                       <div><dt>Amount</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.amount}</dd></div>
@@ -2464,6 +2616,8 @@ function CandidateInvoiceUploadShell({
             <dl className="facts">
               <div><dt>Candidate</dt><dd>{invoice.candidate_name}</dd></div>
               <div><dt>Position</dt><dd>{invoice.position_title ?? 'Not set'}</dd></div>
+              <div><dt>Type</dt><dd>{candidateInvoiceTypeLabel(invoice.invoice_type)}</dd></div>
+              <div><dt>Description</dt><dd>{invoice.item_description ?? 'Not set'}</dd></div>
               <div><dt>Invoice to</dt><dd>{invoice.billing_entity_address ? `${invoice.billing_entity_name}, ${invoice.billing_entity_address}` : invoice.billing_entity_name}</dd></div>
               <div><dt>Invoice due date</dt><dd>{invoice.invoice_due_date ?? 'Not set'}</dd></div>
               <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>
@@ -2562,6 +2716,8 @@ function CandidateApprovalShell({
               <div><dt>Client</dt><dd>{invoice.client_company_name}</dd></div>
               <div><dt>Candidate</dt><dd>{invoice.candidate_name}</dd></div>
               <div><dt>Position</dt><dd>{invoice.position_title ?? 'Not set'}</dd></div>
+              <div><dt>Type</dt><dd>{candidateInvoiceTypeLabel(invoice.invoice_type)}</dd></div>
+              <div><dt>Description</dt><dd>{invoice.item_description ?? 'Not set'}</dd></div>
               <div><dt>Invoice to</dt><dd>{invoice.billing_entity_address ? `${invoice.billing_entity_name}, ${invoice.billing_entity_address}` : invoice.billing_entity_name}</dd></div>
               <div><dt>Invoice due date</dt><dd>{invoice.invoice_due_date ?? 'Not set'}</dd></div>
               <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>

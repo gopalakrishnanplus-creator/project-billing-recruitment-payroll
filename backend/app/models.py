@@ -325,6 +325,8 @@ class CandidateContract(Base):
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), nullable=False)
     contract_document_id: Mapped[int | None] = mapped_column(ForeignKey("uploaded_documents.id"))
     invoice_terms: Mapped[str | None] = mapped_column(Text)
+    invoice_description: Mapped[str | None] = mapped_column(Text)
+    invoice_type: Mapped[str] = mapped_column(String(40), default="invoice")
     invoice_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     currency: Mapped[str | None] = mapped_column(String(12))
     invoice_frequency: Mapped[str | None] = mapped_column(String(40))
@@ -336,14 +338,36 @@ class CandidateContract(Base):
     status: Mapped[str] = mapped_column(String(80), default="draft")
 
 
+class CandidateInvoiceSchedule(Base):
+    __tablename__ = "candidate_invoice_schedules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), nullable=False)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("candidate_contracts.id"), nullable=False)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project_sows.id"), nullable=False)
+    item_description: Mapped[str] = mapped_column(Text, nullable=False)
+    invoice_type: Mapped[str] = mapped_column(String(40), default="invoice")
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(12), default="USD")
+    frequency: Mapped[str] = mapped_column(String(40), nullable=False)
+    invoice_start_date: Mapped[date | None] = mapped_column(Date)
+    invoice_end_date: Mapped[date | None] = mapped_column(Date)
+    invoice_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(80), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CandidateVendorInvoice(Base):
     __tablename__ = "candidate_vendor_invoices"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), nullable=False)
     contract_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_contracts.id"))
+    schedule_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_invoice_schedules.id"))
     project_id: Mapped[int | None] = mapped_column(ForeignKey("project_sows.id"))
     invoice_document_id: Mapped[int | None] = mapped_column(ForeignKey("uploaded_documents.id"))
+    item_description: Mapped[str | None] = mapped_column(Text)
+    invoice_type: Mapped[str] = mapped_column(String(40), default="invoice")
     invoice_due_date: Mapped[date | None] = mapped_column(Date)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(12), default="USD")

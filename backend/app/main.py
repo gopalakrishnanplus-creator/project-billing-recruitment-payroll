@@ -34,6 +34,7 @@ from .models import (
     AppUser,
     Candidate,
     CandidateContract,
+    CandidateInvoiceSchedule,
     CandidateEvaluation,
     CandidateInvoiceApproval,
     CandidatePayment,
@@ -65,6 +66,9 @@ from .schemas import (
     CandidateContractCreate,
     CandidateContractRead,
     CandidateContractUpdate,
+    CandidateInvoiceScheduleCreate,
+    CandidateInvoiceScheduleRead,
+    CandidateInvoiceScheduleUpdate,
     CandidateCreate,
     CandidateInvoiceApprovalCreate,
     CandidateInvoiceReminderResult,
@@ -255,6 +259,8 @@ def ensure_workflow_columns() -> None:
         if "candidate_contracts" in tables:
             existing = {column["name"] for column in inspector.get_columns("candidate_contracts")}
             for name, definition in {
+                "invoice_description": "TEXT",
+                "invoice_type": "VARCHAR(40) DEFAULT 'invoice'",
                 "invoice_amount": "NUMERIC(12, 2)",
                 "currency": "VARCHAR(12)",
                 "invoice_frequency": "VARCHAR(40)",
@@ -265,18 +271,24 @@ def ensure_workflow_columns() -> None:
             }.items():
                 add_column(conn, "candidate_contracts", existing, name, definition)
             conn.execute(text("UPDATE candidate_contracts SET contracting_entity = 'flexgcc_direct' WHERE contracting_entity IS NULL"))
+            conn.execute(text("UPDATE candidate_contracts SET invoice_type = 'invoice' WHERE invoice_type IS NULL"))
         if "candidate_vendor_invoices" in tables:
             existing = {column["name"] for column in inspector.get_columns("candidate_vendor_invoices")}
             for name, definition in {
                 "contract_id": "INTEGER",
+                "schedule_id": "INTEGER",
                 "project_id": "INTEGER",
                 "invoice_due_date": "DATE",
+                "item_description": "TEXT",
+                "invoice_type": "VARCHAR(40) DEFAULT 'invoice'",
                 "upload_token": "VARCHAR(96)",
                 "upload_token_sent_at": "TIMESTAMP",
                 "upload_token_used_at": "TIMESTAMP",
                 "approval_sent_at": "TIMESTAMP",
             }.items():
                 add_column(conn, "candidate_vendor_invoices", existing, name, definition)
+            conn.execute(text("UPDATE candidate_vendor_invoices SET invoice_type = 'invoice' WHERE invoice_type IS NULL"))
+            conn.execute(text("UPDATE candidate_vendor_invoices SET item_description = 'Candidate services' WHERE item_description IS NULL"))
         if "email_notifications" in tables:
             existing = {column["name"] for column in inspector.get_columns("email_notifications")}
             add_column(conn, "email_notifications", existing, "cc_email", "TEXT")
@@ -752,14 +764,29 @@ def billing_entity_for_contract(contract: CandidateContract | None) -> tuple[str
     return "FlexGCC", None
 
 
+def default_candidate_invoice_description(candidate: Candidate | None = None) -> str:
+    return f"Candidate services - {candidate.full_name}" if candidate else "Candidate services"
+
+
+def serialize_candidate_invoice_schedule(schedule: CandidateInvoiceSchedule) -> CandidateInvoiceScheduleRead:
+    return CandidateInvoiceScheduleRead.model_validate(schedule)
+
+
 def serialize_candidate_contract(contract: CandidateContract, db: Session) -> CandidateContractRead:
     billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
+    schedules = db.scalars(
+        select(CandidateInvoiceSchedule)
+        .where(CandidateInvoiceSchedule.contract_id == contract.id)
+        .order_by(CandidateInvoiceSchedule.id.asc())
+    ).all()
     return CandidateContractRead(
         id=contract.id,
         candidate_id=contract.candidate_id,
         contract_document_id=contract.contract_document_id,
         contract_document_name=document_name(db, contract.contract_document_id),
         invoice_terms=contract.invoice_terms,
+        invoice_description=contract.invoice_description,
+        invoice_type=contract.invoice_type or "invoice",
         invoice_amount=contract.invoice_amount,
         currency=contract.currency,
         invoice_frequency=contract.invoice_frequency,
@@ -771,6 +798,7 @@ def serialize_candidate_contract(contract: CandidateContract, db: Session) -> Ca
         billing_entity_address=billing_entity_address,
         signed_at=contract.signed_at,
         status=contract.status,
+        invoice_schedules=[serialize_candidate_invoice_schedule(schedule) for schedule in schedules],
     )
 
 
@@ -818,6 +846,7 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         id=invoice.id,
         candidate_id=invoice.candidate_id,
         contract_id=invoice.contract_id,
+        schedule_id=invoice.schedule_id,
         project_id=invoice.project_id,
         invoice_document_id=invoice.invoice_document_id,
         invoice_document_name=document_name(db, invoice.invoice_document_id),
@@ -828,6 +857,8 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         client_company_name=project.company.name,
         client_account_executive_email=project.client_account_executive.email if project.client_account_executive else None,
         position_title=need.position_title if need else None,
+        item_description=invoice.item_description or (contract.invoice_description if contract else None) or default_candidate_invoice_description(candidate),
+        invoice_type=invoice.invoice_type or (contract.invoice_type if contract else None) or "invoice",
         invoice_due_date=invoice.invoice_due_date,
         amount=invoice.amount,
         currency=invoice.currency,
@@ -1088,31 +1119,69 @@ def notify_interview_assignment(db: Session, candidate: Candidate, interviewer_r
         )
 
 
-def next_candidate_invoice_due_date(contract: CandidateContract, db: Session, as_of: date) -> date | None:
-    if not contract.invoice_frequency:
+def next_candidate_invoice_due_date(contract: CandidateContract, db: Session, as_of: date, schedule: CandidateInvoiceSchedule | None = None) -> date | None:
+    frequency = schedule.frequency if schedule else contract.invoice_frequency
+    if not frequency:
         return None
-    candidate_date = contract.invoice_date if contract.invoice_frequency == "single" else contract.invoice_start_date
+    candidate_date = (schedule.invoice_date if schedule else contract.invoice_date) if frequency == "single" else (schedule.invoice_start_date if schedule else contract.invoice_start_date)
     if candidate_date is None:
         return None
+    query = select(CandidateVendorInvoice.invoice_due_date).where(CandidateVendorInvoice.invoice_due_date.is_not(None))
+    if schedule:
+        query = query.where(CandidateVendorInvoice.schedule_id == schedule.id)
+        final_date = schedule.invoice_end_date
+    else:
+        query = query.where(CandidateVendorInvoice.contract_id == contract.id, CandidateVendorInvoice.schedule_id.is_(None))
+        final_date = contract.invoice_end_date
     issued_dates = {
         due_date
-        for due_date in db.scalars(
-            select(CandidateVendorInvoice.invoice_due_date).where(
-                CandidateVendorInvoice.contract_id == contract.id,
-                CandidateVendorInvoice.invoice_due_date.is_not(None),
-            )
-        ).all()
+        for due_date in db.scalars(query).all()
         if due_date is not None
     }
     for _ in range(600):
-        if contract.invoice_end_date and candidate_date > contract.invoice_end_date:
+        if final_date and candidate_date > final_date:
             return None
         if candidate_date not in issued_dates and candidate_date >= as_of:
             return candidate_date
-        if contract.invoice_frequency == "single":
+        if frequency == "single":
             return None
-        candidate_date = next_date(candidate_date, contract.invoice_frequency)
+        candidate_date = next_date(candidate_date, frequency)
     return None
+
+
+def candidate_invoice_source_description(contract: CandidateContract, candidate: Candidate, schedule: CandidateInvoiceSchedule | None = None) -> str:
+    if schedule:
+        return schedule.item_description
+    return contract.invoice_description or default_candidate_invoice_description(candidate)
+
+
+def candidate_invoice_source_type(contract: CandidateContract, schedule: CandidateInvoiceSchedule | None = None) -> str:
+    return (schedule.invoice_type if schedule else contract.invoice_type) or "invoice"
+
+
+def candidate_invoice_source_amount(contract: CandidateContract, schedule: CandidateInvoiceSchedule | None = None) -> Decimal | None:
+    return schedule.amount if schedule else contract.invoice_amount
+
+
+def candidate_invoice_source_currency(contract: CandidateContract, schedule: CandidateInvoiceSchedule | None = None) -> str:
+    return ((schedule.currency if schedule else contract.currency) or "USD").upper()
+
+
+def validate_candidate_invoice_schedule_payload(payload: CandidateInvoiceScheduleCreate | CandidateInvoiceScheduleUpdate) -> None:
+    if not payload.item_description.strip():
+        raise HTTPException(status_code=422, detail="Invoice description is required")
+    if payload.invoice_type == "auto_reimbursement" and (payload.amount is None or not payload.currency):
+        raise HTTPException(status_code=422, detail="Auto-reimbursement requires amount and currency")
+    if payload.frequency == "single":
+        if payload.invoice_date is None:
+            raise HTTPException(status_code=422, detail="Invoice date is required for single invoice schedules")
+        if payload.invoice_end_date and payload.invoice_end_date < payload.invoice_date:
+            raise HTTPException(status_code=422, detail="Invoice end date cannot be earlier than invoice date")
+    else:
+        if payload.invoice_start_date is None:
+            raise HTTPException(status_code=422, detail="Invoice start date is required for recurring invoice schedules")
+        if payload.invoice_end_date and payload.invoice_end_date < payload.invoice_start_date:
+            raise HTTPException(status_code=422, detail="Invoice end date cannot be earlier than invoice start date")
 
 
 def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, contract: CandidateContract | None) -> tuple[str, str, str]:
@@ -1120,16 +1189,20 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
     position = need.position_title if need else "Not set"
     billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
     billing_address_line = f"Invoice to address: {billing_entity_address}" if billing_entity_address else "Invoice to address: as instructed by FlexGCC"
-    subject = f"Reminder to upload invoice for {position}"
+    item_description = invoice.item_description or default_candidate_invoice_description(candidate)
+    invoice_type = (invoice.invoice_type or "invoice").replace("_", " ")
+    subject = f"Reminder to upload {invoice_type} for {position}"
     text = "\n".join(
         [
             f"Dear {candidate.full_name},",
             "",
-            "This is a reminder to upload your invoice in the FlexGCC system.",
+            "This is a reminder to upload your invoice/reimbursement document in the FlexGCC system.",
             "The upload link below is single-use and can be used only once.",
             "",
             f"Invoice to: {billing_entity_name}",
             billing_address_line,
+            f"Invoice type: {invoice_type}",
+            f"Description: {item_description}",
             f"Position: {position}",
             f"Invoice due date: {invoice.invoice_due_date or 'not set'}",
             f"Amount: {invoice.currency} {invoice.amount}",
@@ -1140,11 +1213,13 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
     html = f"""
     <h2>Candidate invoice upload reminder</h2>
     <p>Dear {escape(candidate.full_name)},</p>
-    <p>This is a reminder to upload your invoice in the FlexGCC system.</p>
+    <p>This is a reminder to upload your invoice/reimbursement document in the FlexGCC system.</p>
     <p><strong>This upload link is single-use and can be used only once.</strong></p>
     <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Invoice to</strong></td><td>{escape(billing_entity_name)}</td></tr>
       <tr><td><strong>Invoice to address</strong></td><td>{escape(billing_entity_address or 'As instructed by FlexGCC')}</td></tr>
+      <tr><td><strong>Invoice type</strong></td><td>{escape(invoice_type)}</td></tr>
+      <tr><td><strong>Description</strong></td><td>{escape(item_description)}</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
       <tr><td><strong>Invoice due date</strong></td><td>{escape(str(invoice.invoice_due_date or 'not set'))}</td></tr>
       <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
@@ -1158,16 +1233,20 @@ def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candida
     approval_link = f"{API_BASE_URL}/auth/login?{urlencode({'candidate_invoice_id': invoice.id})}"
     position = need.position_title if need else "Not set"
     billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
-    subject = f"Candidate invoice approval required: {candidate.full_name}"
+    item_description = invoice.item_description or default_candidate_invoice_description(candidate)
+    invoice_type = (invoice.invoice_type or "invoice").replace("_", " ")
+    subject = f"Candidate {invoice_type} approval required: {candidate.full_name}"
     text = "\n".join(
         [
-            "A candidate invoice has been uploaded and requires Client Account Executive review.",
+            "A candidate invoice/reimbursement has been submitted and requires Client Account Executive review.",
             "",
             f"Client: {project.company.name}",
             f"SOW: {project.title} ({project.project_code})",
             f"Candidate: {candidate.full_name}",
             f"Invoice to: {billing_entity_name}",
             f"Invoice to address: {billing_entity_address or 'As instructed by FlexGCC'}",
+            f"Invoice type: {invoice_type}",
+            f"Description: {item_description}",
             f"Position: {position}",
             f"Invoice due date: {invoice.invoice_due_date or 'not set'}",
             f"Amount: {invoice.currency} {invoice.amount}",
@@ -1177,13 +1256,15 @@ def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candida
     )
     html = f"""
     <h2>Candidate invoice approval required</h2>
-    <p>A candidate invoice has been uploaded and requires Client Account Executive review.</p>
+    <p>A candidate invoice/reimbursement has been submitted and requires Client Account Executive review.</p>
     <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
       <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
       <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
       <tr><td><strong>Invoice to</strong></td><td>{escape(billing_entity_name)}</td></tr>
       <tr><td><strong>Invoice to address</strong></td><td>{escape(billing_entity_address or 'As instructed by FlexGCC')}</td></tr>
+      <tr><td><strong>Invoice type</strong></td><td>{escape(invoice_type)}</td></tr>
+      <tr><td><strong>Description</strong></td><td>{escape(item_description)}</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
       <tr><td><strong>Invoice due date</strong></td><td>{escape(str(invoice.invoice_due_date or 'not set'))}</td></tr>
       <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
@@ -1195,39 +1276,47 @@ def candidate_invoice_approval_template(invoice: CandidateVendorInvoice, candida
 
 def candidate_invoice_finance_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, contract: CandidateContract | None, comments: str | None) -> tuple[str, str, str]:
     download_link = f"{API_BASE_URL}/candidate-invoices/{invoice.id}/download"
+    download_text = f"Download uploaded invoice: {download_link}" if invoice.invoice_document_id else "No candidate-uploaded invoice document is attached for this auto-reimbursement."
+    download_html = f'<p><a href="{escape(download_link)}">Download uploaded invoice</a></p>' if invoice.invoice_document_id else "<p>No candidate-uploaded invoice document is attached for this auto-reimbursement.</p>"
     position = need.position_title if need else "Not set"
     billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
-    subject = f"Candidate invoice approved: {candidate.full_name}"
+    item_description = invoice.item_description or default_candidate_invoice_description(candidate)
+    invoice_type = (invoice.invoice_type or "invoice").replace("_", " ")
+    subject = f"Candidate {invoice_type} approved: {candidate.full_name}"
     text = "\n".join(
         [
-            "A candidate invoice has been approved by the Client Account Executive.",
+            "A candidate invoice/reimbursement has been approved by the Client Account Executive.",
             "",
             f"Client: {project.company.name}",
             f"SOW: {project.title} ({project.project_code})",
             f"Candidate: {candidate.full_name}",
             f"Invoice to: {billing_entity_name}",
             f"Invoice to address: {billing_entity_address or 'As instructed by FlexGCC'}",
+            f"Invoice type: {invoice_type}",
+            f"Description: {item_description}",
             f"Position: {position}",
             f"Amount: {invoice.currency} {invoice.amount}",
             f"Client Account Executive comments: {comments or 'None'}",
             "",
-            f"Download uploaded invoice: {download_link}",
+            download_text,
         ]
     )
     html = f"""
     <h2>Candidate invoice approved</h2>
-    <p>A candidate invoice has been approved by the Client Account Executive.</p>
+    <p>A candidate invoice/reimbursement has been approved by the Client Account Executive.</p>
     <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
       <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
       <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
       <tr><td><strong>Invoice to</strong></td><td>{escape(billing_entity_name)}</td></tr>
       <tr><td><strong>Invoice to address</strong></td><td>{escape(billing_entity_address or 'As instructed by FlexGCC')}</td></tr>
+      <tr><td><strong>Invoice type</strong></td><td>{escape(invoice_type)}</td></tr>
+      <tr><td><strong>Description</strong></td><td>{escape(item_description)}</td></tr>
       <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
       <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
       <tr><td><strong>Client Account Executive comments</strong></td><td>{escape(comments or 'None')}</td></tr>
     </table>
-    <p><a href="{escape(download_link)}">Download uploaded invoice</a></p>
+    {download_html}
     """
     return subject, text, html
 
@@ -1298,43 +1387,61 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
     contracts = db.scalars(select(CandidateContract).order_by(CandidateContract.id)).all()
     generated: list[CandidateVendorInvoice] = []
     for contract in contracts:
-        if not contract.invoice_amount or not contract.invoice_frequency:
-            continue
         candidate = db.get(Candidate, contract.candidate_id)
         if candidate is None or candidate.status != "hired":
             continue
         project = load_project_for_read(candidate.project_id, db)
         if project.status == "inactive":
             continue
-        due_date = next_candidate_invoice_due_date(contract, db, as_of)
-        if due_date is None or due_date > reminder_cutoff:
-            continue
         need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
-        invoice = CandidateVendorInvoice(
-            candidate_id=candidate.id,
-            contract_id=contract.id,
-            project_id=candidate.project_id,
-            invoice_due_date=due_date,
-            amount=contract.invoice_amount,
-            currency=(contract.currency or "USD").upper(),
-            status="awaiting_upload",
-            upload_token=uuid4().hex,
-            upload_token_sent_at=utcnow(),
-        )
-        db.add(invoice)
-        db.flush()
-        subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need, contract)
-        status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=[], subject=subject, text=text_body, html=html)
-        db.add(
-            EmailNotification(
+
+        schedules = db.scalars(
+            select(CandidateInvoiceSchedule)
+            .where(CandidateInvoiceSchedule.contract_id == contract.id, CandidateInvoiceSchedule.status == "active")
+            .order_by(CandidateInvoiceSchedule.id.asc())
+        ).all()
+        schedule_sources: list[CandidateInvoiceSchedule | None] = [None, *schedules]
+        for schedule in schedule_sources:
+            amount = candidate_invoice_source_amount(contract, schedule)
+            frequency = schedule.frequency if schedule else contract.invoice_frequency
+            if not amount or not frequency:
+                continue
+            due_date = next_candidate_invoice_due_date(contract, db, as_of, schedule)
+            if due_date is None or due_date > reminder_cutoff:
+                continue
+            invoice_type = candidate_invoice_source_type(contract, schedule)
+            invoice = CandidateVendorInvoice(
+                candidate_id=candidate.id,
+                contract_id=contract.id,
+                schedule_id=schedule.id if schedule else None,
                 project_id=candidate.project_id,
-                recipient_email=candidate.email,
-                subject=subject,
-                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
-                status=status,
+                item_description=candidate_invoice_source_description(contract, candidate, schedule),
+                invoice_type=invoice_type,
+                invoice_due_date=due_date,
+                amount=amount,
+                currency=candidate_invoice_source_currency(contract, schedule),
+                status="submitted" if invoice_type == "auto_reimbursement" else "awaiting_upload",
+                upload_token=None if invoice_type == "auto_reimbursement" else uuid4().hex,
+                upload_token_sent_at=None if invoice_type == "auto_reimbursement" else utcnow(),
             )
-        )
-        generated.append(invoice)
+            db.add(invoice)
+            db.flush()
+            if invoice_type == "auto_reimbursement":
+                queue_candidate_invoice_approval_email(db, invoice)
+                log_event(db, project_id=candidate.project_id, actor_name="System", action="candidate_auto_reimbursement_created", details=str(invoice.id))
+            else:
+                subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need, contract)
+                status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=[], subject=subject, text=text_body, html=html)
+                db.add(
+                    EmailNotification(
+                        project_id=candidate.project_id,
+                        recipient_email=candidate.email,
+                        subject=subject,
+                        body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                        status=status,
+                    )
+                )
+            generated.append(invoice)
     return generated
 
 
@@ -1351,16 +1458,25 @@ def reconcile_pending_candidate_invoice_reminders(db: Session, contract: Candida
         if contract.status in {"terminated", "inactive"}:
             db.delete(invoice)
             continue
-        if contract.invoice_end_date and invoice.invoice_due_date and invoice.invoice_due_date > contract.invoice_end_date:
+        schedule = db.get(CandidateInvoiceSchedule, invoice.schedule_id) if invoice.schedule_id else None
+        if schedule and schedule.status != "active":
             db.delete(invoice)
             continue
-        if contract.invoice_frequency == "single" and contract.invoice_date and invoice.invoice_due_date != contract.invoice_date:
+        final_date = schedule.invoice_end_date if schedule else contract.invoice_end_date
+        frequency = schedule.frequency if schedule else contract.invoice_frequency
+        single_date = schedule.invoice_date if schedule else contract.invoice_date
+        if final_date and invoice.invoice_due_date and invoice.invoice_due_date > final_date:
             db.delete(invoice)
             continue
-        if contract.invoice_amount is not None:
-            invoice.amount = contract.invoice_amount
-        if contract.currency:
-            invoice.currency = contract.currency.upper()
+        if frequency == "single" and single_date and invoice.invoice_due_date != single_date:
+            db.delete(invoice)
+            continue
+        amount = candidate_invoice_source_amount(contract, schedule)
+        if amount is not None:
+            invoice.amount = amount
+        invoice.currency = candidate_invoice_source_currency(contract, schedule)
+        invoice.item_description = candidate_invoice_source_description(contract, candidate, schedule)
+        invoice.invoice_type = candidate_invoice_source_type(contract, schedule)
         invoice.project_id = candidate.project_id
 
 
@@ -2394,6 +2510,8 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
         candidate_id=candidate.id,
         contract_document_id=document.id if document else None,
         invoice_terms=payload.invoice_terms,
+        invoice_description=payload.invoice_description,
+        invoice_type=payload.invoice_type,
         invoice_amount=payload.invoice_amount,
         currency=payload.currency.upper() if payload.currency else None,
         invoice_frequency=payload.invoice_frequency,
@@ -2442,6 +2560,7 @@ def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_r
         db.execute(delete(Interview).where(Interview.id.in_(interview_ids)))
     db.execute(delete(CandidateScreeningForm).where(CandidateScreeningForm.candidate_id == candidate.id))
     db.execute(delete(CandidateEvaluation).where(CandidateEvaluation.candidate_id == candidate.id))
+    db.execute(delete(CandidateInvoiceSchedule).where(CandidateInvoiceSchedule.candidate_id == candidate.id))
     db.execute(delete(CandidateContract).where(CandidateContract.candidate_id == candidate.id))
     db.delete(candidate)
     log_event(db, project_id=project_id, actor_name=context.user.full_name, action="candidate_deleted", details=f"{candidate_name} and associated candidate invoicing deleted")
@@ -2585,6 +2704,8 @@ async def update_candidate_contract(contract_id: int, request: Request, context:
         contract.contract_document_id = document.id
         contract.signed_at = utcnow()
     contract.invoice_terms = payload.invoice_terms
+    contract.invoice_description = payload.invoice_description
+    contract.invoice_type = payload.invoice_type
     contract.invoice_amount = payload.invoice_amount
     contract.currency = payload.currency.upper() if payload.currency else None
     contract.invoice_frequency = payload.invoice_frequency
@@ -2608,6 +2729,79 @@ async def update_candidate_contract(contract_id: int, request: Request, context:
     db.commit()
     db.refresh(candidate)
     return serialize_candidate(candidate, db)
+
+
+@app.post("/candidate-contracts/{contract_id}/invoice-schedules", response_model=CandidateInvoiceScheduleRead, status_code=201)
+def add_candidate_invoice_schedule(
+    contract_id: int,
+    payload: CandidateInvoiceScheduleCreate,
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.hr_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateInvoiceScheduleRead:
+    contract = db.get(CandidateContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Candidate contract not found")
+    candidate = load_candidate(contract.candidate_id, db)
+    project = load_project_for_read(candidate.project_id, db)
+    ensure_project_active(project)
+    validate_candidate_invoice_schedule_payload(payload)
+    schedule = CandidateInvoiceSchedule(
+        candidate_id=candidate.id,
+        contract_id=contract.id,
+        project_id=candidate.project_id,
+        item_description=payload.item_description.strip(),
+        invoice_type=payload.invoice_type,
+        amount=payload.amount,
+        currency=payload.currency.upper(),
+        frequency=payload.frequency,
+        invoice_start_date=None if payload.frequency == "single" else payload.invoice_start_date,
+        invoice_end_date=payload.invoice_end_date,
+        invoice_date=payload.invoice_date if payload.frequency == "single" else None,
+        status=payload.status,
+    )
+    db.add(schedule)
+    db.flush()
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_invoice_schedule_added", details=f"{candidate.full_name}: {schedule.item_description}")
+    send_due_candidate_invoice_reminders(db, date.today())
+    db.commit()
+    db.refresh(schedule)
+    return serialize_candidate_invoice_schedule(schedule)
+
+
+@app.put("/candidate-invoice-schedules/{schedule_id}", response_model=CandidateInvoiceScheduleRead)
+def update_candidate_invoice_schedule(
+    schedule_id: int,
+    payload: CandidateInvoiceScheduleUpdate,
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.hr_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateInvoiceScheduleRead:
+    schedule = db.get(CandidateInvoiceSchedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Candidate invoice schedule not found")
+    contract = db.get(CandidateContract, schedule.contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Candidate contract not found")
+    candidate = load_candidate(schedule.candidate_id, db)
+    project = load_project_for_read(candidate.project_id, db)
+    ensure_project_active(project)
+    validate_candidate_invoice_schedule_payload(payload)
+    schedule.item_description = payload.item_description.strip()
+    schedule.invoice_type = payload.invoice_type
+    schedule.amount = payload.amount
+    schedule.currency = payload.currency.upper()
+    schedule.frequency = payload.frequency
+    schedule.invoice_start_date = None if payload.frequency == "single" else payload.invoice_start_date
+    schedule.invoice_end_date = payload.invoice_end_date
+    schedule.invoice_date = payload.invoice_date if payload.frequency == "single" else None
+    schedule.status = payload.status
+    db.flush()
+    reconcile_pending_candidate_invoice_reminders(db, contract)
+    if schedule.status == "active":
+        send_due_candidate_invoice_reminders(db, date.today())
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_invoice_schedule_updated", details=f"{candidate.full_name}: {schedule.item_description}")
+    db.commit()
+    db.refresh(schedule)
+    return serialize_candidate_invoice_schedule(schedule)
 
 
 @app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)
@@ -2700,6 +2894,8 @@ def get_candidate_invoice_upload(token: str, db: Session = Depends(get_db)) -> C
         project_title=project.title,
         client_company_name=project.company.name,
         position_title=need.position_title if need else None,
+        item_description=invoice.item_description or (contract.invoice_description if contract else None) or default_candidate_invoice_description(candidate),
+        invoice_type=invoice.invoice_type or (contract.invoice_type if contract else None) or "invoice",
         invoice_due_date=invoice.invoice_due_date,
         amount=invoice.amount,
         currency=invoice.currency,

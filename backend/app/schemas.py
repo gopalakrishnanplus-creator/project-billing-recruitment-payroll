@@ -102,6 +102,8 @@ class CandidateCreate(BaseModel):
 
 class HistoricalHireCreate(CandidateCreate):
     invoice_terms: str | None = None
+    invoice_description: str | None = None
+    invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
     invoice_amount: Decimal | None = Field(default=None, ge=0)
     currency: str | None = "USD"
     invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
@@ -128,6 +130,8 @@ class ScorecardCreate(BaseModel):
 
 class CandidateContractCreate(BaseModel):
     invoice_terms: str | None = None
+    invoice_description: str | None = None
+    invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
     invoice_amount: Decimal | None = Field(default=None, ge=0)
     currency: str | None = "USD"
     invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
@@ -139,6 +143,22 @@ class CandidateContractCreate(BaseModel):
 
 class CandidateContractUpdate(CandidateContractCreate):
     status: str | None = Field(default=None, pattern="^(draft|signed|terminated|inactive)$")
+
+
+class CandidateInvoiceScheduleCreate(BaseModel):
+    item_description: str = Field(min_length=2)
+    invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
+    amount: Decimal = Field(gt=0)
+    currency: str = Field(min_length=1, max_length=12)
+    frequency: str = Field(pattern="^(single|weekly|monthly|quarterly)$")
+    invoice_start_date: date | None = None
+    invoice_end_date: date | None = None
+    invoice_date: date | None = None
+    status: str = Field(default="active", pattern="^(active|inactive)$")
+
+
+class CandidateInvoiceScheduleUpdate(CandidateInvoiceScheduleCreate):
+    pass
 
 
 class InvoiceScheduleCreate(BaseModel):
@@ -275,6 +295,8 @@ class CandidateContractRead(BaseModel):
     contract_document_id: int | None
     contract_document_name: str | None = None
     invoice_terms: str | None
+    invoice_description: str | None
+    invoice_type: str
     invoice_amount: Decimal | None
     currency: str | None
     invoice_frequency: str | None
@@ -285,6 +307,25 @@ class CandidateContractRead(BaseModel):
     billing_entity_name: str
     billing_entity_address: str | None = None
     signed_at: datetime | None
+    status: str
+    invoice_schedules: list["CandidateInvoiceScheduleRead"] = Field(default_factory=list)
+
+
+class CandidateInvoiceScheduleRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    candidate_id: int
+    contract_id: int
+    project_id: int
+    item_description: str
+    invoice_type: str
+    amount: Decimal
+    currency: str
+    frequency: str
+    invoice_start_date: date | None
+    invoice_end_date: date | None
+    invoice_date: date | None
     status: str
 
 
@@ -427,6 +468,8 @@ class CandidateInvoiceUploadRead(BaseModel):
     project_title: str
     client_company_name: str
     position_title: str | None
+    item_description: str | None
+    invoice_type: str
     invoice_due_date: date | None
     amount: Decimal
     currency: str
@@ -451,6 +494,7 @@ class CandidateVendorInvoiceRead(BaseModel):
     id: int
     candidate_id: int
     contract_id: int | None
+    schedule_id: int | None = None
     project_id: int | None
     invoice_document_id: int | None
     invoice_document_name: str | None = None
@@ -461,6 +505,8 @@ class CandidateVendorInvoiceRead(BaseModel):
     client_company_name: str
     client_account_executive_email: str | None
     position_title: str | None
+    item_description: str | None
+    invoice_type: str
     invoice_due_date: date | None
     amount: Decimal
     currency: str

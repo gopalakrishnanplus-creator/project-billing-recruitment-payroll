@@ -26,6 +26,7 @@ The database is owned only by this application. It does not share tables, users,
 - `interviews`: internal interview events.
 - `interview_scorecards`: internal interviewer recommendations.
 - `candidate_contracts`: final candidate/consultant contract records.
+- `candidate_invoice_schedules`: multiple candidate invoice, reimbursement, and auto-reimbursement items per candidate contract.
 - `candidate_vendor_invoices`: candidate or fractional consultant invoices.
 - `candidate_invoice_approvals`: client account executive approvals for candidate invoices.
 - `candidate_payments`: payments made to candidates or consultants.

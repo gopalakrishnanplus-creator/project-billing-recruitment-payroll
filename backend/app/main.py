@@ -26,6 +26,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from .database import Base, SessionLocal, engine, get_db
 from .models import (
@@ -121,6 +122,7 @@ DIRECT_HIRE_ENTITY = "flexgcc_direct"
 INDIA_HIRE_ENTITY = "mbox_india"
 MBOX_BILLING_NAME = "Mbox Contract Solutions Pvt. Ltd."
 MBOX_BILLING_ADDRESS = "M-68, Sector 7, Vashi, Navi Mumbai"
+APPROVAL_TOKEN_MAX_AGE_SECONDS = int(getenv("APPROVAL_TOKEN_MAX_AGE_SECONDS", "7200"))
 
 
 @asynccontextmanager
@@ -160,12 +162,20 @@ if GOOGLE_CONFIGURED:
         client_kwargs={"scope": "openid email profile"},
     )
 
+approval_token_serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="pbrp-approval-token")
+
 
 @dataclass
 class AuthContext:
     user: AppUser
     roles: list[str]
     active_role: str | None
+
+
+@dataclass
+class ApprovalAuthResult:
+    context: AuthContext
+    via_token: bool
 
 
 def normalize_email(email: str) -> str:
@@ -305,6 +315,64 @@ def user_roles(user: AppUser) -> list[str]:
     if not roles and user.role in VALID_ROLES:
         roles = [user.role]
     return roles
+
+
+def client_account_executive_matches_project(project: ProjectSOW, user: AppUser) -> bool:
+    if project.client_account_executive_id == user.id:
+        return True
+    if project.client_account_executive is None:
+        return False
+    return normalize_email(project.client_account_executive.email) == normalize_email(user.email)
+
+
+def approval_token_for_user(kind: str, invoice_id: int, user: AppUser) -> str:
+    return approval_token_serializer.dumps(
+        {
+            "kind": kind,
+            "invoice_id": invoice_id,
+            "user_id": user.id,
+            "email": normalize_email(user.email),
+        }
+    )
+
+
+def auth_context_from_approval_token(token: str, kind: str, invoice_id: int, db: Session) -> AuthContext:
+    try:
+        payload = approval_token_serializer.loads(token, max_age=APPROVAL_TOKEN_MAX_AGE_SECONDS)
+    except SignatureExpired as exc:
+        raise HTTPException(status_code=401, detail="Approval link has expired. Please sign in again from the email link.") from exc
+    except BadSignature as exc:
+        raise HTTPException(status_code=401, detail="Approval link is not valid. Please sign in again from the email link.") from exc
+
+    try:
+        token_invoice_id = int(payload.get("invoice_id"))
+        user_id = int(payload.get("user_id"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Approval link is not valid. Please sign in again from the email link.") from exc
+
+    if payload.get("kind") != kind or token_invoice_id != invoice_id:
+        raise HTTPException(status_code=404, detail="Approval link is not valid for this invoice")
+
+    token_email = normalize_email(str(payload.get("email") or ""))
+    user = db.scalar(select(AppUser).where(AppUser.id == user_id).options(selectinload(AppUser.role_assignments)))
+    if user is None and token_email:
+        user = db.scalar(select(AppUser).where(func.lower(AppUser.email) == token_email).options(selectinload(AppUser.role_assignments)))
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=401, detail="Approval user is no longer active")
+    if token_email and normalize_email(user.email) != token_email:
+        raise HTTPException(status_code=401, detail="Approval link user no longer matches this account")
+
+    roles = user_roles(user)
+    if UserRole.client_account_executive.value not in roles:
+        raise HTTPException(status_code=403, detail="Client Account Executive role is required")
+    return AuthContext(user=user, roles=roles, active_role=UserRole.client_account_executive.value)
+
+
+def approval_auth_from_request(request: Request, db: Session, *, kind: str, invoice_id: int) -> ApprovalAuthResult:
+    token = request.headers.get("x-approval-token") or request.query_params.get("approval_token")
+    if token:
+        return ApprovalAuthResult(context=auth_context_from_approval_token(token, kind, invoice_id, db), via_token=True)
+    return ApprovalAuthResult(context=auth_context_from_session(request, db), via_token=False)
 
 
 def serialize_user(user: AppUser) -> AppUserRead:
@@ -539,7 +607,7 @@ def serialize_upcoming_invoice(schedule: ClientInvoiceSchedule, next_invoice_dat
 def authorize_invoice_visibility(invoice: ClientInvoice, context: AuthContext) -> None:
     if (
         context.active_role == UserRole.client_account_executive.value
-        and invoice.project.client_account_executive_id != context.user.id
+        and not client_account_executive_matches_project(invoice.project, context.user)
     ):
         raise HTTPException(status_code=404, detail="Invoice not found")
 
@@ -547,7 +615,7 @@ def authorize_invoice_visibility(invoice: ClientInvoice, context: AuthContext) -
 def authorize_client_account_invoice_approval(invoice: ClientInvoice, context: AuthContext) -> None:
     if (
         UserRole.client_account_executive.value not in context.roles
-        or invoice.project.client_account_executive_id != context.user.id
+        or not client_account_executive_matches_project(invoice.project, context.user)
     ):
         raise HTTPException(status_code=404, detail="Invoice not found")
 
@@ -791,7 +859,7 @@ def load_candidate_invoice(invoice_id: int, db: Session) -> CandidateVendorInvoi
 def authorize_candidate_invoice_visibility(invoice: CandidateVendorInvoice, context: AuthContext, db: Session) -> None:
     candidate = load_candidate(invoice.candidate_id, db)
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
-    if context.active_role == UserRole.client_account_executive.value and project.client_account_executive_id != context.user.id:
+    if context.active_role == UserRole.client_account_executive.value and not client_account_executive_matches_project(project, context.user):
         raise HTTPException(status_code=404, detail="Candidate invoice not found")
 
 
@@ -800,7 +868,7 @@ def authorize_candidate_invoice_approval(invoice: CandidateVendorInvoice, contex
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
     if (
         UserRole.client_account_executive.value not in context.roles
-        or project.client_account_executive_id != context.user.id
+        or not client_account_executive_matches_project(project, context.user)
     ):
         raise HTTPException(status_code=404, detail="Candidate invoice not found")
 
@@ -1728,11 +1796,12 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         if (
             invoice is None
             or UserRole.client_account_executive.value not in roles
-            or invoice.project.client_account_executive_id != user.id
+            or not client_account_executive_matches_project(invoice.project, user)
         ):
             return RedirectResponse(f"{FRONTEND_URL}/?approval_invoice_id={pending_approval_invoice_id}&approval_error=not_authorized")
         request.session["active_role"] = UserRole.client_account_executive.value
-        return RedirectResponse(f"{FRONTEND_URL}/?approval_invoice_id={pending_approval_invoice_id}")
+        token = approval_token_for_user("client_invoice", pending_approval_invoice_id, user)
+        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'approval_invoice_id': pending_approval_invoice_id, 'approval_token': token})}")
     pending_candidate_invoice_id = request.session.pop("pending_candidate_invoice_id", None)
     if pending_candidate_invoice_id is not None:
         invoice = db.get(CandidateVendorInvoice, pending_candidate_invoice_id)
@@ -1743,11 +1812,12 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
             or candidate is None
             or project is None
             or UserRole.client_account_executive.value not in roles
-            or project.client_account_executive_id != user.id
+            or not client_account_executive_matches_project(project, user)
         ):
             return RedirectResponse(f"{FRONTEND_URL}/?candidate_invoice_id={pending_candidate_invoice_id}&candidate_invoice_error=not_authorized")
         request.session["active_role"] = UserRole.client_account_executive.value
-        return RedirectResponse(f"{FRONTEND_URL}/?candidate_invoice_id={pending_candidate_invoice_id}")
+        token = approval_token_for_user("candidate_invoice", pending_candidate_invoice_id, user)
+        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'candidate_invoice_id': pending_candidate_invoice_id, 'approval_token': token})}")
     if len(roles) == 1:
         request.session["active_role"] = roles[0]
     return RedirectResponse(FRONTEND_URL)
@@ -2687,16 +2757,21 @@ def list_candidate_invoices(
 
 
 @app.get("/candidate-invoices/{invoice_id}/client-account-approval-view", response_model=CandidateVendorInvoiceRead)
-def get_candidate_invoice_approval(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> CandidateVendorInvoiceRead:
+def get_candidate_invoice_approval(invoice_id: int, request: Request, db: Session = Depends(get_db)) -> CandidateVendorInvoiceRead:
     invoice = load_candidate_invoice(invoice_id, db)
-    authorize_candidate_invoice_approval(invoice, context, db)
+    auth = approval_auth_from_request(request, db, kind="candidate_invoice", invoice_id=invoice_id)
+    authorize_candidate_invoice_approval(invoice, auth.context, db)
     return serialize_candidate_invoice(invoice, db)
 
 
 @app.get("/candidate-invoices/{invoice_id}/download")
-def download_candidate_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
+def download_candidate_invoice(invoice_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
     invoice = load_candidate_invoice(invoice_id, db)
-    authorize_candidate_invoice_visibility(invoice, context, db)
+    auth = approval_auth_from_request(request, db, kind="candidate_invoice", invoice_id=invoice_id)
+    if auth.via_token:
+        authorize_candidate_invoice_approval(invoice, auth.context, db)
+    else:
+        authorize_candidate_invoice_visibility(invoice, auth.context, db)
     if invoice.invoice_document_id is None:
         raise HTTPException(status_code=404, detail="Uploaded invoice document not found")
     document = db.get(UploadedDocument, invoice.invoice_document_id)
@@ -2717,8 +2792,10 @@ def download_candidate_invoice(invoice_id: int, context: AuthContext = Depends(r
 
 
 @app.post("/candidate-invoices/{invoice_id}/client-account-approval", response_model=CandidateVendorInvoiceRead)
-def decide_candidate_invoice(invoice_id: int, payload: CandidateInvoiceApprovalCreate, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> CandidateVendorInvoiceRead:
+def decide_candidate_invoice(invoice_id: int, payload: CandidateInvoiceApprovalCreate, request: Request, db: Session = Depends(get_db)) -> CandidateVendorInvoiceRead:
     invoice = load_candidate_invoice(invoice_id, db)
+    auth = approval_auth_from_request(request, db, kind="candidate_invoice", invoice_id=invoice_id)
+    context = auth.context
     authorize_candidate_invoice_approval(invoice, context, db)
     if invoice.status in {"paid", "partially_paid"}:
         raise HTTPException(status_code=400, detail=f"Candidate invoice cannot be changed after payment status: {invoice.status}")
@@ -2828,7 +2905,7 @@ def get_invoice(invoice_id: int, context: AuthContext = Depends(require_login), 
 
 
 @app.get("/client-invoices/{invoice_id}/client-account-approval-view", response_model=InvoiceDetailRead)
-def get_client_account_approval_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+def get_client_account_approval_invoice(invoice_id: int, request: Request, db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.scalar(
         select(ClientInvoice)
         .where(ClientInvoice.id == invoice_id)
@@ -2841,12 +2918,13 @@ def get_client_account_approval_invoice(invoice_id: int, context: AuthContext = 
     )
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    authorize_client_account_invoice_approval(invoice, context)
+    auth = approval_auth_from_request(request, db, kind="client_invoice", invoice_id=invoice_id)
+    authorize_client_account_invoice_approval(invoice, auth.context)
     return serialize_invoice(invoice)
 
 
 @app.get("/client-invoices/{invoice_id}/download")
-def download_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
+def download_invoice(invoice_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
     invoice = db.scalar(
         select(ClientInvoice)
         .where(ClientInvoice.id == invoice_id)
@@ -2859,7 +2937,11 @@ def download_invoice(invoice_id: int, context: AuthContext = Depends(require_log
     )
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    authorize_invoice_visibility(invoice, context)
+    auth = approval_auth_from_request(request, db, kind="client_invoice", invoice_id=invoice_id)
+    if auth.via_token:
+        authorize_client_account_invoice_approval(invoice, auth.context)
+    else:
+        authorize_invoice_visibility(invoice, auth.context)
     filename = invoice.invoice_number.replace("/", "-")
     return Response(
         content=invoice_pdf_bytes(invoice),
@@ -2869,10 +2951,12 @@ def download_invoice(invoice_id: int, context: AuthContext = Depends(require_log
 
 
 @app.post("/client-invoices/{invoice_id}/client-account-approval", response_model=InvoiceDetailRead)
-def approve_client_account(invoice_id: int, payload: ApprovalCreate, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
+def approve_client_account(invoice_id: int, payload: ApprovalCreate, request: Request, db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.project)))
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    auth = approval_auth_from_request(request, db, kind="client_invoice", invoice_id=invoice_id)
+    context = auth.context
     authorize_client_account_invoice_approval(invoice, context)
     if invoice.status not in {InvoiceStatus.due_for_client_approval.value, InvoiceStatus.draft.value}:
         raise HTTPException(status_code=400, detail=f"Invoice is not ready for client account approval: {invoice.status}")

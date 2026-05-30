@@ -385,6 +385,7 @@ function contractingEntityLabel(value: string | undefined): string {
 function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const approvalInvoiceId = urlParams.get('approval_invoice_id');
+  const approvalToken = urlParams.get('approval_token');
   const approvalError = urlParams.get('approval_error');
   const candidateInvoiceToken = urlParams.get('candidate_invoice_token');
   const candidateInvoiceId = urlParams.get('candidate_invoice_id');
@@ -576,7 +577,9 @@ function App() {
     if (!approvalInvoiceId) return;
     setLoading(true);
     try {
-      const invoice = await api<ClientInvoice>(`/client-invoices/${approvalInvoiceId}/client-account-approval-view`);
+      const invoice = await api<ClientInvoice>(`/client-invoices/${approvalInvoiceId}/client-account-approval-view`, {
+        headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
+      });
       setApprovalInvoice(invoice);
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'This invoice approval link is not available for this account.' });
@@ -602,7 +605,9 @@ function App() {
     if (!candidateInvoiceId) return;
     setLoading(true);
     try {
-      const invoice = await api<CandidateInvoice>(`/candidate-invoices/${candidateInvoiceId}/client-account-approval-view`);
+      const invoice = await api<CandidateInvoice>(`/candidate-invoices/${candidateInvoiceId}/client-account-approval-view`, {
+        headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
+      });
       setCandidateApprovalInvoice(invoice);
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'This candidate invoice approval link is not available for this account.' });
@@ -625,12 +630,12 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (approvalInvoiceId && me?.authenticated) void loadApprovalInvoice();
-  }, [approvalInvoiceId, me?.authenticated]);
+    if (approvalInvoiceId && (me?.authenticated || approvalToken)) void loadApprovalInvoice();
+  }, [approvalInvoiceId, approvalToken, me?.authenticated]);
 
   useEffect(() => {
-    if (candidateInvoiceId && me?.authenticated) void loadCandidateApprovalInvoice();
-  }, [candidateInvoiceId, me?.authenticated]);
+    if (candidateInvoiceId && (me?.authenticated || approvalToken)) void loadCandidateApprovalInvoice();
+  }, [candidateInvoiceId, approvalToken, me?.authenticated]);
 
   useEffect(() => {
     if (me?.active_role === 'system_admin') void refreshUsers();
@@ -1019,6 +1024,7 @@ function App() {
     try {
       const invoice = await api<ClientInvoice>(`/client-invoices/${approvalInvoice.id}/client-account-approval`, {
         method: 'POST',
+        headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
         body: JSON.stringify({ approver_name: me?.full_name ?? 'Client Account Executive' }),
       });
       setApprovalInvoice(invoice);
@@ -1051,6 +1057,7 @@ function App() {
     await mutate(async () => {
       const invoice = await api<CandidateInvoice>(`/candidate-invoices/${candidateApprovalInvoice.id}/client-account-approval`, {
         method: 'POST',
+        headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
         body: JSON.stringify(payload),
       });
       setCandidateApprovalInvoice(invoice);
@@ -1078,9 +1085,10 @@ function App() {
     window.open(`${API_BASE}/client-invoices/${selectedInvoice.id}/download`, '_blank', 'noopener,noreferrer');
   }
 
-  function downloadCandidateInvoice(invoiceId: number | undefined) {
+  function downloadCandidateInvoice(invoiceId: number | undefined, token?: string | null) {
     if (!invoiceId) return;
-    window.open(`${API_BASE}/candidate-invoices/${invoiceId}/download`, '_blank', 'noopener,noreferrer');
+    const tokenQuery = token ? `?approval_token=${encodeURIComponent(token)}` : '';
+    window.open(`${API_BASE}/candidate-invoices/${invoiceId}/download${tokenQuery}`, '_blank', 'noopener,noreferrer');
   }
 
   function downloadDocument(documentId: number | null) {
@@ -1121,8 +1129,8 @@ function App() {
   }
 
   if (me === null) {
-    if (approvalInvoiceId) return <ApprovalShell loading={loading} notice={notice} />;
-    if (candidateInvoiceId) return <CandidateApprovalShell loading={loading} notice={notice} />;
+    if (approvalInvoiceId) return <ApprovalShell loading={loading} notice={notice} approvalToken={approvalToken} />;
+    if (candidateInvoiceId) return <CandidateApprovalShell loading={loading} notice={notice} approvalToken={approvalToken} />;
     return (
       <main>
         <ShellHeader loading={loading} onRefresh={() => void refreshAll()} />
@@ -1143,6 +1151,7 @@ function App() {
         notice={notice}
         me={me}
         approvalInvoiceId={approvalInvoiceId}
+        approvalToken={approvalToken}
         approvalError={approvalError}
         approvalInvoice={approvalInvoice}
         onApprove={() => void approvalInvoiceAction()}
@@ -1157,10 +1166,11 @@ function App() {
         notice={notice}
         me={me}
         candidateInvoiceId={candidateInvoiceId}
+        approvalToken={approvalToken}
         candidateInvoiceError={candidateInvoiceError}
         invoice={candidateApprovalInvoice}
         onSubmit={(event) => void candidateApprovalInvoiceAction(event)}
-        onDownload={() => downloadCandidateInvoice(candidateApprovalInvoice?.id)}
+        onDownload={() => downloadCandidateInvoice(candidateApprovalInvoice?.id, approvalToken)}
       />
     );
   }
@@ -2348,6 +2358,7 @@ function ApprovalShell({
   notice,
   me,
   approvalInvoiceId,
+  approvalToken,
   approvalError,
   approvalInvoice,
   onApprove,
@@ -2356,10 +2367,23 @@ function ApprovalShell({
   notice: Notice;
   me?: CurrentUser | null;
   approvalInvoiceId?: string;
+  approvalToken?: string | null;
   approvalError?: string | null;
   approvalInvoice?: ClientInvoice | null;
   onApprove?: () => void;
 }) {
+  if (approvalError === 'not_authorized') {
+    return (
+      <main className="approvalOnly">
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Invoice Not Available</h2>
+          <p>This invoice approval link is only available to the Client Account Executive assigned to the project.</p>
+        </section>
+      </main>
+    );
+  }
+
   if (!me) {
     return (
       <main className="approvalOnly">
@@ -2372,7 +2396,7 @@ function ApprovalShell({
     );
   }
 
-  if (!me.authenticated) {
+  if (!me.authenticated && !approvalToken) {
     return (
       <main className="approvalOnly">
         {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
@@ -2381,18 +2405,6 @@ function ApprovalShell({
           <h2>Invoice Approval Login</h2>
           <p>Sign in with the Google account assigned as Client Account Executive for this invoice.</p>
           <a className="primary linkButton" href={`${API_BASE}/auth/login?approval_invoice_id=${encodeURIComponent(approvalInvoiceId ?? '')}`}>Continue with Google</a>
-        </section>
-      </main>
-    );
-  }
-
-  if (approvalError === 'not_authorized') {
-    return (
-      <main className="approvalOnly">
-        <section className="authGate">
-          <ShieldCheck size={42} />
-          <h2>Invoice Not Available</h2>
-          <p>This invoice approval link is only available to the Client Account Executive assigned to the project.</p>
         </section>
       </main>
     );
@@ -2481,6 +2493,7 @@ function CandidateApprovalShell({
   notice,
   me,
   candidateInvoiceId,
+  approvalToken,
   candidateInvoiceError,
   invoice,
   onSubmit,
@@ -2490,11 +2503,24 @@ function CandidateApprovalShell({
   notice: Notice;
   me?: CurrentUser | null;
   candidateInvoiceId?: string;
+  approvalToken?: string | null;
   candidateInvoiceError?: string | null;
   invoice?: CandidateInvoice | null;
   onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
   onDownload?: () => void;
 }) {
+  if (candidateInvoiceError === 'not_authorized') {
+    return (
+      <main className="approvalOnly">
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Candidate Invoice Not Available</h2>
+          <p>This approval link is only available to the Client Account Executive assigned to the project.</p>
+        </section>
+      </main>
+    );
+  }
+
   if (!me) {
     return (
       <main className="approvalOnly">
@@ -2507,7 +2533,7 @@ function CandidateApprovalShell({
     );
   }
 
-  if (!me.authenticated) {
+  if (!me.authenticated && !approvalToken) {
     return (
       <main className="approvalOnly">
         {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
@@ -2516,18 +2542,6 @@ function CandidateApprovalShell({
           <h2>Candidate Invoice Approval Login</h2>
           <p>Sign in with the Google account assigned as Client Account Executive for this project.</p>
           <a className="primary linkButton" href={`${API_BASE}/auth/login?candidate_invoice_id=${encodeURIComponent(candidateInvoiceId ?? '')}`}>Continue with Google</a>
-        </section>
-      </main>
-    );
-  }
-
-  if (candidateInvoiceError === 'not_authorized') {
-    return (
-      <main className="approvalOnly">
-        <section className="authGate">
-          <ShieldCheck size={42} />
-          <h2>Candidate Invoice Not Available</h2>
-          <p>This approval link is only available to the Client Account Executive assigned to the project.</p>
         </section>
       </main>
     );

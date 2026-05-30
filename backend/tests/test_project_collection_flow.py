@@ -1197,17 +1197,31 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
             headers={"x-test-email": "other-cae@example.com", "x-test-role": "client_account_executive"},
         )
         assert wrong_cae_response.status_code == 404
+        with SessionLocal() as db:
+            cae = db.query(app_main.AppUser).filter(app_main.AppUser.email == "cae@example.com").one()
+            approval_token = app_main.approval_token_for_user("candidate_invoice", invoice_id, cae)
+            wrong_invoice_token = app_main.approval_token_for_user("candidate_invoice", invoice_id + 99, cae)
+        token_approval_view = client.get(
+            f"/candidate-invoices/{invoice_id}/client-account-approval-view",
+            headers={"x-approval-token": approval_token},
+        )
+        assert token_approval_view.status_code == 200, token_approval_view.text
+        wrong_token_response = client.get(
+            f"/candidate-invoices/{invoice_id}/client-account-approval-view",
+            headers={"x-approval-token": wrong_invoice_token},
+        )
+        assert wrong_token_response.status_code == 404
         approval_view = client.get(f"/candidate-invoices/{invoice_id}/client-account-approval-view", headers=CAE_HEADERS)
         assert approval_view.status_code == 200, approval_view.text
         assert approval_view.json()["invoice_document_name"] == "candidate-invoice.pdf"
         assert approval_view.json()["billing_entity_address"] == "M-68, Sector 7, Vashi, Navi Mumbai"
-        download_response = client.get(f"/candidate-invoices/{invoice_id}/download", headers=CAE_HEADERS)
+        download_response = client.get(f"/candidate-invoices/{invoice_id}/download?approval_token={approval_token}")
         assert download_response.status_code == 200
         assert download_response.content == b"invoice"
 
         on_hold_response = client.post(
             f"/candidate-invoices/{invoice_id}/client-account-approval",
-            headers=CAE_HEADERS,
+            headers={"x-approval-token": approval_token},
             json={"decision": "on-hold", "comments": "Need corrected invoice number."},
         )
         assert on_hold_response.status_code == 200, on_hold_response.text

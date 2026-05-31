@@ -566,6 +566,8 @@ function App() {
   const canInterview = activeRole === 'internal_interviewer';
   const canFinance = activeRole === 'finance_manager';
   const canClientApprove = activeRole === 'client_account_executive';
+  const canManageCandidateInvoiceItems = canOperate || canHrManage || canAdmin;
+  const canDeleteCandidateInvoices = canOperate || canHrManage || canFinance || canAdmin;
   const canViewWorkflow = Boolean(activeRole && activeRole !== 'system_admin');
   const canRecruitment = Boolean(activeRole && ['operations_manager', 'hr_manager', 'internal_interviewer', 'system_admin'].includes(activeRole));
   const showingUpcomingInvoices = invoiceStatusFilter === UPCOMING_INVOICES_FILTER;
@@ -1016,6 +1018,15 @@ function App() {
     });
   }
 
+  async function deleteCandidateInvoiceSchedule(schedule: CandidateInvoiceSchedule) {
+    const confirmed = window.confirm(`Delete this candidate invoice item and any generated unpaid invoices for it?\n\n${schedule.item_description}`);
+    if (!confirmed) return;
+    await mutate(async () => {
+      await api(`/candidate-invoice-schedules/${schedule.id}`, { method: 'DELETE' });
+      return 'Candidate invoice item deleted';
+    });
+  }
+
   async function submitHistoricalCandidateInvoice(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedHiredCandidateContract) return;
@@ -1027,6 +1038,17 @@ function App() {
       });
       formElement.reset();
       return 'Historical candidate invoice uploaded';
+    });
+  }
+
+  async function deleteSelectedCandidateInvoice() {
+    if (!selectedCandidateInvoice) return;
+    const confirmed = window.confirm(`Delete this unpaid candidate invoice?\n\n${selectedCandidateInvoice.candidate_name} · ${selectedCandidateInvoice.item_description ?? 'No description'}\n\nIf it was created from an invoice item, delete the invoice item in Recruitment to prevent future regeneration.`);
+    if (!confirmed) return;
+    await mutate(async () => {
+      await api(`/candidate-invoices/${selectedCandidateInvoice.id}`, { method: 'DELETE' });
+      setSelectedCandidateInvoiceId(null);
+      return 'Candidate invoice deleted';
     });
   }
 
@@ -1815,7 +1837,13 @@ function App() {
                             <div><dt>Contract</dt><dd>{contract?.contract_document_name ?? 'Not uploaded'}</dd></div>
                           </dl>
                           {contract && contract.invoice_schedules.length > 0 && (
-                            <CandidateInvoiceScheduleList schedules={contract.invoice_schedules} title="Additional invoice items" />
+                            <CandidateInvoiceScheduleList
+                              schedules={contract.invoice_schedules}
+                              title="Additional invoice items"
+                              canDelete={canManageCandidateInvoiceItems}
+                              loading={loading}
+                              onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
+                            />
                           )}
                           {contract?.contract_document_id && (
                             <button className="secondary" type="button" onClick={() => downloadDocument(contract.contract_document_id)}>
@@ -1899,7 +1927,13 @@ function App() {
                 <section className="panel">
                   <PanelTitle icon={<Banknote size={18} />} title="Add Additional Invoice Item" />
                   <p className="contextLine">{selectedCandidate.full_name}</p>
-                  <CandidateInvoiceScheduleList schedules={selectedCandidateContract.invoice_schedules} emptyMessage="No additional invoice items yet." />
+                  <CandidateInvoiceScheduleList
+                    schedules={selectedCandidateContract.invoice_schedules}
+                    emptyMessage="No additional invoice items yet."
+                    canDelete={canManageCandidateInvoiceItems}
+                    loading={loading}
+                    onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
+                  />
                   <CandidateInvoiceItemForm
                     defaultCurrency={selectedCandidateContract.currency ?? 'USD'}
                     frequency={candidateScheduleFrequency}
@@ -1930,7 +1964,13 @@ function App() {
                     <div><dt>Project</dt><dd>{selectedHiredCandidate?.project_code} · {selectedHiredCandidate?.project_title}</dd></div>
                     <div><dt>Invoice to</dt><dd>{selectedHiredCandidateContract.billing_entity_address ? `${selectedHiredCandidateContract.billing_entity_name}, ${selectedHiredCandidateContract.billing_entity_address}` : selectedHiredCandidateContract.billing_entity_name}</dd></div>
                   </dl>
-                  <CandidateInvoiceScheduleList schedules={selectedHiredCandidateContract.invoice_schedules} emptyMessage="No additional invoice items yet." />
+                  <CandidateInvoiceScheduleList
+                    schedules={selectedHiredCandidateContract.invoice_schedules}
+                    emptyMessage="No additional invoice items yet."
+                    canDelete={canManageCandidateInvoiceItems}
+                    loading={loading}
+                    onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
+                  />
                   <CandidateInvoiceItemForm
                     defaultCurrency={selectedHiredCandidateContract.currency ?? 'USD'}
                     frequency={candidateScheduleFrequency}
@@ -2159,6 +2199,17 @@ function App() {
                         <Download size={18} />
                         <span>Download Invoice</span>
                       </button>
+                      {canDeleteCandidateInvoices && (
+                        <button
+                          className="secondary danger"
+                          type="button"
+                          onClick={() => void deleteSelectedCandidateInvoice()}
+                          disabled={loading || ['paid', 'partially_paid'].includes(selectedCandidateInvoice.status)}
+                        >
+                          <Trash2 size={18} />
+                          <span>Delete Invoice</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -2924,10 +2975,16 @@ function CandidateInvoiceScheduleList({
   schedules,
   title,
   emptyMessage,
+  canDelete = false,
+  loading = false,
+  onDelete,
 }: {
   schedules: CandidateInvoiceSchedule[];
   title?: string;
   emptyMessage?: string;
+  canDelete?: boolean;
+  loading?: boolean;
+  onDelete?: (schedule: CandidateInvoiceSchedule) => void;
 }) {
   if (schedules.length === 0) {
     return emptyMessage ? <p className="empty">{emptyMessage}</p> : null;
@@ -2938,8 +2995,16 @@ function CandidateInvoiceScheduleList({
       {title && <h3>{title}</h3>}
       {schedules.map((schedule) => (
         <div className="scheduleRow" key={schedule.id}>
-          <strong>{schedule.item_description}</strong>
-          <span>{candidateInvoiceScheduleSummary(schedule)}</span>
+          <div>
+            <strong>{schedule.item_description}</strong>
+            <span>{candidateInvoiceScheduleSummary(schedule)}</span>
+          </div>
+          {canDelete && onDelete && (
+            <button className="secondary danger" type="button" onClick={() => onDelete(schedule)} disabled={loading}>
+              <Trash2 size={16} />
+              <span>Delete</span>
+            </button>
+          )}
         </div>
       ))}
     </div>

@@ -1305,6 +1305,9 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         assert paid_response.status_code == 201, paid_response.text
         assert paid_response.json()["status"] == "paid"
         assert paid_response.json()["balance_due"] == "0.00"
+        paid_delete_response = client.delete(f"/candidate-invoices/{invoice_id}", headers=FINANCE_HEADERS)
+        assert paid_delete_response.status_code == 400
+        assert "recorded payments" in paid_delete_response.text
 
 
 def test_candidate_invoice_schedules_support_reimbursements_and_auto_reimbursements():
@@ -1408,6 +1411,20 @@ def test_candidate_invoice_schedules_support_reimbursements_and_auto_reimburseme
         assert candidate_response.status_code == 200, candidate_response.text
         contract = candidate_response.json()[0]["contracts"][0]
         assert len(contract["invoice_schedules"]) == 2
+
+        auto_delete_response = client.delete(f"/candidate-invoice-schedules/{auto_response.json()['id']}", headers=HR_HEADERS)
+        assert auto_delete_response.status_code == 200, auto_delete_response.text
+        assert auto_delete_response.json()["status"] == "deleted"
+        with SessionLocal() as db:
+            assert db.query(CandidateInvoiceSchedule).filter(CandidateInvoiceSchedule.id == auto_response.json()["id"]).count() == 0
+            assert db.query(CandidateVendorInvoice).filter(CandidateVendorInvoice.invoice_type == "auto_reimbursement").count() == 0
+            reimbursement_invoice = db.query(CandidateVendorInvoice).filter(CandidateVendorInvoice.invoice_type == "reimbursement").one()
+            reimbursement_invoice_id = reimbursement_invoice.id
+
+        invoice_delete_response = client.delete(f"/candidate-invoices/{reimbursement_invoice_id}", headers=OPS_HEADERS)
+        assert invoice_delete_response.status_code == 200, invoice_delete_response.text
+        with SessionLocal() as db:
+            assert db.query(CandidateVendorInvoice).count() == 0
 
 
 def test_operations_can_upload_past_candidate_invoice_with_multiple_documents_and_duplicate_candidate_email():

@@ -982,6 +982,15 @@ def load_candidate_invoice(invoice_id: int, db: Session) -> CandidateVendorInvoi
     return invoice
 
 
+def delete_candidate_vendor_invoice(db: Session, invoice: CandidateVendorInvoice) -> None:
+    payment_count = db.scalar(select(func.count()).select_from(CandidatePayment).where(CandidatePayment.vendor_invoice_id == invoice.id)) or 0
+    if payment_count > 0:
+        raise HTTPException(status_code=400, detail="Candidate invoices with recorded payments cannot be deleted")
+    db.execute(delete(CandidateInvoiceDocument).where(CandidateInvoiceDocument.vendor_invoice_id == invoice.id))
+    db.execute(delete(CandidateInvoiceApproval).where(CandidateInvoiceApproval.vendor_invoice_id == invoice.id))
+    db.delete(invoice)
+
+
 def authorize_candidate_invoice_visibility(invoice: CandidateVendorInvoice, context: AuthContext, db: Session) -> None:
     candidate = load_candidate(invoice.candidate_id, db)
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
@@ -2886,6 +2895,31 @@ def update_candidate_invoice_schedule(
     return serialize_candidate_invoice_schedule(schedule)
 
 
+@app.delete("/candidate-invoice-schedules/{schedule_id}")
+def delete_candidate_invoice_schedule(
+    schedule_id: int,
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.hr_manager.value, UserRole.system_admin.value)),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    schedule = db.get(CandidateInvoiceSchedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Candidate invoice schedule not found")
+    candidate = load_candidate(schedule.candidate_id, db)
+    related_invoices = db.scalars(select(CandidateVendorInvoice).where(CandidateVendorInvoice.schedule_id == schedule.id)).all()
+    for invoice in related_invoices:
+        delete_candidate_vendor_invoice(db, invoice)
+    log_event(
+        db,
+        project_id=schedule.project_id,
+        actor_name=context.user.full_name,
+        action="candidate_invoice_schedule_deleted",
+        details=f"{candidate.full_name}: {schedule.item_description}",
+    )
+    db.delete(schedule)
+    db.commit()
+    return {"status": "deleted"}
+
+
 @app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)
 def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
     project = db.get(ProjectSOW, project_id)
@@ -3169,6 +3203,22 @@ def decide_candidate_invoice(invoice_id: int, payload: CandidateInvoiceApprovalC
     db.commit()
     db.refresh(invoice)
     return serialize_candidate_invoice(invoice, db)
+
+
+@app.delete("/candidate-invoices/{invoice_id}")
+def delete_candidate_invoice(
+    invoice_id: int,
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.hr_manager.value, UserRole.finance_manager.value, UserRole.system_admin.value)),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    invoice = load_candidate_invoice(invoice_id, db)
+    candidate = load_candidate(invoice.candidate_id, db)
+    project_id = invoice.project_id or candidate.project_id
+    details = f"{candidate.full_name}: {invoice.item_description or invoice.id}"
+    delete_candidate_vendor_invoice(db, invoice)
+    log_event(db, project_id=project_id, actor_name=context.user.full_name, action="candidate_invoice_deleted", details=details)
+    db.commit()
+    return {"status": "deleted"}
 
 
 @app.post("/candidate-invoices/{invoice_id}/payments", response_model=CandidateVendorInvoiceRead, status_code=201)

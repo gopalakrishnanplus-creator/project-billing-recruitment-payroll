@@ -385,7 +385,9 @@ dd {
 
 .scheduleRow {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
   gap: 3px;
+  align-items: center;
   padding: 9px 10px;
   border: 1px solid #d8dee7;
   border-radius: 8px;
@@ -394,6 +396,7 @@ dd {
 
 .scheduleRow strong,
 .scheduleRow span {
+  display: block;
   overflow-wrap: anywhere;
 }
 

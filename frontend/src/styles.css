@@ -372,6 +372,36 @@ dd {
   background: #f8fafc;
 }
 
+.scheduleList {
+  display: grid;
+  gap: 8px;
+}
+
+.scheduleList h3 {
+  margin: 0;
+  color: #243244;
+  font-size: 0.95rem;
+}
+
+.scheduleRow {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid #d8dee7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.scheduleRow strong,
+.scheduleRow span {
+  overflow-wrap: anywhere;
+}
+
+.scheduleRow span {
+  color: #526071;
+  font-size: 0.9rem;
+}
+
 .editStack {
   display: flex;
   flex-direction: column;

@@ -446,6 +446,12 @@ function contractInvoiceDates(contract: CandidateContract | undefined): string {
   return contract.invoice_end_date ? `${start} to ${contract.invoice_end_date}` : start;
 }
 
+function candidateInvoiceScheduleSummary(schedule: CandidateInvoiceSchedule): string {
+  const start = schedule.invoice_date ?? schedule.invoice_start_date ?? 'No start';
+  const dateRange = schedule.invoice_end_date ? `${start} to ${schedule.invoice_end_date}` : start;
+  return `${candidateInvoiceTypeLabel(schedule.invoice_type)} · ${schedule.currency} ${schedule.amount} · ${schedule.frequency} · ${dateRange} · ${schedule.status}`;
+}
+
 function contractingEntityLabel(value: string | undefined): string {
   return CONTRACTING_ENTITY_LABELS[value ?? 'flexgcc_direct'] ?? 'FlexGCC direct hire';
 }
@@ -993,13 +999,14 @@ function App() {
     });
   }
 
-  async function submitCandidateInvoiceSchedule(event: FormEvent<HTMLFormElement>) {
+  async function submitCandidateInvoiceSchedule(event: FormEvent<HTMLFormElement>, contractOverride?: CandidateContract) {
     event.preventDefault();
-    if (!selectedHiredCandidateContract) return;
+    const contract = contractOverride ?? selectedHiredCandidateContract;
+    if (!contract) return;
     const formElement = event.currentTarget;
     const payload = formPayload(formElement);
     await mutate(async () => {
-      await api<CandidateInvoiceSchedule>(`/candidate-contracts/${selectedHiredCandidateContract.id}/invoice-schedules`, {
+      await api<CandidateInvoiceSchedule>(`/candidate-contracts/${contract.id}/invoice-schedules`, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
@@ -1807,6 +1814,9 @@ function App() {
                             <div><dt>Invoice dates</dt><dd>{contractInvoiceDates(contract)}</dd></div>
                             <div><dt>Contract</dt><dd>{contract?.contract_document_name ?? 'Not uploaded'}</dd></div>
                           </dl>
+                          {contract && contract.invoice_schedules.length > 0 && (
+                            <CandidateInvoiceScheduleList schedules={contract.invoice_schedules} title="Additional invoice items" />
+                          )}
                           {contract?.contract_document_id && (
                             <button className="secondary" type="button" onClick={() => downloadDocument(contract.contract_document_id)}>
                               <Download size={18} />
@@ -1889,12 +1899,13 @@ function App() {
                 <section className="panel">
                   <PanelTitle icon={<Banknote size={18} />} title="Add Additional Invoice Item" />
                   <p className="contextLine">{selectedCandidate.full_name}</p>
+                  <CandidateInvoiceScheduleList schedules={selectedCandidateContract.invoice_schedules} emptyMessage="No additional invoice items yet." />
                   <CandidateInvoiceItemForm
                     defaultCurrency={selectedCandidateContract.currency ?? 'USD'}
                     frequency={candidateScheduleFrequency}
                     loading={loading}
                     onFrequencyChange={setCandidateScheduleFrequency}
-                    onSubmit={(event) => void submitCandidateInvoiceSchedule(event)}
+                    onSubmit={(event) => void submitCandidateInvoiceSchedule(event, selectedCandidateContract)}
                   />
                 </section>
               )}
@@ -1919,20 +1930,7 @@ function App() {
                     <div><dt>Project</dt><dd>{selectedHiredCandidate?.project_code} · {selectedHiredCandidate?.project_title}</dd></div>
                     <div><dt>Invoice to</dt><dd>{selectedHiredCandidateContract.billing_entity_address ? `${selectedHiredCandidateContract.billing_entity_name}, ${selectedHiredCandidateContract.billing_entity_address}` : selectedHiredCandidateContract.billing_entity_name}</dd></div>
                   </dl>
-                  {selectedHiredCandidateContract.invoice_schedules.length > 0 && (
-                    <div className="userList">
-                      {selectedHiredCandidateContract.invoice_schedules.map((schedule) => (
-                        <div className="userRow" key={schedule.id}>
-                          <div>
-                            <strong>{schedule.item_description}</strong>
-                            <span>
-                              {candidateInvoiceTypeLabel(schedule.invoice_type)} · {schedule.currency} {schedule.amount} · {schedule.frequency} · {schedule.invoice_date ?? schedule.invoice_start_date ?? 'No start'}{schedule.invoice_end_date ? ` to ${schedule.invoice_end_date}` : ''} · {schedule.status}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <CandidateInvoiceScheduleList schedules={selectedHiredCandidateContract.invoice_schedules} emptyMessage="No additional invoice items yet." />
                   <CandidateInvoiceItemForm
                     defaultCurrency={selectedHiredCandidateContract.currency ?? 'USD'}
                     frequency={candidateScheduleFrequency}
@@ -2919,6 +2917,32 @@ function CandidateInvoiceItemForm({
         <span>Add Invoice Item</span>
       </button>
     </form>
+  );
+}
+
+function CandidateInvoiceScheduleList({
+  schedules,
+  title,
+  emptyMessage,
+}: {
+  schedules: CandidateInvoiceSchedule[];
+  title?: string;
+  emptyMessage?: string;
+}) {
+  if (schedules.length === 0) {
+    return emptyMessage ? <p className="empty">{emptyMessage}</p> : null;
+  }
+
+  return (
+    <div className="scheduleList">
+      {title && <h3>{title}</h3>}
+      {schedules.map((schedule) => (
+        <div className="scheduleRow" key={schedule.id}>
+          <strong>{schedule.item_description}</strong>
+          <span>{candidateInvoiceScheduleSummary(schedule)}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 

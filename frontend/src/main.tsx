@@ -1885,6 +1885,19 @@ function App() {
                   <span>{selectedCandidateContract ? 'Update Terms' : 'Mark Hired'}</span>
                 </button>
               </form>
+              {selectedCandidateContract && selectedCandidate?.status === 'hired' && (
+                <section className="panel">
+                  <PanelTitle icon={<Banknote size={18} />} title="Add Additional Invoice Item" />
+                  <p className="contextLine">{selectedCandidate.full_name}</p>
+                  <CandidateInvoiceItemForm
+                    defaultCurrency={selectedCandidateContract.currency ?? 'USD'}
+                    frequency={candidateScheduleFrequency}
+                    loading={loading}
+                    onFrequencyChange={setCandidateScheduleFrequency}
+                    onSubmit={(event) => void submitCandidateInvoiceSchedule(event)}
+                  />
+                </section>
+              )}
             </>
           )}
 
@@ -1920,41 +1933,13 @@ function App() {
                       ))}
                     </div>
                   )}
-                  <form className="grid four" onSubmit={(event) => void submitCandidateInvoiceSchedule(event)}>
-                    <Field label="Description" name="item_description" required />
-                    <label className="field">
-                      <span>Invoice type</span>
-                      <select name="invoice_type" defaultValue="invoice">
-                        <option value="invoice">Invoice</option>
-                        <option value="reimbursement">Reimbursement</option>
-                        <option value="auto_reimbursement">Auto-reimbursement</option>
-                      </select>
-                    </label>
-                    <Field label="Amount" name="amount" type="number" step="0.01" required />
-                    <Field label="Currency" name="currency" defaultValue={selectedHiredCandidateContract.currency ?? 'USD'} required />
-                    <label className="field">
-                      <span>Frequency</span>
-                      <select name="frequency" value={candidateScheduleFrequency} onChange={(event) => setCandidateScheduleFrequency(event.target.value)}>
-                        <option value="single">Single</option>
-                        <option value="weekly">Weekly</option>
-                        <option value="monthly">Monthly</option>
-                        <option value="quarterly">Quarterly</option>
-                      </select>
-                    </label>
-                    {candidateScheduleFrequency === 'single' ? (
-                      <Field label="Invoice date" name="invoice_date" type="date" defaultValue={endOfCurrentMonth()} required />
-                    ) : (
-                      <>
-                        <Field label="Invoice start" name="invoice_start_date" type="date" defaultValue={endOfCurrentMonth()} required />
-                        <Field label="Invoice end" name="invoice_end_date" type="date" />
-                      </>
-                    )}
-                    <input type="hidden" name="status" value="active" />
-                    <button className="primary" disabled={loading}>
-                      <FilePlus2 size={18} />
-                      <span>Add Invoice Item</span>
-                    </button>
-                  </form>
+                  <CandidateInvoiceItemForm
+                    defaultCurrency={selectedHiredCandidateContract.currency ?? 'USD'}
+                    frequency={candidateScheduleFrequency}
+                    loading={loading}
+                    onFrequencyChange={setCandidateScheduleFrequency}
+                    onSubmit={(event) => void submitCandidateInvoiceSchedule(event)}
+                  />
                   {canOperate && (
                     <form className="grid four" onSubmit={(event) => void submitHistoricalCandidateInvoice(event)}>
                       <Field label="Past invoice description" name="item_description" required />
@@ -2882,6 +2867,58 @@ function PanelTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
       {icon}
       <h2>{title}</h2>
     </div>
+  );
+}
+
+function CandidateInvoiceItemForm({
+  defaultCurrency,
+  frequency,
+  loading,
+  onFrequencyChange,
+  onSubmit,
+}: {
+  defaultCurrency: string;
+  frequency: string;
+  loading: boolean;
+  onFrequencyChange: (frequency: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <form className="grid four" onSubmit={onSubmit}>
+      <Field label="Description" name="item_description" required />
+      <label className="field">
+        <span>Invoice type</span>
+        <select name="invoice_type" defaultValue="invoice">
+          <option value="invoice">Invoice</option>
+          <option value="reimbursement">Reimbursement</option>
+          <option value="auto_reimbursement">Auto-reimbursement</option>
+        </select>
+      </label>
+      <Field label="Amount" name="amount" type="number" step="0.01" required />
+      <Field label="Currency" name="currency" defaultValue={defaultCurrency} required />
+      <label className="field">
+        <span>Frequency</span>
+        <select name="frequency" value={frequency} onChange={(event) => onFrequencyChange(event.target.value)}>
+          <option value="single">Single</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="quarterly">Quarterly</option>
+        </select>
+      </label>
+      {frequency === 'single' ? (
+        <Field label="Invoice date" name="invoice_date" type="date" defaultValue={endOfCurrentMonth()} required />
+      ) : (
+        <>
+          <Field label="Invoice start" name="invoice_start_date" type="date" defaultValue={endOfCurrentMonth()} required />
+          <Field label="Invoice end" name="invoice_end_date" type="date" />
+        </>
+      )}
+      <input type="hidden" name="status" value="active" />
+      <button className="primary" disabled={loading}>
+        <FilePlus2 size={18} />
+        <span>Add Invoice Item</span>
+      </button>
+    </form>
   );
 }
 

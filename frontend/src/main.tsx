@@ -134,6 +134,15 @@ type UploadedDocument = {
   file_size: number | null;
 };
 
+type CandidateInvoiceDocument = {
+  id: number;
+  document_id: number;
+  document_role: string;
+  original_filename: string;
+  content_type: string | null;
+  file_size: number | null;
+};
+
 type ClientInvoice = {
   id: number;
   project_id: number;
@@ -261,6 +270,7 @@ type CandidateInvoiceUpload = {
   billing_entity_address: string | null;
   status: string;
   token_used: boolean;
+  documents: CandidateInvoiceDocument[];
 };
 
 type CandidateInvoice = {
@@ -288,6 +298,7 @@ type CandidateInvoice = {
   status: string;
   submitted_at: string;
   approval_comments: string | null;
+  documents: CandidateInvoiceDocument[];
   paid_total: string;
   balance_due: string;
 };
@@ -367,6 +378,12 @@ function formatApiErrorDetail(detail: unknown): string {
 
 function today(): string {
   return formatLocalDate(new Date());
+}
+
+function yesterday(): string {
+  const value = new Date();
+  value.setDate(value.getDate() - 1);
+  return formatLocalDate(value);
 }
 
 function endOfCurrentMonth(): string {
@@ -967,6 +984,20 @@ function App() {
     });
   }
 
+  async function submitHistoricalCandidateInvoice(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedHiredCandidateContract) return;
+    const formElement = event.currentTarget;
+    await mutate(async () => {
+      await api<CandidateInvoice>(`/candidate-contracts/${selectedHiredCandidateContract.id}/historical-invoices`, {
+        method: 'POST',
+        body: new FormData(formElement),
+      });
+      formElement.reset();
+      return 'Historical candidate invoice uploaded';
+    });
+  }
+
   function editCandidateInvoiceTerms(candidate: Candidate) {
     setSelectedCandidateId(candidate.id);
     if (candidate.recruitment_need_id) setSelectedNeedId(candidate.recruitment_need_id);
@@ -1149,6 +1180,12 @@ function App() {
     window.open(`${API_BASE}/candidate-invoices/${invoiceId}/download${tokenQuery}`, '_blank', 'noopener,noreferrer');
   }
 
+  function downloadCandidateInvoiceDocument(invoiceId: number | undefined, documentId: number, token?: string | null) {
+    if (!invoiceId) return;
+    const tokenQuery = token ? `?approval_token=${encodeURIComponent(token)}` : '';
+    window.open(`${API_BASE}/candidate-invoices/${invoiceId}/documents/${documentId}/download${tokenQuery}`, '_blank', 'noopener,noreferrer');
+  }
+
   function downloadDocument(documentId: number | null) {
     if (!documentId) return;
     window.open(`${API_BASE}/documents/${documentId}/download`, '_blank', 'noopener,noreferrer');
@@ -1229,6 +1266,7 @@ function App() {
         invoice={candidateApprovalInvoice}
         onSubmit={(event) => void candidateApprovalInvoiceAction(event)}
         onDownload={() => downloadCandidateInvoice(candidateApprovalInvoice?.id, approvalToken)}
+        onDownloadDocument={(documentId) => downloadCandidateInvoiceDocument(candidateApprovalInvoice?.id, documentId, approvalToken)}
       />
     );
   }
@@ -1892,6 +1930,27 @@ function App() {
                       <span>Add Invoice Item</span>
                     </button>
                   </form>
+                  {canOperate && (
+                    <form className="grid four" onSubmit={(event) => void submitHistoricalCandidateInvoice(event)}>
+                      <Field label="Past invoice description" name="item_description" required />
+                      <label className="field">
+                        <span>Invoice type</span>
+                        <select name="invoice_type" defaultValue="invoice">
+                          <option value="invoice">Invoice</option>
+                          <option value="reimbursement">Reimbursement</option>
+                          <option value="auto_reimbursement">Auto-reimbursement</option>
+                        </select>
+                      </label>
+                      <Field label="Amount" name="amount" type="number" step="0.01" required />
+                      <Field label="Currency" name="currency" defaultValue={selectedHiredCandidateContract.currency ?? 'USD'} required />
+                      <Field label="Past invoice date" name="invoice_due_date" type="date" defaultValue={yesterday()} required />
+                      <Field label="Invoice and supporting files" name="invoice_documents" type="file" multiple required />
+                      <button className="primary" disabled={loading}>
+                        <Upload size={18} />
+                        <span>Upload Past Invoice</span>
+                      </button>
+                    </form>
+                  )}
                 </>
               ) : (
                 <p className="empty">Select a hired candidate with a signed contract to add invoice items.</p>
@@ -2072,6 +2131,21 @@ function App() {
                       <div><dt>Balance</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.balance_due}</dd></div>
                       <div><dt>CAE comments</dt><dd>{selectedCandidateInvoice.approval_comments ?? 'None'}</dd></div>
                     </dl>
+                    {selectedCandidateInvoice.documents.length > 0 && (
+                      <div className="documentList">
+                        {selectedCandidateInvoice.documents.map((document) => (
+                          <button
+                            className="secondary"
+                            key={document.id}
+                            type="button"
+                            onClick={() => downloadCandidateInvoiceDocument(selectedCandidateInvoice.id, document.document_id)}
+                          >
+                            <Download size={16} />
+                            <span>{document.document_role === 'invoice' ? 'Invoice' : 'Supporting'}: {document.original_filename}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     <div className="actions">
                       <button className="secondary" type="button" onClick={() => downloadCandidateInvoice(selectedCandidateInvoice.id)} disabled={!selectedCandidateInvoice.invoice_document_id}>
                         <Download size={18} />
@@ -2628,7 +2702,7 @@ function CandidateInvoiceUploadShell({
             ) : (
               <form className="stackedForm" onSubmit={onSubmit}>
                 <p className="contextLine">This link is single-use and can be used only once. The invoice should be raised on {invoice.billing_entity_name}{invoice.billing_entity_address ? `, ${invoice.billing_entity_address}` : ''}.</p>
-                <Field label="Invoice file" name="invoice_document" type="file" required />
+                <Field label="Invoice and supporting files" name="invoice_documents" type="file" multiple required />
                 <button className="primary" disabled={loading}>
                   <Upload size={18} />
                   <span>Upload Invoice</span>
@@ -2652,6 +2726,7 @@ function CandidateApprovalShell({
   invoice,
   onSubmit,
   onDownload,
+  onDownloadDocument,
 }: {
   loading: boolean;
   notice: Notice;
@@ -2662,6 +2737,7 @@ function CandidateApprovalShell({
   invoice?: CandidateInvoice | null;
   onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
   onDownload?: () => void;
+  onDownloadDocument?: (documentId: number) => void;
 }) {
   if (candidateInvoiceError === 'not_authorized') {
     return (
@@ -2727,6 +2803,21 @@ function CandidateApprovalShell({
               <Download size={18} />
               <span>Download Invoice</span>
             </button>
+            {invoice.documents.length > 0 && (
+              <div className="documentList">
+                {invoice.documents.map((document) => (
+                  <button
+                    className="secondary"
+                    key={document.id}
+                    type="button"
+                    onClick={() => onDownloadDocument?.(document.document_id)}
+                  >
+                    <Download size={16} />
+                    <span>{document.document_role === 'invoice' ? 'Invoice' : 'Supporting'}: {document.original_filename}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <label className="field">
               <span>Comments</span>
               <textarea name="comments" rows={4} defaultValue={invoice.approval_comments ?? ''} />

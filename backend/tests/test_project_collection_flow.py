@@ -6,7 +6,7 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 from app.database import Base, engine
 from app import main as app_main
 from app.main import app
-from app.models import Candidate, CandidateContract, CandidateInvoiceSchedule, CandidateVendorInvoice, EmailNotification
+from app.models import Candidate, CandidateContract, CandidateInvoiceDocument, CandidateInvoiceSchedule, CandidateVendorInvoice, EmailNotification
 from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
@@ -1167,11 +1167,15 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         assert upload_view.json()["billing_entity_address"] == "M-68, Sector 7, Vashi, Navi Mumbai"
         upload_response = client.post(
             f"/candidate-invoices/upload/{token}",
-            files={"invoice_document": ("candidate-invoice.pdf", b"invoice", "application/pdf")},
+            files=[
+                ("invoice_documents", ("candidate-invoice.pdf", b"invoice", "application/pdf")),
+                ("invoice_documents", ("supporting-receipt.pdf", b"supporting", "application/pdf")),
+            ],
         )
         assert upload_response.status_code == 200, upload_response.text
         assert upload_response.json()["token_used"] is True
         assert upload_response.json()["status"] == "submitted"
+        assert [document["original_filename"] for document in upload_response.json()["documents"]] == ["candidate-invoice.pdf", "supporting-receipt.pdf"]
         repeat_upload = client.post(
             f"/candidate-invoices/upload/{token}",
             files={"invoice_document": ("candidate-invoice.pdf", b"invoice", "application/pdf")},
@@ -1214,10 +1218,15 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         approval_view = client.get(f"/candidate-invoices/{invoice_id}/client-account-approval-view", headers=CAE_HEADERS)
         assert approval_view.status_code == 200, approval_view.text
         assert approval_view.json()["invoice_document_name"] == "candidate-invoice.pdf"
+        assert [document["document_role"] for document in approval_view.json()["documents"]] == ["invoice", "supporting"]
         assert approval_view.json()["billing_entity_address"] == "M-68, Sector 7, Vashi, Navi Mumbai"
         download_response = client.get(f"/candidate-invoices/{invoice_id}/download?approval_token={approval_token}")
         assert download_response.status_code == 200
         assert download_response.content == b"invoice"
+        supporting_document_id = approval_view.json()["documents"][1]["document_id"]
+        supporting_download_response = client.get(f"/candidate-invoices/{invoice_id}/documents/{supporting_document_id}/download?approval_token={approval_token}")
+        assert supporting_download_response.status_code == 200
+        assert supporting_download_response.content == b"supporting"
 
         on_hold_response = client.post(
             f"/candidate-invoices/{invoice_id}/client-account-approval",
@@ -1372,6 +1381,107 @@ def test_candidate_invoice_schedules_support_reimbursements_and_auto_reimburseme
         assert candidate_response.status_code == 200, candidate_response.text
         contract = candidate_response.json()[0]["contracts"][0]
         assert len(contract["invoice_schedules"]) == 2
+
+
+def test_operations_can_upload_past_candidate_invoice_with_multiple_documents_and_duplicate_candidate_email():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Magic Box Business Head",
+                "number_of_positions": "1",
+                "employment_type": "Fractional Consultant",
+                "description": "Historical Magic Box expense head.",
+                "historical_completed": "on",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        need_id = need_response.json()["id"]
+
+        first_hire_response = client.post(
+            f"/recruitment-needs/{need_id}/historical-hires",
+            headers=OPS_HEADERS,
+            data={"full_name": "Business Head One", "email": "magicbox@example.com"},
+        )
+        second_hire_response = client.post(
+            f"/recruitment-needs/{need_id}/historical-hires",
+            headers=OPS_HEADERS,
+            data={"full_name": "Business Head Two", "email": "magicbox@example.com"},
+        )
+        assert first_hire_response.status_code == 201, first_hire_response.text
+        assert second_hire_response.status_code == 201, second_hire_response.text
+        assert first_hire_response.json()["email"] == second_hire_response.json()["email"] == "magicbox@example.com"
+        contract_id = first_hire_response.json()["contracts"][0]["id"]
+
+        current_date_response = client.post(
+            f"/candidate-contracts/{contract_id}/historical-invoices",
+            headers=OPS_HEADERS,
+            data={
+                "item_description": "Current date expense should use regular process",
+                "invoice_type": "reimbursement",
+                "amount": "250.00",
+                "currency": "USD",
+                "invoice_due_date": str(date.today()),
+            },
+            files={"invoice_document": ("invoice.pdf", b"invoice", "application/pdf")},
+        )
+        assert current_date_response.status_code == 400
+        assert "regular approval process" in current_date_response.text
+
+        historical_response = client.post(
+            f"/candidate-contracts/{contract_id}/historical-invoices",
+            headers=OPS_HEADERS,
+            data={
+                "item_description": "Historical India expenses",
+                "invoice_type": "reimbursement",
+                "amount": "875.00",
+                "currency": "USD",
+                "invoice_due_date": str(date.today() - timedelta(days=30)),
+            },
+            files=[
+                ("invoice_documents", ("magicbox-invoice.pdf", b"invoice", "application/pdf")),
+                ("invoice_documents", ("expense-support.pdf", b"support", "application/pdf")),
+            ],
+        )
+        assert historical_response.status_code == 201, historical_response.text
+        historical_invoice = historical_response.json()
+        assert historical_invoice["status"] == "approved"
+        assert historical_invoice["balance_due"] == "875.00"
+        assert [document["original_filename"] for document in historical_invoice["documents"]] == ["magicbox-invoice.pdf", "expense-support.pdf"]
+
+        with SessionLocal() as db:
+            assert db.query(Candidate).filter(Candidate.email == "magicbox@example.com").count() == 2
+            assert db.query(CandidateInvoiceDocument).filter(CandidateInvoiceDocument.vendor_invoice_id == historical_invoice["id"]).count() == 2
+            assert db.query(EmailNotification).filter(EmailNotification.recipient_email.in_(["magicbox@example.com", "cae@example.com", "finance@example.com"])).count() == 0
+
+        support_document_id = historical_invoice["documents"][1]["document_id"]
+        support_download_response = client.get(
+            f"/candidate-invoices/{historical_invoice['id']}/documents/{support_document_id}/download",
+            headers=OPS_HEADERS,
+        )
+        assert support_download_response.status_code == 200, support_download_response.text
+        assert support_download_response.content == b"support"
+
+        payment_response = client.post(
+            f"/candidate-invoices/{historical_invoice['id']}/payments",
+            headers=FINANCE_HEADERS,
+            json={
+                "amount_paid": "875.00",
+                "paid_date": str(date.today()),
+                "recorded_by_name": "Finance Manager",
+            },
+        )
+        assert payment_response.status_code == 201, payment_response.text
+        assert payment_response.json()["status"] == "paid"
 
 
 def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):

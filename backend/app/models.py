@@ -379,6 +379,16 @@ class CandidateVendorInvoice(Base):
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CandidateInvoiceDocument(Base):
+    __tablename__ = "candidate_invoice_documents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vendor_invoice_id: Mapped[int] = mapped_column(ForeignKey("candidate_vendor_invoices.id"), nullable=False)
+    document_id: Mapped[int] = mapped_column(ForeignKey("uploaded_documents.id"), nullable=False)
+    document_role: Mapped[str] = mapped_column(String(80), default="supporting")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CandidateInvoiceApproval(Base):
     __tablename__ = "candidate_invoice_approvals"
 

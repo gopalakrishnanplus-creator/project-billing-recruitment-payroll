@@ -34,6 +34,7 @@ from .models import (
     AppUser,
     Candidate,
     CandidateContract,
+    CandidateInvoiceDocument,
     CandidateInvoiceSchedule,
     CandidateEvaluation,
     CandidateInvoiceApproval,
@@ -66,6 +67,7 @@ from .schemas import (
     CandidateContractCreate,
     CandidateContractRead,
     CandidateContractUpdate,
+    CandidateInvoiceDocumentRead,
     CandidateInvoiceScheduleCreate,
     CandidateInvoiceScheduleRead,
     CandidateInvoiceScheduleUpdate,
@@ -507,6 +509,22 @@ async def request_payload_and_files(request: Request) -> tuple[dict[str, object]
     return await request.json(), {}
 
 
+async def request_payload_and_file_lists(request: Request) -> tuple[dict[str, object], dict[str, list[UploadFile]]]:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
+        form = await request.form()
+        data: dict[str, object] = {}
+        files: dict[str, list[UploadFile]] = {}
+        for key, value in form.multi_items():
+            if isinstance(value, UploadFile) or (hasattr(value, "filename") and hasattr(value, "read")):
+                if value.filename:
+                    files.setdefault(key, []).append(value)
+            elif value != "":
+                data[key] = value
+        return data, files
+    return await request.json(), {}
+
+
 async def save_uploaded_document(
     db: Session,
     *,
@@ -537,6 +555,42 @@ async def save_uploaded_document(
     db.add(document)
     db.flush()
     return document
+
+
+def uploaded_files_for_keys(files: dict[str, list[UploadFile]], *keys: str) -> list[UploadFile]:
+    selected: list[UploadFile] = []
+    for key in keys:
+        selected.extend(files.get(key, []))
+    return selected
+
+
+async def save_candidate_invoice_documents(
+    db: Session,
+    *,
+    invoice: CandidateVendorInvoice,
+    files: list[UploadFile],
+    project_id: int | None,
+    uploaded_by_name: str | None,
+) -> list[CandidateInvoiceDocument]:
+    saved: list[CandidateInvoiceDocument] = []
+    for index, file in enumerate(files):
+        role = "invoice" if index == 0 else "supporting"
+        document = await save_uploaded_document(
+            db,
+            file=file,
+            project_id=project_id,
+            document_type="candidate_vendor_invoice" if role == "invoice" else "candidate_invoice_supporting_document",
+            uploaded_by_name=uploaded_by_name,
+        )
+        if document is None:
+            continue
+        if invoice.invoice_document_id is None:
+            invoice.invoice_document_id = document.id
+        link = CandidateInvoiceDocument(vendor_invoice_id=invoice.id, document_id=document.id, document_role=role)
+        db.add(link)
+        db.flush()
+        saved.append(link)
+    return saved
 
 
 def serialize_project(project: ProjectSOW) -> ProjectRead:
@@ -718,6 +772,46 @@ def document_name(db: Session, document_id: int | None) -> str | None:
     return document.original_filename if document else None
 
 
+def document_download_response(document: UploadedDocument) -> Response:
+    content = document.content_bytes
+    if content is None and document.storage_uri:
+        path = Path(document.storage_uri)
+        if path.exists():
+            content = path.read_bytes()
+    if content is None:
+        raise HTTPException(status_code=404, detail="Document content not found")
+    filename = quote(document.original_filename)
+    return Response(
+        content=content,
+        media_type=document.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
+
+
+def serialize_candidate_invoice_documents(invoice_id: int, db: Session) -> list[CandidateInvoiceDocumentRead]:
+    links = db.scalars(
+        select(CandidateInvoiceDocument)
+        .where(CandidateInvoiceDocument.vendor_invoice_id == invoice_id)
+        .order_by(CandidateInvoiceDocument.id.asc())
+    ).all()
+    result: list[CandidateInvoiceDocumentRead] = []
+    for link in links:
+        document = db.get(UploadedDocument, link.document_id)
+        if document is None:
+            continue
+        result.append(
+            CandidateInvoiceDocumentRead(
+                id=link.id,
+                document_id=document.id,
+                document_role=link.document_role,
+                original_filename=document.original_filename,
+                content_type=document.content_type,
+                file_size=document.file_size,
+            )
+        )
+    return result
+
+
 def serialize_recruitment_need_detail(need: RecruitmentNeed, db: Session) -> RecruitmentNeedDetailRead:
     project = load_project_for_read(need.project_id, db)
     return RecruitmentNeedDetailRead(
@@ -867,6 +961,7 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         status=invoice.status,
         submitted_at=invoice.submitted_at,
         approval_comments=latest_approval.notes if latest_approval else None,
+        documents=serialize_candidate_invoice_documents(invoice.id, db),
         payments=[CandidatePaymentRead.model_validate(payment) for payment in payments],
         paid_total=paid_total,
         balance_due=balance_due,
@@ -1196,7 +1291,7 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
         [
             f"Dear {candidate.full_name},",
             "",
-            "This is a reminder to upload your invoice/reimbursement document in the FlexGCC system.",
+            "This is a reminder to upload your invoice/reimbursement document and any supporting documents in the FlexGCC system.",
             "The upload link below is single-use and can be used only once.",
             "",
             f"Invoice to: {billing_entity_name}",
@@ -1213,7 +1308,7 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
     html = f"""
     <h2>Candidate invoice upload reminder</h2>
     <p>Dear {escape(candidate.full_name)},</p>
-    <p>This is a reminder to upload your invoice/reimbursement document in the FlexGCC system.</p>
+    <p>This is a reminder to upload your invoice/reimbursement document and any supporting documents in the FlexGCC system.</p>
     <p><strong>This upload link is single-use and can be used only once.</strong></p>
     <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Invoice to</strong></td><td>{escape(billing_entity_name)}</td></tr>
@@ -2334,20 +2429,7 @@ def download_document(document_id: int, context: AuthContext = Depends(require_l
     if not allowed:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    content = document.content_bytes
-    if content is None and document.storage_uri:
-        path = Path(document.storage_uri)
-        if path.exists():
-            content = path.read_bytes()
-    if content is None:
-        raise HTTPException(status_code=404, detail="Document content not found")
-
-    filename = quote(document.original_filename)
-    return Response(
-        content=content,
-        media_type=document.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
-    )
+    return document_download_response(document)
 
 
 @app.post("/projects/{project_id}/recruitment-needs", response_model=RecruitmentNeedRead, status_code=201)
@@ -2552,6 +2634,7 @@ def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_r
     interview_ids = db.scalars(select(Interview.id).where(Interview.candidate_id == candidate.id)).all()
 
     if vendor_invoice_ids:
+        db.execute(delete(CandidateInvoiceDocument).where(CandidateInvoiceDocument.vendor_invoice_id.in_(vendor_invoice_ids)))
         db.execute(delete(CandidatePayment).where(CandidatePayment.vendor_invoice_id.in_(vendor_invoice_ids)))
         db.execute(delete(CandidateInvoiceApproval).where(CandidateInvoiceApproval.vendor_invoice_id.in_(vendor_invoice_ids)))
         db.execute(delete(CandidateVendorInvoice).where(CandidateVendorInvoice.id.in_(vendor_invoice_ids)))
@@ -2903,6 +2986,7 @@ def get_candidate_invoice_upload(token: str, db: Session = Depends(get_db)) -> C
         billing_entity_address=billing_entity_address,
         status=invoice.status,
         token_used=invoice.upload_token_used_at is not None or invoice.invoice_document_id is not None,
+        documents=serialize_candidate_invoice_documents(invoice.id, db),
     )
 
 
@@ -2913,11 +2997,17 @@ async def upload_candidate_invoice(token: str, request: Request, db: Session = D
         raise HTTPException(status_code=404, detail="Invoice upload link not found")
     if invoice.upload_token_used_at is not None or invoice.invoice_document_id is not None:
         raise HTTPException(status_code=400, detail="This single-use invoice upload link has already been used")
-    data, files = await request_payload_and_files(request)
-    document = await save_uploaded_document(db, file=files.get("invoice_document"), project_id=invoice.project_id, document_type="candidate_vendor_invoice", uploaded_by_name="Candidate")
-    if document is None:
-        raise HTTPException(status_code=422, detail="Invoice upload file is required")
-    invoice.invoice_document_id = document.id
+    _, files = await request_payload_and_file_lists(request)
+    invoice_files = uploaded_files_for_keys(files, "invoice_documents", "invoice_document", "supporting_documents")
+    if not invoice_files:
+        raise HTTPException(status_code=422, detail="At least one invoice or supporting file is required")
+    await save_candidate_invoice_documents(
+        db,
+        invoice=invoice,
+        files=invoice_files,
+        project_id=invoice.project_id,
+        uploaded_by_name="Candidate",
+    )
     invoice.upload_token_used_at = utcnow()
     invoice.submitted_at = utcnow()
     invoice.status = "submitted"
@@ -2926,6 +3016,70 @@ async def upload_candidate_invoice(token: str, request: Request, db: Session = D
     db.commit()
     db.refresh(invoice)
     return get_candidate_invoice_upload(token, db)
+
+
+@app.post("/candidate-contracts/{contract_id}/historical-invoices", response_model=CandidateVendorInvoiceRead, status_code=201)
+async def add_historical_candidate_invoice(
+    contract_id: int,
+    request: Request,
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateVendorInvoiceRead:
+    contract = db.get(CandidateContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Candidate contract not found")
+    candidate = load_candidate(contract.candidate_id, db)
+    project = load_project_for_read(candidate.project_id, db)
+    ensure_project_active(project)
+    data, files = await request_payload_and_file_lists(request)
+    payload = parse_model(CandidateInvoiceScheduleCreate, {
+        "item_description": data.get("item_description"),
+        "invoice_type": data.get("invoice_type") or "invoice",
+        "amount": data.get("amount"),
+        "currency": data.get("currency") or contract.currency or "USD",
+        "frequency": "single",
+        "invoice_date": data.get("invoice_due_date") or data.get("invoice_date"),
+        "status": "active",
+    })
+    validate_candidate_invoice_schedule_payload(payload)
+    if payload.invoice_date is None:
+        raise HTTPException(status_code=422, detail="Historical invoice date is required")
+    if payload.invoice_date >= date.today():
+        raise HTTPException(status_code=400, detail="Use candidate invoice schedules for invoices due today or in the future so the regular approval process runs")
+    invoice_files = uploaded_files_for_keys(files, "invoice_documents", "invoice_document", "supporting_documents")
+    if not invoice_files:
+        raise HTTPException(status_code=422, detail="At least one invoice or supporting file is required")
+    invoice = CandidateVendorInvoice(
+        candidate_id=candidate.id,
+        contract_id=contract.id,
+        project_id=candidate.project_id,
+        item_description=payload.item_description.strip(),
+        invoice_type=payload.invoice_type,
+        invoice_due_date=payload.invoice_date,
+        amount=payload.amount,
+        currency=payload.currency.upper(),
+        status="approved",
+        submitted_at=utcnow(),
+    )
+    db.add(invoice)
+    db.flush()
+    await save_candidate_invoice_documents(
+        db,
+        invoice=invoice,
+        files=invoice_files,
+        project_id=candidate.project_id,
+        uploaded_by_name=context.user.full_name,
+    )
+    log_event(
+        db,
+        project_id=candidate.project_id,
+        actor_name=context.user.full_name,
+        action="candidate_historical_invoice_uploaded",
+        details=f"{candidate.full_name}: {invoice.item_description}",
+    )
+    db.commit()
+    db.refresh(invoice)
+    return serialize_candidate_invoice(invoice, db)
 
 
 @app.get("/candidate-invoices", response_model=list[CandidateVendorInvoiceRead])
@@ -2973,18 +3127,29 @@ def download_candidate_invoice(invoice_id: int, request: Request, db: Session = 
     document = db.get(UploadedDocument, invoice.invoice_document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Uploaded invoice document not found")
-    content = document.content_bytes
-    if content is None and document.storage_uri:
-        path = Path(document.storage_uri)
-        if path.exists():
-            content = path.read_bytes()
-    if content is None:
-        raise HTTPException(status_code=404, detail="Document content not found")
-    return Response(
-        content=content,
-        media_type=document.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{quote(document.original_filename)}"'},
+    return document_download_response(document)
+
+
+@app.get("/candidate-invoices/{invoice_id}/documents/{document_id}/download")
+def download_candidate_invoice_document(invoice_id: int, document_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
+    invoice = load_candidate_invoice(invoice_id, db)
+    auth = approval_auth_from_request(request, db, kind="candidate_invoice", invoice_id=invoice_id)
+    if auth.via_token:
+        authorize_candidate_invoice_approval(invoice, auth.context, db)
+    else:
+        authorize_candidate_invoice_visibility(invoice, auth.context, db)
+    link = db.scalar(
+        select(CandidateInvoiceDocument).where(
+            CandidateInvoiceDocument.vendor_invoice_id == invoice.id,
+            CandidateInvoiceDocument.document_id == document_id,
+        )
     )
+    if link is None:
+        raise HTTPException(status_code=404, detail="Uploaded invoice document not found")
+    document = db.get(UploadedDocument, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Uploaded invoice document not found")
+    return document_download_response(document)
 
 
 @app.post("/candidate-invoices/{invoice_id}/client-account-approval", response_model=CandidateVendorInvoiceRead)

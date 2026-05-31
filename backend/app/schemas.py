@@ -375,6 +375,15 @@ class DocumentRead(BaseModel):
     file_size: int | None
 
 
+class CandidateInvoiceDocumentRead(BaseModel):
+    id: int
+    document_id: int
+    document_role: str
+    original_filename: str
+    content_type: str | None
+    file_size: int | None
+
+
 class ClientInvoiceRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -477,6 +486,7 @@ class CandidateInvoiceUploadRead(BaseModel):
     billing_entity_address: str | None = None
     status: str
     token_used: bool
+    documents: list[CandidateInvoiceDocumentRead] = Field(default_factory=list)
 
 
 class CandidatePaymentRead(BaseModel):
@@ -515,6 +525,7 @@ class CandidateVendorInvoiceRead(BaseModel):
     status: str
     submitted_at: datetime
     approval_comments: str | None = None
+    documents: list[CandidateInvoiceDocumentRead] = Field(default_factory=list)
     payments: list[CandidatePaymentRead] = Field(default_factory=list)
     paid_total: Decimal
     balance_due: Decimal

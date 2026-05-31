@@ -55,6 +55,28 @@ const CANDIDATE_INVOICE_TYPE_LABELS: Record<string, string> = {
   reimbursement: 'Reimbursement',
   auto_reimbursement: 'Auto-reimbursement',
 };
+const INTERNAL_PROJECT_PRESETS: Record<string, {
+  label: string;
+  client_company_name: string;
+  client_contact_name: string;
+  client_contact_email: string;
+  sow_title: string;
+}> = {
+  flexgcc_sales_support: {
+    label: 'FlexGCC sales support',
+    client_company_name: 'FlexGCC',
+    client_contact_name: 'FlexGCC Sales Support',
+    client_contact_email: 'finance@flexGCC.com',
+    sow_title: 'FlexGCC sales support',
+  },
+  magicbox_india_partner: {
+    label: 'Magic Box / Mbox India partner',
+    client_company_name: 'Mbox Contract Solutions Pvt. Ltd.',
+    client_contact_name: 'Magic Box India Partner',
+    client_contact_email: 'finance@flexGCC.com',
+    sow_title: 'Magic Box India partner expenses',
+  },
+};
 
 type Project = {
   id: number;
@@ -470,6 +492,7 @@ function App() {
   const [scheduleBackfill, setScheduleBackfill] = useState(false);
   const [needBillingType, setNeedBillingType] = useState('periodic');
   const [internalRecruitmentProject, setInternalRecruitmentProject] = useState(false);
+  const [internalProjectType, setInternalProjectType] = useState('flexgcc_sales_support');
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [candidateScheduleFrequency, setCandidateScheduleFrequency] = useState('monthly');
   const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment'>(requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : 'workflow');
@@ -520,8 +543,9 @@ function App() {
     () => (selectedHiredCandidate ? latestContract(selectedHiredCandidate) : undefined),
     [selectedHiredCandidate],
   );
-  const flexGccSalesSupportProjects = useMemo(
-    () => projects.filter((project) => project.client_company_name.toLowerCase() === 'flexgcc' && project.title.toLowerCase() === 'flexgcc sales support'),
+  const internalProjectPreset = INTERNAL_PROJECT_PRESETS[internalProjectType] ?? INTERNAL_PROJECT_PRESETS.flexgcc_sales_support;
+  const internalProjects = useMemo(
+    () => projects.filter((project) => project.msa_reference === null),
     [projects],
   );
   const selectedInterview = useMemo(
@@ -742,11 +766,12 @@ function App() {
     const formElement = event.currentTarget;
     const payload = new FormData(formElement);
     if (internalRecruitmentProject) {
+      const preset = INTERNAL_PROJECT_PRESETS[internalProjectType] ?? INTERNAL_PROJECT_PRESETS.flexgcc_sales_support;
       payload.set('internal_recruitment_project', 'true');
-      payload.set('client_company_name', 'FlexGCC');
-      payload.set('client_contact_name', 'FlexGCC Sales Support');
-      payload.set('client_contact_email', 'finance@flexGCC.com');
-      payload.set('sow_title', 'FlexGCC sales support');
+      payload.set('client_company_name', preset.client_company_name);
+      payload.set('client_contact_name', preset.client_contact_name);
+      payload.set('client_contact_email', preset.client_contact_email);
+      payload.set('sow_title', preset.sow_title);
       payload.set('sow_amount', '0');
       payload.delete('client_account_executive_id');
       payload.delete('msa_reference');
@@ -1346,13 +1371,13 @@ function App() {
           </form>
 
           <section className="panel wide">
-            <PanelTitle icon={<UserCheck size={18} />} title="FlexGCC Sales Support Client Account Executive" />
-            {flexGccSalesSupportProjects.length > 0 ? (
+            <PanelTitle icon={<UserCheck size={18} />} title="Internal Project Client Account Executive" />
+            {internalProjects.length > 0 ? (
               <div className="userList">
-                {flexGccSalesSupportProjects.map((project) => (
+                {internalProjects.map((project) => (
                   <form className="userRow" key={project.id} onSubmit={(event) => void submitInternalProjectClientAccountExecutive(event, project)}>
                     <div>
-                      <strong>{project.project_code} · {project.title}</strong>
+                      <strong>{project.project_code} · {project.client_company_name} · {project.title}</strong>
                       <span>Current: {project.client_account_executive_name ?? 'Not assigned'}</span>
                     </div>
                     <div className="horizontalActions">
@@ -1371,7 +1396,7 @@ function App() {
                 ))}
               </div>
             ) : (
-              <p className="empty">No FlexGCC sales support project exists yet.</p>
+              <p className="empty">No internal no-MSA project exists yet.</p>
             )}
           </section>
 
@@ -2185,7 +2210,7 @@ function App() {
       {activeView === 'workflow' && canViewWorkflow && (
         <section className="workspace">
           {canOperate && (
-            <form className="panel wide" key={internalRecruitmentProject ? 'internal-project' : 'client-project'} onSubmit={(event) => void submitProject(event)}>
+            <form className="panel wide" key={internalRecruitmentProject ? `internal-project-${internalProjectType}` : 'client-project'} onSubmit={(event) => void submitProject(event)}>
               <PanelTitle icon={<FilePlus2 size={18} />} title="Project And Initial SOW Entry" />
               <label className="checkField">
                 <input
@@ -2193,21 +2218,31 @@ function App() {
                   onChange={(event) => setInternalRecruitmentProject(event.target.checked)}
                   type="checkbox"
                 />
-                <span>Internal FlexGCC sales support recruitment - no MSA or SOW</span>
+                <span>Internal recruitment/expense project - no MSA or SOW</span>
               </label>
               {internalRecruitmentProject && (
-                <p className="contextLine">
-                  Creates an internal project named FlexGCC sales support. After creation, use Recruitment to add historical completed positions and hired candidates.
-                </p>
+                <>
+                  <label className="field">
+                    <span>Internal project</span>
+                    <select value={internalProjectType} onChange={(event) => setInternalProjectType(event.target.value)}>
+                      {Object.entries(INTERNAL_PROJECT_PRESETS).map(([value, preset]) => (
+                        <option key={value} value={value}>{preset.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="contextLine">
+                    Creates an internal project named {internalProjectPreset.sow_title}. After creation, use Recruitment to add historical completed positions and hired candidates.
+                  </p>
+                </>
               )}
               <div className="grid two">
-                <Field label="Client company" name="client_company_name" defaultValue={internalRecruitmentProject ? 'FlexGCC' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="Client company" name="client_company_name" defaultValue={internalRecruitmentProject ? internalProjectPreset.client_company_name : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <label className="field">
                   <span>Client billing address</span>
                   <textarea name="client_billing_address" rows={3} disabled={internalRecruitmentProject} />
                 </label>
-                <Field label="Client contact name" name="client_contact_name" defaultValue={internalRecruitmentProject ? 'FlexGCC Sales Support' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
-                <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={internalRecruitmentProject ? 'finance@flexGCC.com' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="Client contact name" name="client_contact_name" defaultValue={internalRecruitmentProject ? internalProjectPreset.client_contact_name : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="Client contact email" name="client_contact_email" type="email" defaultValue={internalRecruitmentProject ? internalProjectPreset.client_contact_email : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <Field label="Client contact phone" name="client_contact_phone" disabled={internalRecruitmentProject} />
                 <label className="field">
                   <span>Client Account Executive</span>
@@ -2220,7 +2255,7 @@ function App() {
                 </label>
                 <Field label="MSA reference" name="msa_reference" disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <Field label="MSA upload" name="msa_document" type="file" disabled={internalRecruitmentProject} />
-                <Field label="SOW title" name="sow_title" defaultValue={internalRecruitmentProject ? 'FlexGCC sales support' : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
+                <Field label="SOW title" name="sow_title" defaultValue={internalRecruitmentProject ? internalProjectPreset.sow_title : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <Field label="SOW upload" name="sow_document" type="file" disabled={internalRecruitmentProject} />
                 <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue={internalRecruitmentProject ? '0' : '12000'} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <Field label="Currency" name="currency" defaultValue="USD" required />

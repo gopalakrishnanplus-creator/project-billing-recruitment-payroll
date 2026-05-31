@@ -1071,6 +1071,33 @@ def test_internal_flexgcc_sales_support_historical_hires_without_msa_or_sow():
         assert assigned_project["client_account_executive_id"] == cae_user["id"]
         assert assigned_project["client_account_executive_email"] == "internal-cae@example.com"
 
+        magicbox_response = client.post(
+            "/projects",
+            headers=OPS_HEADERS,
+            json={
+                "internal_recruitment_project": True,
+                "client_company_name": "Mbox Contract Solutions Pvt. Ltd.",
+                "client_contact_name": "Magic Box India Partner",
+                "client_contact_email": "finance@flexGCC.com",
+                "sow_title": "Magic Box India partner expenses",
+                "sow_amount": "0",
+                "start_date": str(date.today()),
+                "operations_manager_name": "Ops Manager",
+            },
+        )
+        assert magicbox_response.status_code == 201, magicbox_response.text
+        magicbox_project = magicbox_response.json()
+        assert magicbox_project["client_company_name"] == "Mbox Contract Solutions Pvt. Ltd."
+        assert magicbox_project["title"] == "Magic Box India partner expenses"
+        assert magicbox_project["msa_reference"] is None
+        magicbox_assign_response = client.put(
+            f"/projects/{magicbox_project['id']}/client-account-executive",
+            headers=ADMIN_HEADERS,
+            json={"client_account_executive_id": cae_user["id"]},
+        )
+        assert magicbox_assign_response.status_code == 200, magicbox_assign_response.text
+        assert magicbox_assign_response.json()["client_account_executive_email"] == "internal-cae@example.com"
+
         need_response = client.post(
             f"/projects/{project['id']}/recruitment-needs",
             headers=OPS_HEADERS,

@@ -2348,9 +2348,8 @@ def assign_internal_project_client_account_executive(
     db: Session = Depends(get_db),
 ) -> ProjectRead:
     project = load_project_for_read(project_id, db)
-    is_flexgcc_sales_support = project.company.name.strip().lower() == "flexgcc" and project.title.strip().lower() == "flexgcc sales support"
-    if not is_flexgcc_sales_support:
-        raise HTTPException(status_code=400, detail="System Admin can assign Client Account Executive here only for FlexGCC sales support")
+    if project.msa_id is not None:
+        raise HTTPException(status_code=400, detail="System Admin can assign Client Account Executive here only for internal no-MSA projects")
     validate_client_account_executive(db, payload.client_account_executive_id)
     project.client_account_executive_id = payload.client_account_executive_id
     log_event(db, project_id=project.id, actor_name=context.user.full_name, action="internal_project_client_account_executive_assigned", details=project.project_code)

@@ -55,6 +55,7 @@ const CANDIDATE_INVOICE_TYPE_LABELS: Record<string, string> = {
   reimbursement: 'Reimbursement',
   auto_reimbursement: 'Auto-reimbursement',
 };
+const LIST_PAGE_SIZE = 20;
 const INTERNAL_PROJECT_PRESETS: Record<string, {
   label: string;
   client_company_name: string;
@@ -460,6 +461,11 @@ function candidateInvoiceTypeLabel(value: string | undefined | null): string {
   return CANDIDATE_INVOICE_TYPE_LABELS[value ?? 'invoice'] ?? (value ?? 'invoice').replaceAll('_', ' ');
 }
 
+function pagedItems<T>(items: T[], page: number): T[] {
+  const start = (Math.max(1, page) - 1) * LIST_PAGE_SIZE;
+  return items.slice(start, start + LIST_PAGE_SIZE);
+}
+
 function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const approvalInvoiceId = urlParams.get('approval_invoice_id');
@@ -502,10 +508,16 @@ function App() {
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [candidateScheduleFrequency, setCandidateScheduleFrequency] = useState('monthly');
   const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment'>(requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : 'workflow');
+  const [activeForm, setActiveForm] = useState<string | null>(null);
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState('');
   const [invoiceDateTo, setInvoiceDateTo] = useState('');
   const [invoicePage, setInvoicePage] = useState(1);
+  const [projectPage, setProjectPage] = useState(1);
+  const [recruitmentPage, setRecruitmentPage] = useState(1);
+  const [candidatePage, setCandidatePage] = useState(1);
+  const [hiredCandidatePage, setHiredCandidatePage] = useState(1);
+  const [candidateInvoicePage, setCandidateInvoicePage] = useState(1);
   const [notice, setNotice] = useState<Notice>(null);
   const [loading, setLoading] = useState(false);
 
@@ -558,6 +570,11 @@ function App() {
     () => interviews.find((interview) => interview.id === selectedInterviewId) ?? interviews[0],
     [interviews, selectedInterviewId],
   );
+  const projectRows = useMemo(() => pagedItems(projects, projectPage), [projects, projectPage]);
+  const recruitmentNeedRows = useMemo(() => pagedItems(recruitmentNeeds, recruitmentPage), [recruitmentNeeds, recruitmentPage]);
+  const candidateRowsForNeed = useMemo(() => pagedItems(candidatesForNeed, candidatePage), [candidatesForNeed, candidatePage]);
+  const hiredCandidateRows = useMemo(() => pagedItems(hiredCandidates, hiredCandidatePage), [hiredCandidates, hiredCandidatePage]);
+  const candidateInvoiceRows = useMemo(() => pagedItems(candidateInvoices, candidateInvoicePage), [candidateInvoices, candidateInvoicePage]);
 
   const activeRole = me?.active_role;
   const canAdmin = activeRole === 'system_admin';
@@ -736,6 +753,10 @@ function App() {
   useEffect(() => {
     setEditingProject(false);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    setActiveForm(null);
+  }, [activeView]);
 
   useEffect(() => {
     setContractInvoiceFrequency(selectedCandidateContract?.invoice_frequency ?? 'monthly');
@@ -1377,7 +1398,7 @@ function App() {
 
       {canAdmin && activeView === 'workflow' && (
         <section className="workspace adminWorkspace">
-          <form className="panel" onSubmit={(event) => void submitUser(event)}>
+          {activeForm === 'add-user' && <form className="panel" onSubmit={(event) => void submitUser(event)}>
             <PanelTitle icon={<UserCog size={18} />} title="App Users" />
             <Field label="Full name" name="full_name" required />
             <Field label="Google email" name="email" type="email" required />
@@ -1397,7 +1418,8 @@ function App() {
               <BadgeCheck size={18} />
               <span>Save User</span>
             </button>
-          </form>
+            <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+          </form>}
 
           <section className="panel wide">
             <PanelTitle icon={<UserCheck size={18} />} title="Internal Project Client Account Executive" />
@@ -1463,6 +1485,12 @@ function App() {
 
           <section className="panel wide">
             <PanelTitle icon={<ShieldCheck size={18} />} title="Provisioned Users" />
+            <div className="horizontalActions">
+              <button className="primary" type="button" onClick={() => setActiveForm('add-user')}>
+                <UserCog size={18} />
+                <span>Add User</span>
+              </button>
+            </div>
             <div className="userList">
               {users.map((user) => (
                 <div className="userRow" key={user.id}>
@@ -1491,8 +1519,40 @@ function App() {
 
       {activeView === 'recruitment' && canRecruitment && (
         <section className="workspace recruitmentWorkspace">
+          {(canOperate || canHrManage || canInterview) && (
+            <section className="panel wide">
+              <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Actions" />
+              <div className="horizontalActions">
+                {canOperate && (
+                  <button className="primary" type="button" onClick={() => setActiveForm('add-position')}>
+                    <FilePlus2 size={18} />
+                    <span>Add Position</span>
+                  </button>
+                )}
+                {(canHrManage || canOperate) && selectedNeed && (
+                  <>
+                    <button className="secondary" type="button" onClick={() => setActiveForm('historical-hire')}>Add Historical Hire</button>
+                    <button className="secondary" type="button" onClick={() => setActiveForm('add-candidate')}>Add Candidate</button>
+                  </>
+                )}
+                {canHrManage && selectedNeed && (
+                  <button className="secondary" type="button" onClick={() => setActiveForm('assets')}>Upload JD/Ad</button>
+                )}
+                {canHrManage && selectedCandidate && (
+                  <>
+                    <button className="secondary" type="button" onClick={() => setActiveForm('assign-interview')}>Assign Interview</button>
+                    <button className="secondary" type="button" onClick={() => setActiveForm('candidate-terms')}>Edit/Mark Hired</button>
+                  </>
+                )}
+                {canInterview && selectedInterview && (
+                  <button className="secondary" type="button" onClick={() => setActiveForm('scorecard')}>Upload Scorecard</button>
+                )}
+              </div>
+            </section>
+          )}
+
           {canOperate && (
-            <form className="panel wide" onSubmit={(event) => void submitNeed(event)}>
+            activeForm === 'add-position' && <form className="panel wide" onSubmit={(event) => void submitNeed(event)}>
               <PanelTitle icon={<FilePlus2 size={18} />} title="Add Recruitment Position" />
               <label className="field">
                 <span>SOW</span>
@@ -1552,21 +1612,40 @@ function App() {
                 <BadgeCheck size={18} />
                 <span>Add Position</span>
               </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
             </form>
           )}
 
           <section className="panel wide">
             <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Positions" />
-            <label className="field">
-              <span>Position</span>
-              <select value={selectedNeed?.id ?? ''} onChange={(event) => setSelectedNeedId(Number(event.target.value))}>
-                {recruitmentNeeds.map((need) => (
-                  <option key={need.id} value={need.id}>
-                    {need.project_code} · {need.position_title} · {need.status}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {recruitmentNeeds.length > 0 && (
+              <>
+                <div className="lineList">
+                  {recruitmentNeedRows.map((need) => (
+                    <div className={`lineRow ${selectedNeed?.id === need.id ? 'selectedLine' : ''}`} key={need.id}>
+                      <div>
+                        <strong>{need.project_code} · {need.position_title}</strong>
+                        <span>{need.client_company_name} · {need.project_title} · {need.number_of_positions} opening(s)</span>
+                      </div>
+                      <div className="horizontalActions">
+                        <span className="status">{need.status}</span>
+                        <button className="secondary" type="button" onClick={() => setSelectedNeedId(need.id)}>View</button>
+                        {canOperate && (
+                          <button className="secondary" type="button" onClick={() => { setSelectedNeedId(need.id); setActiveForm('edit-position'); }}>
+                            <Pencil size={16} />
+                            <span>Edit</span>
+                          </button>
+                        )}
+                        {(canHrManage || canOperate) && (
+                          <button className="secondary" type="button" onClick={() => { setSelectedNeedId(need.id); setActiveForm('historical-hire'); }}>Historical Hire</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <Pager page={recruitmentPage} total={recruitmentNeeds.length} onPageChange={setRecruitmentPage} />
+              </>
+            )}
             {selectedNeed ? (
               <>
                 <dl className="facts">
@@ -1591,7 +1670,7 @@ function App() {
             )}
           </section>
 
-          {canOperate && selectedNeed && (
+          {canOperate && selectedNeed && activeForm === 'edit-position' && (
             <form className="panel wide" key={selectedNeed.id} onSubmit={(event) => void submitNeedUpdate(event)}>
               <PanelTitle icon={<Pencil size={18} />} title="Edit Selected Position" />
               <div className="grid four">
@@ -1650,6 +1729,9 @@ function App() {
                 <button className="secondary danger" type="button" disabled={loading} onClick={() => void deleteSelectedNeed()}>
                   <span>Delete Position</span>
                 </button>
+                <button className="secondary" type="button" disabled={loading} onClick={() => setActiveForm(null)}>
+                  <span>Close</span>
+                </button>
               </div>
             </form>
           )}
@@ -1678,7 +1760,7 @@ function App() {
             </section>
           )}
 
-          {(canHrManage || canOperate) && selectedNeed && (
+          {(canHrManage || canOperate) && selectedNeed && activeForm === 'historical-hire' && (
             <form className="panel" onSubmit={(event) => void submitHistoricalHire(event)}>
               <PanelTitle icon={<BadgeCheck size={18} />} title="Historical Hired Candidate" />
               <p className="contextLine">{selectedNeed.project_code} · {selectedNeed.position_title}</p>
@@ -1734,12 +1816,13 @@ function App() {
                 <FileCheck2 size={18} />
                 <span>Save Historical Hire</span>
               </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
             </form>
           )}
 
           {canHrManage && (
             <>
-              <form className="panel" onSubmit={(event) => void submitRecruitmentAssets(event)}>
+              {activeForm === 'assets' && <form className="panel" onSubmit={(event) => void submitRecruitmentAssets(event)}>
                 <PanelTitle icon={<Upload size={18} />} title="JD And Job Ad" />
                 <p className="contextLine">{selectedNeed ? `${selectedNeed.project_code} · ${selectedNeed.position_title}` : 'Select a position first'}</p>
                 <Field label="JD upload" name="jd_document" type="file" />
@@ -1749,9 +1832,10 @@ function App() {
                   <FileText size={18} />
                   <span>Save Assets</span>
                 </button>
-              </form>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
 
-              <form className="panel" onSubmit={(event) => void submitCandidate(event)}>
+              {activeForm === 'add-candidate' && <form className="panel" onSubmit={(event) => void submitCandidate(event)}>
                 <PanelTitle icon={<Users size={18} />} title="Evaluation Shortlist" />
                 <p className="contextLine">{selectedNeed ? selectedNeed.position_title : 'Select a position first'}</p>
                 <Field label="Candidate name" name="full_name" required />
@@ -1766,18 +1850,32 @@ function App() {
                   <UserCheck size={18} />
                   <span>Add Candidate</span>
                 </button>
-              </form>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
 
               <section className="panel wide">
                 <PanelTitle icon={<Users size={18} />} title="Candidate Status" />
-                <label className="field">
-                  <span>Candidate</span>
-                  <select value={selectedCandidate?.id ?? ''} onChange={(event) => setSelectedCandidateId(Number(event.target.value))}>
-                    {candidatesForNeed.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>{candidate.full_name} · {candidate.status}</option>
-                    ))}
-                  </select>
-                </label>
+                {candidatesForNeed.length > 0 && (
+                  <>
+                    <div className="lineList">
+                      {candidateRowsForNeed.map((candidate) => (
+                        <div className={`lineRow ${selectedCandidate?.id === candidate.id ? 'selectedLine' : ''}`} key={candidate.id}>
+                          <div>
+                            <strong>{candidate.full_name}</strong>
+                            <span>{candidate.email} · {candidate.position_title ?? 'No position'}</span>
+                          </div>
+                          <div className="horizontalActions">
+                            <span className="status">{candidate.status}</span>
+                            <button className="secondary" type="button" onClick={() => setSelectedCandidateId(candidate.id)}>View</button>
+                            <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('assign-interview'); }}>Interview</button>
+                            <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('candidate-terms'); }}>Terms</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <Pager page={candidatePage} total={candidatesForNeed.length} onPageChange={setCandidatePage} />
+                  </>
+                )}
                 {selectedCandidate ? (
                   <>
                     <dl className="facts">
@@ -1798,7 +1896,7 @@ function App() {
                 )}
               </section>
 
-              <form className="panel" onSubmit={(event) => void submitInterview(event)}>
+              {activeForm === 'assign-interview' && <form className="panel" onSubmit={(event) => void submitInterview(event)}>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Interview Assignment" />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
                 <Field label="First interview - interviewer email" name="interviewer_email_1" type="email" list="internal-interviewer-emails" required />
@@ -1813,29 +1911,22 @@ function App() {
                   <CalendarPlus size={18} />
                   <span>Assign Interview</span>
                 </button>
-              </form>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
 
               <section className="panel wide">
                 <PanelTitle icon={<BadgeCheck size={18} />} title="Hired Candidates" />
                 {hiredCandidates.length > 0 ? (
-                  <div className="grid two">
-                    {hiredCandidates.map((candidate) => {
+                  <>
+                  <div className="lineList">
+                    {hiredCandidateRows.map((candidate) => {
                       const contract = latestContract(candidate);
                       return (
-                        <div className="candidateBlock" key={candidate.id}>
-                          <h2>{candidate.full_name}</h2>
-                          <dl className="facts">
-                            <div><dt>Email</dt><dd>{candidate.email}</dd></div>
-                            <div><dt>Phone</dt><dd>{candidate.phone ?? 'Not set'}</dd></div>
-                            <div><dt>Client</dt><dd>{candidate.client_company_name}</dd></div>
-                            <div><dt>SOW</dt><dd>{candidate.project_code} · {candidate.project_title}</dd></div>
-                            <div><dt>Position</dt><dd>{candidate.position_title ?? 'Not set'}</dd></div>
-                            <div><dt>Hire type</dt><dd>{contractingEntityLabel(contract?.contracting_entity)}</dd></div>
-                            <div><dt>Invoice to</dt><dd>{contract?.billing_entity_address ? `${contract.billing_entity_name}, ${contract.billing_entity_address}` : contract?.billing_entity_name ?? 'FlexGCC'}</dd></div>
-                            <div><dt>Invoice</dt><dd>{contractInvoiceSummary(contract)}</dd></div>
-                            <div><dt>Invoice dates</dt><dd>{contractInvoiceDates(contract)}</dd></div>
-                            <div><dt>Contract</dt><dd>{contract?.contract_document_name ?? 'Not uploaded'}</dd></div>
-                          </dl>
+                        <div className={`lineRow ${selectedCandidate?.id === candidate.id ? 'selectedLine' : ''}`} key={candidate.id}>
+                          <div>
+                            <strong>{candidate.full_name}</strong>
+                            <span>{candidate.email} · {candidate.project_code} · {candidate.project_title}</span>
+                            <span>{candidate.position_title ?? 'No position'} · {contractingEntityLabel(contract?.contracting_entity)} · {contractInvoiceSummary(contract)}</span>
                           {contract && contract.invoice_schedules.length > 0 && (
                             <CandidateInvoiceScheduleList
                               schedules={contract.invoice_schedules}
@@ -1845,26 +1936,35 @@ function App() {
                               onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
                             />
                           )}
+                          </div>
+                          <div className="horizontalActions">
                           {contract?.contract_document_id && (
                             <button className="secondary" type="button" onClick={() => downloadDocument(contract.contract_document_id)}>
                               <Download size={18} />
                               <span>Download Contract</span>
                             </button>
                           )}
-                          <button className="primary" type="button" onClick={() => editCandidateInvoiceTerms(candidate)}>
+                          <button className="secondary" type="button" onClick={() => { editCandidateInvoiceTerms(candidate); setActiveForm('candidate-terms'); }}>
                             <Pencil size={18} />
-                            <span>Edit Invoice Terms</span>
+                            <span>Terms</span>
                           </button>
+                          <button className="secondary" type="button" onClick={() => { editCandidateInvoiceTerms(candidate); setActiveForm('additional-invoice-item'); }}>
+                            <Banknote size={18} />
+                            <span>Add Item</span>
+                          </button>
+                          </div>
                         </div>
                       );
                     })}
                   </div>
+                  <Pager page={hiredCandidatePage} total={hiredCandidates.length} onPageChange={setHiredCandidatePage} />
+                  </>
                 ) : (
                   <p className="empty">No hired candidates yet.</p>
                 )}
               </section>
 
-              <form className="panel" key={`${selectedCandidate?.id ?? 'none'}-${selectedCandidateContract?.id ?? 'new'}`} onSubmit={(event) => void submitContract(event)}>
+              {activeForm === 'candidate-terms' && <form className="panel" key={`${selectedCandidate?.id ?? 'none'}-${selectedCandidateContract?.id ?? 'new'}`} onSubmit={(event) => void submitContract(event)}>
                 <PanelTitle icon={<FileCheck2 size={18} />} title={selectedCandidateContract ? 'Edit Candidate Invoice Terms' : 'Signed Contract And Invoice Terms'} />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
                 <Field label="Signed contract upload" name="signed_contract" type="file" />
@@ -1922,8 +2022,9 @@ function App() {
                   <BadgeCheck size={18} />
                   <span>{selectedCandidateContract ? 'Update Terms' : 'Mark Hired'}</span>
                 </button>
-              </form>
-              {selectedCandidateContract && selectedCandidate?.status === 'hired' && (
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
+              {selectedCandidateContract && selectedCandidate?.status === 'hired' && activeForm === 'additional-invoice-item' && (
                 <section className="panel">
                   <PanelTitle icon={<Banknote size={18} />} title="Add Additional Invoice Item" />
                   <p className="contextLine">{selectedCandidate.full_name}</p>
@@ -1941,6 +2042,7 @@ function App() {
                     onFrequencyChange={setCandidateScheduleFrequency}
                     onSubmit={(event) => void submitCandidateInvoiceSchedule(event, selectedCandidateContract)}
                   />
+                  <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
                 </section>
               )}
             </>
@@ -1964,22 +2066,39 @@ function App() {
                     <div><dt>Project</dt><dd>{selectedHiredCandidate?.project_code} · {selectedHiredCandidate?.project_title}</dd></div>
                     <div><dt>Invoice to</dt><dd>{selectedHiredCandidateContract.billing_entity_address ? `${selectedHiredCandidateContract.billing_entity_name}, ${selectedHiredCandidateContract.billing_entity_address}` : selectedHiredCandidateContract.billing_entity_name}</dd></div>
                   </dl>
-                  <CandidateInvoiceScheduleList
-                    schedules={selectedHiredCandidateContract.invoice_schedules}
+	                  <CandidateInvoiceScheduleList
+	                    schedules={selectedHiredCandidateContract.invoice_schedules}
                     emptyMessage="No additional invoice items yet."
                     canDelete={canManageCandidateInvoiceItems}
                     loading={loading}
-                    onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
-                  />
-                  <CandidateInvoiceItemForm
-                    defaultCurrency={selectedHiredCandidateContract.currency ?? 'USD'}
-                    frequency={candidateScheduleFrequency}
-                    loading={loading}
-                    onFrequencyChange={setCandidateScheduleFrequency}
-                    onSubmit={(event) => void submitCandidateInvoiceSchedule(event)}
-                  />
-                  {canOperate && (
-                    <form className="grid four" onSubmit={(event) => void submitHistoricalCandidateInvoice(event)}>
+	                    onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
+	                  />
+                  <div className="horizontalActions">
+                    <button className="secondary" type="button" onClick={() => setActiveForm('candidate-invoice-item')}>
+                      <Banknote size={18} />
+                      <span>Add Invoice Item</span>
+                    </button>
+                    {canOperate && (
+                      <button className="secondary" type="button" onClick={() => setActiveForm('historical-candidate-invoice')}>
+                        <Upload size={18} />
+                        <span>Upload Past Invoice</span>
+                      </button>
+                    )}
+                  </div>
+	                  {activeForm === 'candidate-invoice-item' && (
+                    <>
+		                  <CandidateInvoiceItemForm
+		                    defaultCurrency={selectedHiredCandidateContract.currency ?? 'USD'}
+	                    frequency={candidateScheduleFrequency}
+	                    loading={loading}
+		                    onFrequencyChange={setCandidateScheduleFrequency}
+		                    onSubmit={(event) => void submitCandidateInvoiceSchedule(event)}
+		                  />
+	                    <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+                    </>
+	                  )}
+	                  {canOperate && activeForm === 'historical-candidate-invoice' && (
+	                    <form className="grid four" onSubmit={(event) => void submitHistoricalCandidateInvoice(event)}>
                       <Field label="Past invoice description" name="item_description" required />
                       <label className="field">
                         <span>Invoice type</span>
@@ -1993,12 +2112,13 @@ function App() {
                       <Field label="Currency" name="currency" defaultValue={selectedHiredCandidateContract.currency ?? 'USD'} required />
                       <Field label="Past invoice date" name="invoice_due_date" type="date" defaultValue={yesterday()} required />
                       <Field label="Invoice and supporting files" name="invoice_documents" type="file" multiple required />
-                      <button className="primary" disabled={loading}>
-                        <Upload size={18} />
-                        <span>Upload Past Invoice</span>
-                      </button>
-                    </form>
-                  )}
+	                      <button className="primary" disabled={loading}>
+	                        <Upload size={18} />
+	                        <span>Upload Past Invoice</span>
+	                      </button>
+                      <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+	                    </form>
+	                  )}
                 </>
               ) : (
                 <p className="empty">Select a hired candidate with a signed contract to add invoice items.</p>
@@ -2046,7 +2166,7 @@ function App() {
             </section>
           )}
 
-          {canInterview && (
+          {canInterview && activeForm === 'scorecard' && (
             <form className="panel" onSubmit={(event) => void submitScorecard(event)}>
               <PanelTitle icon={<Upload size={18} />} title="Upload Evaluation Checklist" />
               <p className="contextLine">{selectedInterview ? `Interview ${selectedInterview.id}` : 'Select an interview first'}</p>
@@ -2069,6 +2189,7 @@ function App() {
                 <FileCheck2 size={18} />
                 <span>Submit Evaluation</span>
               </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
             </form>
           )}
         </section>
@@ -2131,13 +2252,23 @@ function App() {
             ) : (
               <>
                 <PanelTitle icon={<FileCheck2 size={18} />} title="Invoice Register" />
-                <select value={selectedInvoice?.id ?? ''} onChange={(event) => setSelectedInvoiceId(Number(event.target.value))}>
-                  {invoices.map((invoice) => (
-                    <option key={invoice.id} value={invoice.id}>
-                      {invoice.issue_date} · {invoice.invoice_number} · {invoice.status}
-                    </option>
-                  ))}
-                </select>
+                {invoices.length > 0 && (
+                  <div className="lineList">
+                    {invoices.map((invoice) => (
+                      <div className={`lineRow ${selectedInvoice?.id === invoice.id ? 'selectedLine' : ''}`} key={invoice.id}>
+                        <div>
+                          <strong>{invoice.issue_date} · {invoice.invoice_number}</strong>
+                          <span>{invoice.client_company_name} · {invoice.project_code} · {invoice.item_description ?? 'No item description'}</span>
+                          <span>{invoice.currency} {invoice.amount} · paid {invoice.paid_total ?? '0.00'} · balance {invoice.balance_due ?? invoice.amount}</span>
+                        </div>
+                        <div className="horizontalActions">
+                          <span className="status">{invoice.status}</span>
+                          <button className="secondary" type="button" onClick={() => setSelectedInvoiceId(invoice.id)}>View</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <InvoiceDetail
                   selectedInvoice={selectedInvoice}
                   loading={loading}
@@ -2155,13 +2286,22 @@ function App() {
             <PanelTitle icon={<Banknote size={18} />} title="Candidate Invoices" />
             {candidateInvoices.length > 0 ? (
               <>
-                <select value={selectedCandidateInvoice?.id ?? ''} onChange={(event) => setSelectedCandidateInvoiceId(Number(event.target.value))}>
-                  {candidateInvoices.map((invoice) => (
-                    <option key={invoice.id} value={invoice.id}>
-                      {invoice.invoice_due_date ?? invoice.submitted_at.slice(0, 10)} · {invoice.candidate_name} · {invoice.status}
-                    </option>
+                <div className="lineList">
+                  {candidateInvoiceRows.map((invoice) => (
+                    <div className={`lineRow ${selectedCandidateInvoice?.id === invoice.id ? 'selectedLine' : ''}`} key={invoice.id}>
+                      <div>
+                        <strong>{invoice.invoice_due_date ?? invoice.submitted_at.slice(0, 10)} · {invoice.candidate_name}</strong>
+                        <span>{invoice.project_code} · {invoice.project_title} · {candidateInvoiceTypeLabel(invoice.invoice_type)}</span>
+                        <span>{invoice.currency} {invoice.amount} · paid {invoice.paid_total} · balance {invoice.balance_due}</span>
+                      </div>
+                      <div className="horizontalActions">
+                        <span className="status">{invoice.status}</span>
+                        <button className="secondary" type="button" onClick={() => setSelectedCandidateInvoiceId(invoice.id)}>View</button>
+                      </div>
+                    </div>
                   ))}
-                </select>
+                </div>
+                <Pager page={candidateInvoicePage} total={candidateInvoices.length} onPageChange={setCandidateInvoicePage} />
                 {selectedCandidateInvoice && (
                   <div className="invoiceGrid">
                     <dl className="facts">
@@ -2199,6 +2339,17 @@ function App() {
                         <Download size={18} />
                         <span>Download Invoice</span>
                       </button>
+                      {canFinance && (
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={() => setActiveForm('candidate-payment')}
+                          disabled={loading || !['approved', 'partially_paid', 'paid'].includes(selectedCandidateInvoice.status)}
+                        >
+                          <Banknote size={18} />
+                          <span>Record Payment</span>
+                        </button>
+                      )}
                       {canDeleteCandidateInvoices && (
                         <button
                           className="secondary danger"
@@ -2213,7 +2364,7 @@ function App() {
                     </div>
                   </div>
                 )}
-                {canFinance && selectedCandidateInvoice && (
+                {canFinance && selectedCandidateInvoice && activeForm === 'candidate-payment' && (
                   <form className="grid four" onSubmit={(event) => void candidateInvoicePaymentAction(event)}>
                     <Field label="Amount paid" name="amount_paid" type="number" step="0.01" required />
                     <Field label="Paid date" name="paid_date" type="date" defaultValue={today()} required />
@@ -2231,6 +2382,7 @@ function App() {
                       <Banknote size={18} />
                       <span>Record Payment</span>
                     </button>
+                    <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
                   </form>
                 )}
               </>
@@ -2244,7 +2396,31 @@ function App() {
       {activeView === 'workflow' && canViewWorkflow && (
         <section className="workspace">
           {canOperate && (
-            <form className="panel wide" key={internalRecruitmentProject ? `internal-project-${internalProjectType}` : 'client-project'} onSubmit={(event) => void submitProject(event)}>
+            <section className="panel wide">
+              <PanelTitle icon={<ClipboardList size={18} />} title="Project Actions" />
+              <div className="horizontalActions">
+                <button className="primary" type="button" onClick={() => setActiveForm('create-project')}>
+                  <FilePlus2 size={18} />
+                  <span>Add Project/SOW</span>
+                </button>
+                <button className="secondary" type="button" disabled={!selectedProject} onClick={() => setActiveForm('add-sow')}>
+                  <FilePlus2 size={18} />
+                  <span>Add SOW</span>
+                </button>
+                <button className="secondary" type="button" disabled={!selectedProject} onClick={() => setActiveForm('project-need')}>
+                  <ClipboardList size={18} />
+                  <span>Add Recruitment Need</span>
+                </button>
+                <button className="secondary" type="button" disabled={!selectedProject} onClick={() => setActiveForm('client-schedule')}>
+                  <CalendarPlus size={18} />
+                  <span>Add Client Invoice Schedule</span>
+                </button>
+              </div>
+            </section>
+          )}
+
+          {canOperate && (
+            activeForm === 'create-project' && <form className="panel wide" key={internalRecruitmentProject ? `internal-project-${internalProjectType}` : 'client-project'} onSubmit={(event) => void submitProject(event)}>
               <PanelTitle icon={<FilePlus2 size={18} />} title="Project And Initial SOW Entry" />
               <label className="checkField">
                 <input
@@ -2305,18 +2481,41 @@ function App() {
                 <FileCheck2 size={18} />
                 <span>Create Project</span>
               </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
             </form>
           )}
 
-          <section className="panel">
+          <section className="panel wide">
             <PanelTitle icon={<ClipboardList size={18} />} title="Project And SOW Register" />
-            <select value={selectedProject?.id ?? ''} onChange={(event) => setSelectedProjectId(Number(event.target.value))}>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.project_code} · {project.client_company_name} · {project.title}
-                </option>
-              ))}
-            </select>
+            {projects.length > 0 && !editingProject && (
+              <>
+                <div className="lineList">
+                  {projectRows.map((project) => (
+                    <div className={`lineRow ${selectedProject?.id === project.id ? 'selectedLine' : ''}`} key={project.id}>
+                      <div>
+                        <strong>{project.project_code} · {project.client_company_name}</strong>
+                        <span>{project.title} · {project.currency} {project.sow_amount} · {project.client_account_executive_name ?? 'No CAE'}</span>
+                      </div>
+                      <div className="horizontalActions">
+                        <button className="secondary" type="button" onClick={() => setSelectedProjectId(project.id)}>View</button>
+                        {canOperate && (
+                          <>
+                            <button className="secondary" type="button" onClick={() => { setSelectedProjectId(project.id); setEditingProject(true); setActiveForm(null); }}>
+                              <Pencil size={16} />
+                              <span>Edit</span>
+                            </button>
+                            <button className="secondary" type="button" onClick={() => { setSelectedProjectId(project.id); setActiveForm('add-sow'); }}>Add SOW</button>
+                            <button className="secondary" type="button" onClick={() => { setSelectedProjectId(project.id); setActiveForm('project-need'); }}>Need</button>
+                            <button className="secondary" type="button" onClick={() => { setSelectedProjectId(project.id); setActiveForm('client-schedule'); }}>Schedule</button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <Pager page={projectPage} total={projects.length} onPageChange={setProjectPage} />
+              </>
+            )}
             {selectedProject && editingProject ? (
               <form className="editStack" key={selectedProject.id} onSubmit={(event) => void submitProjectUpdate(event)}>
                 <PanelTitle icon={<Pencil size={18} />} title="Edit Project Details" />
@@ -2402,7 +2601,7 @@ function App() {
 
           {canOperate && (
             <>
-              <form className="panel" onSubmit={(event) => void submitAdditionalSow(event)}>
+              {activeForm === 'add-sow' && <form className="panel" onSubmit={(event) => void submitAdditionalSow(event)}>
                 <PanelTitle icon={<FilePlus2 size={18} />} title="Add SOW To Selected MSA" />
                 <p className="contextLine">{selectedProject ? `${selectedProject.client_company_name} · ${selectedProject.msa_reference}` : 'Select an existing SOW first'}</p>
                 <Field label="SOW title" name="sow_title" required />
@@ -2420,9 +2619,10 @@ function App() {
                   <FilePlus2 size={18} />
                   <span>Add SOW</span>
                 </button>
-              </form>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
 
-              <form className="panel" onSubmit={(event) => void submitNeed(event)}>
+              {activeForm === 'project-need' && <form className="panel" onSubmit={(event) => void submitNeed(event)}>
                 <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Need" />
                 <label className="field">
                   <span>SOW</span>
@@ -2473,9 +2673,10 @@ function App() {
                   <BadgeCheck size={18} />
                   <span>Add Need</span>
                 </button>
-              </form>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
 
-              <form className="panel" onSubmit={(event) => void submitSchedule(event)}>
+              {activeForm === 'client-schedule' && <form className="panel" onSubmit={(event) => void submitSchedule(event)}>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Client Invoice Schedule" />
                 <label className="field">
                   <span>SOW</span>
@@ -2512,7 +2713,8 @@ function App() {
                   <CalendarPlus size={18} />
                   <span>Add Schedule</span>
                 </button>
-              </form>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
             </>
           )}
 
@@ -2577,6 +2779,14 @@ function App() {
                         <span>Send</span>
                       </button>
                       <button
+                        className="secondary"
+                        disabled={loading || !['sent_to_client', 'partially_paid'].includes(selectedInvoice.status)}
+                        onClick={() => setActiveForm('client-payment')}
+                      >
+                        <Banknote size={18} />
+                        <span>Record Payment</span>
+                      </button>
+                      <button
                         className="secondary danger"
                         disabled={loading || ['paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedInvoice.status)}
                         onClick={() => {
@@ -2596,7 +2806,7 @@ function App() {
           </section>
           )}
 
-          {canFinance && (
+          {canFinance && activeForm === 'client-payment' && (
             <form
               className="panel"
               onSubmit={(event) => {
@@ -2620,6 +2830,7 @@ function App() {
                 <Banknote size={18} />
                 <span>Record Payment</span>
               </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
             </form>
           )}
         </section>
@@ -2915,6 +3126,26 @@ function PanelTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
     <div className="panelTitle">
       {icon}
       <h2>{title}</h2>
+    </div>
+  );
+}
+
+function Pager({
+  page,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (total <= LIST_PAGE_SIZE) return null;
+  const totalPages = Math.max(1, Math.ceil(total / LIST_PAGE_SIZE));
+  return (
+    <div className="listPager">
+      <button className="secondary" type="button" disabled={page <= 1} onClick={() => onPageChange(Math.max(1, page - 1))}>Previous</button>
+      <span className="status">Page {page} of {totalPages}</span>
+      <button className="secondary" type="button" disabled={page >= totalPages} onClick={() => onPageChange(Math.min(totalPages, page + 1))}>Next</button>
     </div>
   );
 }

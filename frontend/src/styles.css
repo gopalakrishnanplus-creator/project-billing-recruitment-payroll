@@ -464,6 +464,49 @@ dd {
   gap: 10px;
 }
 
+.lineList {
+  display: grid;
+  gap: 8px;
+}
+
+.lineRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid #e3e8ef;
+}
+
+.lineRow:last-child {
+  border-bottom: 0;
+}
+
+.lineRow strong,
+.lineRow span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.lineRow > div:first-child {
+  min-width: 0;
+}
+
+.selectedLine {
+  padding-inline: 10px;
+  border: 1px solid #9fd9b7;
+  border-radius: 8px;
+  background: #f0fbf5;
+}
+
+.listPager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .userRow {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(200px, max-content);
@@ -542,6 +585,7 @@ dd {
   }
 
   .roleGrid,
+  .lineRow,
   .userRow {
     grid-template-columns: 1fr;
   }

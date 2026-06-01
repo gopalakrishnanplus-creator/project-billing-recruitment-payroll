@@ -86,7 +86,9 @@ from .schemas import (
     HistoricalHireCreate,
     InvoiceDetailRead,
     InvoiceScheduleCreate,
+    InvoiceScheduleDetailRead,
     InvoiceScheduleRead,
+    InvoiceScheduleUpdate,
     PaymentCreate,
     PaymentRead,
     ProjectClientAccountExecutiveUpdate,
@@ -667,6 +669,29 @@ def serialize_upcoming_invoice(schedule: ClientInvoiceSchedule, next_invoice_dat
         frequency=schedule.frequency,
         next_invoice_date=next_invoice_date,
         final_invoice_date=schedule.final_invoice_date,
+    )
+
+
+def serialize_invoice_schedule_detail(schedule: ClientInvoiceSchedule) -> InvoiceScheduleDetailRead:
+    return InvoiceScheduleDetailRead(
+        id=schedule.id,
+        label=schedule.label,
+        item_description=schedule.item_description,
+        amount=schedule.amount,
+        currency=schedule.currency,
+        frequency=schedule.frequency,
+        first_invoice_date=schedule.first_invoice_date,
+        final_invoice_date=schedule.final_invoice_date,
+        historical_backfill=schedule.historical_backfill,
+        next_invoice_generation_date=schedule.next_invoice_generation_date,
+        status=schedule.status,
+        project_id=schedule.project_id,
+        project_code=schedule.project.project_code,
+        project_title=schedule.project.title,
+        client_company_name=schedule.project.company.name,
+        client_account_executive_name=schedule.project.client_account_executive.full_name if schedule.project.client_account_executive else None,
+        client_account_executive_email=schedule.project.client_account_executive.email if schedule.project.client_account_executive else None,
+        next_invoice_date=next_unraised_invoice_date(schedule) if schedule.status == "active" and schedule.project.status != "inactive" else None,
     )
 
 
@@ -2941,12 +2966,7 @@ def delete_candidate_invoice_schedule(
     return {"status": "deleted"}
 
 
-@app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)
-def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
-    project = db.get(ProjectSOW, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    ensure_project_active(project)
+def validate_client_invoice_schedule_payload(payload: InvoiceScheduleCreate | InvoiceScheduleUpdate) -> None:
     if payload.frequency == "single":
         payload.final_invoice_date = None
     if payload.final_invoice_date and payload.final_invoice_date < payload.first_invoice_date:
@@ -2962,6 +2982,15 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: Aut
         payload.next_invoice_generation_date = None
     if not payload.item_description:
         payload.item_description = payload.label
+
+
+@app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)
+def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
+    project = db.get(ProjectSOW, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_project_active(project)
+    validate_client_invoice_schedule_payload(payload)
     schedule = ClientInvoiceSchedule(project_id=project_id, **payload.model_dump())
     db.add(schedule)
     db.flush()
@@ -2970,6 +2999,105 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: Aut
     db.commit()
     db.refresh(schedule)
     return InvoiceScheduleRead.model_validate(schedule)
+
+
+@app.get("/invoice-schedules", response_model=list[InvoiceScheduleDetailRead])
+def list_invoice_schedules(
+    context: AuthContext = Depends(require_login),
+    status: str = Query(default="active", pattern="^(active|inactive)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[InvoiceScheduleDetailRead]:
+    if context.active_role not in {
+        UserRole.operations_manager.value,
+        UserRole.finance_manager.value,
+        UserRole.system_admin.value,
+        UserRole.client_account_executive.value,
+    }:
+        raise HTTPException(status_code=403, detail=f"Active role cannot view client invoice schedules: {context.active_role}")
+    query = (
+        select(ClientInvoiceSchedule)
+        .join(ProjectSOW, ProjectSOW.id == ClientInvoiceSchedule.project_id)
+        .where(ClientInvoiceSchedule.status == status, active_project_filter())
+        .order_by(ProjectSOW.project_code.asc(), ClientInvoiceSchedule.first_invoice_date.asc(), ClientInvoiceSchedule.id.asc())
+    )
+    if context.active_role == UserRole.client_account_executive.value:
+        query = query.where(ProjectSOW.client_account_executive_id == context.user.id)
+    schedules = db.scalars(
+        query.options(
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoiceSchedule.invoices),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return [serialize_invoice_schedule_detail(schedule) for schedule in schedules]
+
+
+@app.put("/invoice-schedules/{schedule_id}", response_model=InvoiceScheduleDetailRead)
+def update_invoice_schedule(
+    schedule_id: int,
+    payload: InvoiceScheduleUpdate,
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.system_admin.value)),
+    db: Session = Depends(get_db),
+) -> InvoiceScheduleDetailRead:
+    schedule = db.scalar(
+        select(ClientInvoiceSchedule)
+        .where(ClientInvoiceSchedule.id == schedule_id)
+        .options(
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoiceSchedule.invoices),
+        )
+    )
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Invoice schedule not found")
+    ensure_project_active(schedule.project)
+    validate_client_invoice_schedule_payload(payload)
+    schedule.label = payload.label.strip()
+    schedule.item_description = payload.item_description.strip() if payload.item_description else payload.label.strip()
+    schedule.amount = payload.amount
+    schedule.currency = payload.currency.upper()
+    schedule.frequency = payload.frequency
+    schedule.first_invoice_date = payload.first_invoice_date
+    schedule.final_invoice_date = payload.final_invoice_date
+    schedule.historical_backfill = payload.historical_backfill
+    schedule.next_invoice_generation_date = payload.next_invoice_generation_date
+    schedule.status = payload.status
+    db.flush()
+    log_event(db, project_id=schedule.project_id, actor_name=context.user.full_name, action="invoice_schedule_updated", details=schedule.label)
+    if schedule.status == "active":
+        create_due_invoices(db, date.today())
+    db.commit()
+    db.refresh(schedule)
+    return serialize_invoice_schedule_detail(schedule)
+
+
+@app.post("/invoice-schedules/{schedule_id}/inactivate", response_model=InvoiceScheduleDetailRead)
+def inactivate_invoice_schedule(
+    schedule_id: int,
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.system_admin.value)),
+    db: Session = Depends(get_db),
+) -> InvoiceScheduleDetailRead:
+    schedule = db.scalar(
+        select(ClientInvoiceSchedule)
+        .where(ClientInvoiceSchedule.id == schedule_id)
+        .options(
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoiceSchedule.invoices),
+        )
+    )
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Invoice schedule not found")
+    ensure_project_active(schedule.project)
+    schedule.status = "inactive"
+    log_event(db, project_id=schedule.project_id, actor_name=context.user.full_name, action="invoice_schedule_inactivated", details=schedule.label)
+    db.commit()
+    db.refresh(schedule)
+    return serialize_invoice_schedule_detail(schedule)
 
 
 @app.post("/invoices/generate", response_model=GenerateInvoicesResult)

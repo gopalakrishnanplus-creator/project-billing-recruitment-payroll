@@ -623,6 +623,57 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
         assert len(cae_one_upcoming.json()) == 1
         assert cae_one_upcoming.json()[0]["client_company_name"] == "Acme One"
 
+        finance_schedules_response = client.get("/invoice-schedules", headers=FINANCE_HEADERS)
+        ops_schedules_response = client.get("/invoice-schedules", headers=OPS_HEADERS)
+        cae_one_schedules_response = client.get("/invoice-schedules", headers=cae_one_headers)
+        hr_schedules_response = client.get("/invoice-schedules", headers=HR_HEADERS)
+        assert finance_schedules_response.status_code == 200, finance_schedules_response.text
+        assert ops_schedules_response.status_code == 200, ops_schedules_response.text
+        assert cae_one_schedules_response.status_code == 200, cae_one_schedules_response.text
+        assert hr_schedules_response.status_code == 403
+        finance_schedules = finance_schedules_response.json()
+        ops_schedules = ops_schedules_response.json()
+        cae_one_schedules = cae_one_schedules_response.json()
+        assert len(finance_schedules) == 4
+        assert len(ops_schedules) == 4
+        assert len(cae_one_schedules) == 2
+        assert {schedule["project_code"] for schedule in cae_one_schedules} == {project_one["project_code"]}
+        assert {schedule["status"] for schedule in finance_schedules} == {"active"}
+        assert any(schedule["next_invoice_date"] == str(future_one) and schedule["amount"] == "5100.00" for schedule in finance_schedules)
+
+        schedule_to_update = next(
+            schedule
+            for schedule in finance_schedules
+            if schedule["project_code"] == project_one["project_code"] and schedule["next_invoice_date"] == str(future_one)
+        )
+        update_payload = {
+            "label": "Updated active billing",
+            "item_description": "Updated active billing details",
+            "amount": "5300.00",
+            "currency": "USD",
+            "frequency": "monthly",
+            "first_invoice_date": schedule_to_update["first_invoice_date"],
+            "final_invoice_date": schedule_to_update["final_invoice_date"],
+            "historical_backfill": False,
+            "status": "active",
+        }
+        finance_update_response = client.put(f"/invoice-schedules/{schedule_to_update['id']}", headers=FINANCE_HEADERS, json=update_payload)
+        assert finance_update_response.status_code == 403
+        ops_update_response = client.put(f"/invoice-schedules/{schedule_to_update['id']}", headers=OPS_HEADERS, json=update_payload)
+        assert ops_update_response.status_code == 200, ops_update_response.text
+        assert ops_update_response.json()["amount"] == "5300.00"
+        assert ops_update_response.json()["label"] == "Updated active billing"
+
+        finance_inactivate_response = client.post(f"/invoice-schedules/{schedule_to_update['id']}/inactivate", headers=FINANCE_HEADERS)
+        assert finance_inactivate_response.status_code == 403
+        ops_inactivate_response = client.post(f"/invoice-schedules/{schedule_to_update['id']}/inactivate", headers=OPS_HEADERS)
+        assert ops_inactivate_response.status_code == 200, ops_inactivate_response.text
+        assert ops_inactivate_response.json()["status"] == "inactive"
+        active_after_inactivate = client.get("/invoice-schedules", headers=FINANCE_HEADERS).json()
+        inactive_after_inactivate = client.get("/invoice-schedules?status=inactive", headers=FINANCE_HEADERS).json()
+        assert schedule_to_update["id"] not in {schedule["id"] for schedule in active_after_inactivate}
+        assert schedule_to_update["id"] in {schedule["id"] for schedule in inactive_after_inactivate}
+
         upcoming_date_filtered = client.get(f"/upcoming-invoices?date_from={future_two}&date_to={future_two}", headers=FINANCE_HEADERS)
         assert upcoming_date_filtered.status_code == 200, upcoming_date_filtered.text
         assert len(upcoming_date_filtered.json()) == 1

@@ -147,6 +147,17 @@ type InvoiceSchedule = {
   final_invoice_date: string | null;
   historical_backfill: boolean;
   next_invoice_generation_date: string | null;
+  status: string;
+};
+
+type InvoiceScheduleDetail = InvoiceSchedule & {
+  project_id: number;
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  client_account_executive_name: string | null;
+  client_account_executive_email: string | null;
+  next_invoice_date: string | null;
 };
 
 type UploadedDocument = {
@@ -485,6 +496,7 @@ function App() {
   const [inactiveProjects, setInactiveProjects] = useState<Project[]>([]);
   const [showInactiveProjects, setShowInactiveProjects] = useState(false);
   const [invoices, setInvoices] = useState<ClientInvoice[]>([]);
+  const [clientInvoiceSchedules, setClientInvoiceSchedules] = useState<InvoiceScheduleDetail[]>([]);
   const [upcomingInvoices, setUpcomingInvoices] = useState<UpcomingInvoice[]>([]);
   const [approvalInvoice, setApprovalInvoice] = useState<ClientInvoice | null>(null);
   const [candidateInvoices, setCandidateInvoices] = useState<CandidateInvoice[]>([]);
@@ -495,6 +507,7 @@ function App() {
   const [interviews, setInterviews] = useState<Interview[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
+  const [selectedClientScheduleId, setSelectedClientScheduleId] = useState<number | null>(null);
   const [selectedCandidateInvoiceId, setSelectedCandidateInvoiceId] = useState<number | null>(null);
   const [selectedNeedId, setSelectedNeedId] = useState<number | null>(Number.isFinite(requestedNeedId) && requestedNeedId > 0 ? requestedNeedId : null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
@@ -502,17 +515,22 @@ function App() {
   const [editingProject, setEditingProject] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
   const [scheduleBackfill, setScheduleBackfill] = useState(false);
+  const [editingScheduleFrequency, setEditingScheduleFrequency] = useState('monthly');
+  const [editingScheduleBackfill, setEditingScheduleBackfill] = useState(false);
   const [needBillingType, setNeedBillingType] = useState('periodic');
   const [internalRecruitmentProject, setInternalRecruitmentProject] = useState(false);
   const [internalProjectType, setInternalProjectType] = useState('flexgcc_sales_support');
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [candidateScheduleFrequency, setCandidateScheduleFrequency] = useState('monthly');
-  const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment'>(requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : 'workflow');
+  const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment' | 'schedules'>(
+    requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : requestedView === 'schedules' ? 'schedules' : 'workflow',
+  );
   const [activeForm, setActiveForm] = useState<string | null>(null);
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
   const [invoiceDateFrom, setInvoiceDateFrom] = useState('');
   const [invoiceDateTo, setInvoiceDateTo] = useState('');
   const [invoicePage, setInvoicePage] = useState(1);
+  const [clientSchedulePage, setClientSchedulePage] = useState(1);
   const [projectPage, setProjectPage] = useState(1);
   const [recruitmentPage, setRecruitmentPage] = useState(1);
   const [candidatePage, setCandidatePage] = useState(1);
@@ -528,6 +546,10 @@ function App() {
   const selectedInvoice = useMemo(
     () => invoices.find((invoice) => invoice.id === selectedInvoiceId) ?? invoices[0],
     [invoices, selectedInvoiceId],
+  );
+  const selectedClientSchedule = useMemo(
+    () => clientInvoiceSchedules.find((schedule) => schedule.id === selectedClientScheduleId) ?? clientInvoiceSchedules[0],
+    [clientInvoiceSchedules, selectedClientScheduleId],
   );
   const selectedCandidateInvoice = useMemo(
     () => candidateInvoices.find((invoice) => invoice.id === selectedCandidateInvoiceId) ?? candidateInvoices[0],
@@ -583,6 +605,8 @@ function App() {
   const canInterview = activeRole === 'internal_interviewer';
   const canFinance = activeRole === 'finance_manager';
   const canClientApprove = activeRole === 'client_account_executive';
+  const canViewClientSchedules = Boolean(activeRole && ['operations_manager', 'finance_manager', 'system_admin', 'client_account_executive'].includes(activeRole));
+  const canManageClientSchedules = canOperate || canAdmin;
   const canManageCandidateInvoiceItems = canOperate || canHrManage || canAdmin;
   const canDeleteCandidateInvoices = canOperate || canHrManage || canFinance || canAdmin;
   const canViewWorkflow = Boolean(activeRole && activeRole !== 'system_admin');
@@ -608,11 +632,16 @@ function App() {
       const invoiceRequest = showingUpcomingInvoices
         ? api<UpcomingInvoice[]>(`/upcoming-invoices?${invoiceParams.toString()}`)
         : api<ClientInvoice[]>(`/client-invoices?${invoiceParams.toString()}`);
-      const [projectData, invoiceData] = await Promise.all([
+      const currentCanViewClientSchedules = ['operations_manager', 'finance_manager', 'system_admin', 'client_account_executive'].includes(current.active_role);
+      const scheduleParams = new URLSearchParams({ status: 'active', page: String(clientSchedulePage), page_size: String(invoicePageSize) });
+      const scheduleRequest = currentCanViewClientSchedules ? api<InvoiceScheduleDetail[]>(`/invoice-schedules?${scheduleParams.toString()}`) : Promise.resolve([]);
+      const [projectData, invoiceData, scheduleData] = await Promise.all([
         api<Project[]>('/projects'),
         invoiceRequest,
+        scheduleRequest,
       ]);
       setProjects(projectData);
+      setClientInvoiceSchedules(scheduleData);
       if (showingUpcomingInvoices) {
         setUpcomingInvoices(invoiceData as UpcomingInvoice[]);
         setInvoices([]);
@@ -748,7 +777,7 @@ function App() {
   useEffect(() => {
     if (me?.active_role === 'system_admin') void refreshUsers();
     if (me?.active_role) void refreshData(me);
-  }, [me?.active_role, invoicePage]);
+  }, [me?.active_role, invoicePage, clientSchedulePage]);
 
   useEffect(() => {
     setEditingProject(false);
@@ -1095,6 +1124,39 @@ function App() {
     });
   }
 
+  function startEditingClientSchedule(schedule: InvoiceScheduleDetail) {
+    setSelectedClientScheduleId(schedule.id);
+    setEditingScheduleFrequency(schedule.frequency);
+    setEditingScheduleBackfill(schedule.historical_backfill);
+    setActiveForm('client-schedule-edit');
+  }
+
+  async function submitClientInvoiceScheduleUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedClientSchedule) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    payload.historical_backfill = editingScheduleBackfill ? 'true' : 'false';
+    await mutate(async () => {
+      await api<InvoiceScheduleDetail>(`/invoice-schedules/${selectedClientSchedule.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      setActiveForm(null);
+      return 'Invoice schedule updated';
+    });
+  }
+
+  async function inactivateClientInvoiceSchedule(schedule: InvoiceScheduleDetail) {
+    const confirmed = window.confirm(`Inactivate this client invoice schedule?\n\n${schedule.project_code} · ${schedule.label}\n\nGenerated invoices will remain in the invoice register.`);
+    if (!confirmed) return;
+    await mutate(async () => {
+      await api<InvoiceScheduleDetail>(`/invoice-schedules/${schedule.id}/inactivate`, { method: 'POST' });
+      if (selectedClientScheduleId === schedule.id) setSelectedClientScheduleId(null);
+      return 'Invoice schedule inactivated';
+    });
+  }
+
   async function submitUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -1392,6 +1454,7 @@ function App() {
         <nav className="viewSwitch">
           <button className={activeView === 'workflow' ? 'primary' : 'secondary'} onClick={() => setActiveView('workflow')}>Workflow</button>
           {canRecruitment && <button className={activeView === 'recruitment' ? 'primary' : 'secondary'} onClick={() => setActiveView('recruitment')}>Recruitment</button>}
+          {canViewClientSchedules && <button className={activeView === 'schedules' ? 'primary' : 'secondary'} onClick={() => setActiveView('schedules')}>Schedules</button>}
           <button className={activeView === 'invoices' ? 'primary' : 'secondary'} onClick={() => setActiveView('invoices')}>All Invoices</button>
         </nav>
       )}
@@ -2194,6 +2257,119 @@ function App() {
                 <span>Submit Evaluation</span>
               </button>
               <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+            </form>
+          )}
+        </section>
+      )}
+
+      {activeView === 'schedules' && canViewClientSchedules && (
+        <section className="workspace invoiceWorkspace">
+          <section className="panel wide">
+            <PanelTitle icon={<CalendarPlus size={18} />} title="Active Invoicing Schedules" />
+            <div className="toolbar">
+              <button className="secondary" type="button" disabled={clientSchedulePage <= 1 || loading} onClick={() => setClientSchedulePage((page) => Math.max(1, page - 1))}>Previous</button>
+              <span className="status">Page {clientSchedulePage}</span>
+              <button className="secondary" type="button" disabled={clientInvoiceSchedules.length < invoicePageSize || loading} onClick={() => setClientSchedulePage((page) => page + 1)}>Next</button>
+            </div>
+            {clientInvoiceSchedules.length > 0 ? (
+              <div className="lineList">
+                {clientInvoiceSchedules.map((schedule) => (
+                  <div className={`lineRow ${selectedClientSchedule?.id === schedule.id ? 'selectedLine' : ''}`} key={schedule.id}>
+                    <div>
+                      <strong>{schedule.project_code} · {schedule.client_company_name}</strong>
+                      <span>{schedule.project_title} · {schedule.currency} {schedule.amount} · {schedule.frequency.replaceAll('_', ' ')}</span>
+                      <span>{schedule.item_description ?? schedule.label}</span>
+                      <span>First {schedule.first_invoice_date} · Next {schedule.next_invoice_date ?? 'None'}{schedule.final_invoice_date ? ` · Final ${schedule.final_invoice_date}` : ''} · Historical {schedule.historical_backfill ? 'Yes' : 'No'}</span>
+                      <span>CAE: {schedule.client_account_executive_name ?? schedule.client_account_executive_email ?? 'Not assigned'}</span>
+                    </div>
+                    <div className="horizontalActions">
+                      <span className="status">{schedule.status}</span>
+                      <button className="secondary" type="button" onClick={() => setSelectedClientScheduleId(schedule.id)}>View</button>
+                      {canManageClientSchedules && (
+                        <>
+                          <button className="secondary" type="button" onClick={() => startEditingClientSchedule(schedule)}>
+                            <Pencil size={16} />
+                            <span>Edit</span>
+                          </button>
+                          <button className="secondary danger" type="button" onClick={() => void inactivateClientInvoiceSchedule(schedule)} disabled={loading}>
+                            <Trash2 size={16} />
+                            <span>Inactivate</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="empty">No active invoicing schedules match this role.</p>
+            )}
+          </section>
+
+          {selectedClientSchedule && (
+            <section className="panel wide">
+              <PanelTitle icon={<FileText size={18} />} title="Schedule Details" />
+              <dl className="facts">
+                <div><dt>Project</dt><dd>{selectedClientSchedule.project_code}</dd></div>
+                <div><dt>SOW</dt><dd>{selectedClientSchedule.project_title}</dd></div>
+                <div><dt>Client</dt><dd>{selectedClientSchedule.client_company_name}</dd></div>
+                <div><dt>Description</dt><dd>{selectedClientSchedule.item_description ?? selectedClientSchedule.label}</dd></div>
+                <div><dt>Amount</dt><dd>{selectedClientSchedule.currency} {selectedClientSchedule.amount}</dd></div>
+                <div><dt>Frequency</dt><dd>{selectedClientSchedule.frequency.replaceAll('_', ' ')}</dd></div>
+                <div><dt>First invoice date</dt><dd>{selectedClientSchedule.first_invoice_date}</dd></div>
+                <div><dt>Next invoice date</dt><dd>{selectedClientSchedule.next_invoice_date ?? 'None'}</dd></div>
+                <div><dt>Final invoice date</dt><dd>{selectedClientSchedule.final_invoice_date ?? 'None'}</dd></div>
+                <div><dt>Historical</dt><dd>{selectedClientSchedule.historical_backfill ? 'Yes' : 'No'}</dd></div>
+                <div><dt>Status</dt><dd>{selectedClientSchedule.status}</dd></div>
+                <div><dt>Client Account Executive</dt><dd>{selectedClientSchedule.client_account_executive_name ?? selectedClientSchedule.client_account_executive_email ?? 'Not assigned'}</dd></div>
+              </dl>
+            </section>
+          )}
+
+          {canManageClientSchedules && activeForm === 'client-schedule-edit' && selectedClientSchedule && (
+            <form className="panel wide" key={selectedClientSchedule.id} onSubmit={(event) => void submitClientInvoiceScheduleUpdate(event)}>
+              <PanelTitle icon={<Pencil size={18} />} title="Edit Invoicing Schedule" />
+              <p className="contextLine">{selectedClientSchedule.project_code} · {selectedClientSchedule.project_title}</p>
+              <div className="grid two">
+                <Field label="Label" name="label" defaultValue={selectedClientSchedule.label} required />
+                <Field label="Amount" name="amount" type="number" step="0.01" defaultValue={selectedClientSchedule.amount} required />
+                <Field label="Currency" name="currency" defaultValue={selectedClientSchedule.currency} required />
+                <label className="field">
+                  <span>Status</span>
+                  <select name="status" defaultValue={selectedClientSchedule.status}>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Frequency</span>
+                  <select name="frequency" value={editingScheduleFrequency} onChange={(event) => setEditingScheduleFrequency(event.target.value)}>
+                    <option value="single">Single</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                  </select>
+                </label>
+                <Field label={editingScheduleBackfill ? 'Original first invoice date' : editingScheduleFrequency === 'single' ? 'Invoice date' : 'First invoice date'} name="first_invoice_date" type="date" defaultValue={selectedClientSchedule.first_invoice_date} required />
+                {editingScheduleFrequency !== 'single' && <Field label="Final invoice date" name="final_invoice_date" type="date" defaultValue={selectedClientSchedule.final_invoice_date ?? ''} />}
+                {editingScheduleBackfill && <Field label="Next invoice/reminder date" name="next_invoice_generation_date" type="date" defaultValue={selectedClientSchedule.next_invoice_generation_date ?? selectedClientSchedule.next_invoice_date ?? today()} required />}
+              </div>
+              <label className="field full">
+                <span>Invoice item description</span>
+                <textarea name="item_description" rows={3} defaultValue={selectedClientSchedule.item_description ?? selectedClientSchedule.label} required />
+              </label>
+              <label className="checkField">
+                <input name="historical_backfill" type="checkbox" checked={editingScheduleBackfill} onChange={(event) => setEditingScheduleBackfill(event.currentTarget.checked)} />
+                <span>Historical schedule - start reminders from next cycle</span>
+              </label>
+              <div className="toolbar">
+                <button className="primary" disabled={loading}>
+                  <FileCheck2 size={18} />
+                  <span>Save Schedule</span>
+                </button>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Cancel</button>
+              </div>
             </form>
           )}
         </section>

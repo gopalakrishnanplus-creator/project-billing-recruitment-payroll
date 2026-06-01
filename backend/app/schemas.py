@@ -173,6 +173,10 @@ class InvoiceScheduleCreate(BaseModel):
     next_invoice_generation_date: date | None = None
 
 
+class InvoiceScheduleUpdate(InvoiceScheduleCreate):
+    status: str = Field(default="active", pattern="^(active|inactive)$")
+
+
 class ApprovalCreate(BaseModel):
     approver_name: str = Field(min_length=2, max_length=160)
     notes: str | None = None
@@ -363,6 +367,16 @@ class InvoiceScheduleRead(BaseModel):
     historical_backfill: bool
     next_invoice_generation_date: date | None
     status: str
+
+
+class InvoiceScheduleDetailRead(InvoiceScheduleRead):
+    project_id: int
+    project_code: str
+    project_title: str
+    client_company_name: str
+    client_account_executive_name: str | None
+    client_account_executive_email: str | None
+    next_invoice_date: date | None
 
 
 class DocumentRead(BaseModel):

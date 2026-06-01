@@ -1590,6 +1590,7 @@ function App() {
                   <select name="billing_frequency" defaultValue={needBillingType === 'fixed_fee' ? 'single' : 'monthly'}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
+                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -1707,6 +1708,7 @@ function App() {
                   <select name="billing_frequency" defaultValue={selectedNeed.billing_frequency ?? 'monthly'}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
+                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -1796,6 +1798,7 @@ function App() {
                 <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
                   <option value="single">Single</option>
                   <option value="weekly">Weekly</option>
+                  <option value="twice_monthly">Twice a month (1st and 15th)</option>
                   <option value="monthly">Monthly</option>
                   <option value="quarterly">Quarterly</option>
                 </select>
@@ -1991,6 +1994,7 @@ function App() {
                   <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
+                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -2656,6 +2660,7 @@ function App() {
                   <select name="billing_frequency" defaultValue={needBillingType === 'fixed_fee' ? 'single' : 'monthly'}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
+                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -2698,6 +2703,7 @@ function App() {
                   <select name="frequency" value={scheduleFrequency} onChange={(event) => setScheduleFrequency(event.target.value)}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
+                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -3181,6 +3187,7 @@ function CandidateInvoiceItemForm({
         <select name="frequency" value={frequency} onChange={(event) => onFrequencyChange(event.target.value)}>
           <option value="single">Single</option>
           <option value="weekly">Weekly</option>
+          <option value="twice_monthly">Twice a month (1st and 15th)</option>
           <option value="monthly">Monthly</option>
           <option value="quarterly">Quarterly</option>
         </select>

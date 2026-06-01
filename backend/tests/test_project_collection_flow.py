@@ -724,6 +724,84 @@ def test_historical_client_invoice_schedule_starts_from_next_cycle():
         assert "next current/future cycle" in past_next_cycle_response.text
 
 
+def test_twice_monthly_schedules_generate_first_and_fifteenth_catchup():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        previous_month_first = app_main.add_months(date.today().replace(day=1), -1)
+        previous_month_fifteenth = previous_month_first.replace(day=15)
+
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Twice monthly client billing",
+                "item_description": "Twice monthly client services",
+                "amount": "2000.00",
+                "currency": "USD",
+                "frequency": "twice_monthly",
+                "first_invoice_date": str(previous_month_first),
+                "final_invoice_date": str(previous_month_fifteenth),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+        invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        assert invoices_response.status_code == 200, invoices_response.text
+        assert [invoice["issue_date"] for invoice in invoices_response.json()] == [str(previous_month_first), str(previous_month_fifteenth)]
+
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Twice Monthly Consultant",
+                "number_of_positions": "1",
+                "employment_type": "Fractional Consultant",
+                "description": "Twice monthly candidate invoice workflow.",
+                "historical_completed": "on",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        hire_response = client.post(
+            f"/recruitment-needs/{need_response.json()['id']}/historical-hires",
+            headers=HR_HEADERS,
+            data={
+                "full_name": "Twice Monthly Candidate",
+                "email": "twice-monthly-candidate@example.com",
+                "invoice_terms": "Twice monthly invoice terms.",
+            },
+            files={"signed_contract": ("candidate-contract.pdf", b"signed", "application/pdf")},
+        )
+        assert hire_response.status_code == 201, hire_response.text
+        contract_id = hire_response.json()["contracts"][0]["id"]
+        candidate_schedule_response = client.post(
+            f"/candidate-contracts/{contract_id}/invoice-schedules",
+            headers=HR_HEADERS,
+            json={
+                "item_description": "Twice monthly candidate services",
+                "invoice_type": "invoice",
+                "amount": "1000.00",
+                "currency": "USD",
+                "frequency": "twice_monthly",
+                "invoice_start_date": str(previous_month_first),
+                "invoice_end_date": str(previous_month_fifteenth),
+            },
+        )
+        assert candidate_schedule_response.status_code == 201, candidate_schedule_response.text
+
+        with SessionLocal() as db:
+            candidate_invoices = db.query(CandidateVendorInvoice).order_by(CandidateVendorInvoice.invoice_due_date.asc()).all()
+            assert [invoice.invoice_due_date for invoice in candidate_invoices] == [previous_month_first, previous_month_fifteenth]
+            assert {invoice.status for invoice in candidate_invoices} == {"awaiting_upload"}
+            assert db.query(EmailNotification).filter(EmailNotification.recipient_email == "twice-monthly-candidate@example.com").count() == 2
+
+
 def test_recruitment_flow_from_position_to_hired_candidate():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)

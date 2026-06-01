@@ -63,7 +63,7 @@ class RecruitmentNeedCreate(BaseModel):
     position_billing_type: str | None = Field(default=None, pattern="^(fixed_fee|periodic)$")
     fee_amount: Decimal | None = Field(default=None, ge=0)
     currency: str | None = "USD"
-    billing_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    billing_frequency: str | None = Field(default=None, pattern="^(single|weekly|twice_monthly|monthly|quarterly)$")
     billing_start_date: date | None = None
     billing_end_date: date | None = None
     target_start_date: date | None = None
@@ -79,7 +79,7 @@ class RecruitmentNeedUpdate(BaseModel):
     position_billing_type: str | None = Field(default=None, pattern="^(fixed_fee|periodic)$")
     fee_amount: Decimal | None = Field(default=None, ge=0)
     currency: str | None = None
-    billing_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    billing_frequency: str | None = Field(default=None, pattern="^(single|weekly|twice_monthly|monthly|quarterly)$")
     billing_start_date: date | None = None
     billing_end_date: date | None = None
     target_start_date: date | None = None
@@ -106,7 +106,7 @@ class HistoricalHireCreate(CandidateCreate):
     invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
     invoice_amount: Decimal | None = Field(default=None, ge=0)
     currency: str | None = "USD"
-    invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|twice_monthly|monthly|quarterly)$")
     invoice_start_date: date | None = None
     invoice_end_date: date | None = None
     invoice_date: date | None = None
@@ -134,7 +134,7 @@ class CandidateContractCreate(BaseModel):
     invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
     invoice_amount: Decimal | None = Field(default=None, ge=0)
     currency: str | None = "USD"
-    invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|monthly|quarterly)$")
+    invoice_frequency: str | None = Field(default=None, pattern="^(single|weekly|twice_monthly|monthly|quarterly)$")
     invoice_start_date: date | None = None
     invoice_end_date: date | None = None
     invoice_date: date | None = None
@@ -150,7 +150,7 @@ class CandidateInvoiceScheduleCreate(BaseModel):
     invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
     amount: Decimal = Field(gt=0)
     currency: str = Field(min_length=1, max_length=12)
-    frequency: str = Field(pattern="^(single|weekly|monthly|quarterly)$")
+    frequency: str = Field(pattern="^(single|weekly|twice_monthly|monthly|quarterly)$")
     invoice_start_date: date | None = None
     invoice_end_date: date | None = None
     invoice_date: date | None = None
@@ -166,7 +166,7 @@ class InvoiceScheduleCreate(BaseModel):
     item_description: str | None = Field(default=None, min_length=2)
     amount: Decimal = Field(gt=0)
     currency: str = "USD"
-    frequency: str = Field(pattern="^(single|monthly|weekly|quarterly)$")
+    frequency: str = Field(pattern="^(single|weekly|twice_monthly|monthly|quarterly)$")
     first_invoice_date: date
     final_invoice_date: date | None = None
     historical_backfill: bool = False

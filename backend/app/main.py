@@ -707,6 +707,10 @@ def load_invoice_detail(invoice_id: int, db: Session, context: AuthContext | Non
 def next_date(current: date, frequency: str) -> date:
     if frequency == "weekly":
         return current + timedelta(days=7)
+    if frequency == "twice_monthly":
+        if current.day < 15:
+            return date(current.year, current.month, 15)
+        return add_months(date(current.year, current.month, 1), 1)
     if frequency == "quarterly":
         return add_months(current, 3)
     if frequency == "monthly":
@@ -714,9 +718,19 @@ def next_date(current: date, frequency: str) -> date:
     return current
 
 
+def first_frequency_date(start_date: date, frequency: str) -> date:
+    if frequency != "twice_monthly":
+        return start_date
+    if start_date.day <= 1:
+        return date(start_date.year, start_date.month, 1)
+    if start_date.day <= 15:
+        return date(start_date.year, start_date.month, 15)
+    return add_months(date(start_date.year, start_date.month, 1), 1)
+
+
 def next_unraised_invoice_date(schedule: ClientInvoiceSchedule) -> date | None:
     issued_dates = {invoice.issue_date for invoice in schedule.invoices}
-    candidate_date = schedule.next_invoice_generation_date or schedule.first_invoice_date
+    candidate_date = first_frequency_date(schedule.next_invoice_generation_date or schedule.first_invoice_date, schedule.frequency)
     for _ in range(600):
         if schedule.final_invoice_date and candidate_date > schedule.final_invoice_date:
             return None
@@ -1223,13 +1237,14 @@ def notify_interview_assignment(db: Session, candidate: Candidate, interviewer_r
         )
 
 
-def next_candidate_invoice_due_date(contract: CandidateContract, db: Session, as_of: date, schedule: CandidateInvoiceSchedule | None = None) -> date | None:
+def candidate_invoice_due_dates(contract: CandidateContract, db: Session, cutoff: date, schedule: CandidateInvoiceSchedule | None = None) -> list[date]:
     frequency = schedule.frequency if schedule else contract.invoice_frequency
     if not frequency:
-        return None
-    candidate_date = (schedule.invoice_date if schedule else contract.invoice_date) if frequency == "single" else (schedule.invoice_start_date if schedule else contract.invoice_start_date)
+        return []
+    raw_candidate_date = (schedule.invoice_date if schedule else contract.invoice_date) if frequency == "single" else (schedule.invoice_start_date if schedule else contract.invoice_start_date)
+    candidate_date = first_frequency_date(raw_candidate_date, frequency) if raw_candidate_date else None
     if candidate_date is None:
-        return None
+        return []
     query = select(CandidateVendorInvoice.invoice_due_date).where(CandidateVendorInvoice.invoice_due_date.is_not(None))
     if schedule:
         query = query.where(CandidateVendorInvoice.schedule_id == schedule.id)
@@ -1242,15 +1257,23 @@ def next_candidate_invoice_due_date(contract: CandidateContract, db: Session, as
         for due_date in db.scalars(query).all()
         if due_date is not None
     }
+    due_dates: list[date] = []
     for _ in range(600):
         if final_date and candidate_date > final_date:
-            return None
-        if candidate_date not in issued_dates and candidate_date >= as_of:
-            return candidate_date
+            return due_dates
+        if candidate_date > cutoff:
+            return due_dates
+        if candidate_date not in issued_dates:
+            due_dates.append(candidate_date)
         if frequency == "single":
-            return None
+            return due_dates
         candidate_date = next_date(candidate_date, frequency)
-    return None
+    return due_dates
+
+
+def next_candidate_invoice_due_date(contract: CandidateContract, db: Session, as_of: date, schedule: CandidateInvoiceSchedule | None = None) -> date | None:
+    due_dates = candidate_invoice_due_dates(contract, db, as_of, schedule)
+    return due_dates[0] if due_dates else None
 
 
 def candidate_invoice_source_description(contract: CandidateContract, candidate: Candidate, schedule: CandidateInvoiceSchedule | None = None) -> str:
@@ -1510,42 +1533,40 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
             frequency = schedule.frequency if schedule else contract.invoice_frequency
             if not amount or not frequency:
                 continue
-            due_date = next_candidate_invoice_due_date(contract, db, as_of, schedule)
-            if due_date is None or due_date > reminder_cutoff:
-                continue
-            invoice_type = candidate_invoice_source_type(contract, schedule)
-            invoice = CandidateVendorInvoice(
-                candidate_id=candidate.id,
-                contract_id=contract.id,
-                schedule_id=schedule.id if schedule else None,
-                project_id=candidate.project_id,
-                item_description=candidate_invoice_source_description(contract, candidate, schedule),
-                invoice_type=invoice_type,
-                invoice_due_date=due_date,
-                amount=amount,
-                currency=candidate_invoice_source_currency(contract, schedule),
-                status="submitted" if invoice_type == "auto_reimbursement" else "awaiting_upload",
-                upload_token=None if invoice_type == "auto_reimbursement" else uuid4().hex,
-                upload_token_sent_at=None if invoice_type == "auto_reimbursement" else utcnow(),
-            )
-            db.add(invoice)
-            db.flush()
-            if invoice_type == "auto_reimbursement":
-                queue_candidate_invoice_approval_email(db, invoice)
-                log_event(db, project_id=candidate.project_id, actor_name="System", action="candidate_auto_reimbursement_created", details=str(invoice.id))
-            else:
-                subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need, contract)
-                status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=[], subject=subject, text=text_body, html=html)
-                db.add(
-                    EmailNotification(
-                        project_id=candidate.project_id,
-                        recipient_email=candidate.email,
-                        subject=subject,
-                        body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
-                        status=status,
-                    )
+            for due_date in candidate_invoice_due_dates(contract, db, reminder_cutoff, schedule):
+                invoice_type = candidate_invoice_source_type(contract, schedule)
+                invoice = CandidateVendorInvoice(
+                    candidate_id=candidate.id,
+                    contract_id=contract.id,
+                    schedule_id=schedule.id if schedule else None,
+                    project_id=candidate.project_id,
+                    item_description=candidate_invoice_source_description(contract, candidate, schedule),
+                    invoice_type=invoice_type,
+                    invoice_due_date=due_date,
+                    amount=amount,
+                    currency=candidate_invoice_source_currency(contract, schedule),
+                    status="submitted" if invoice_type == "auto_reimbursement" else "awaiting_upload",
+                    upload_token=None if invoice_type == "auto_reimbursement" else uuid4().hex,
+                    upload_token_sent_at=None if invoice_type == "auto_reimbursement" else utcnow(),
                 )
-            generated.append(invoice)
+                db.add(invoice)
+                db.flush()
+                if invoice_type == "auto_reimbursement":
+                    queue_candidate_invoice_approval_email(db, invoice)
+                    log_event(db, project_id=candidate.project_id, actor_name="System", action="candidate_auto_reimbursement_created", details=str(invoice.id))
+                else:
+                    subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need, contract)
+                    status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=[], subject=subject, text=text_body, html=html)
+                    db.add(
+                        EmailNotification(
+                            project_id=candidate.project_id,
+                            recipient_email=candidate.email,
+                            subject=subject,
+                            body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                            status=status,
+                        )
+                    )
+                generated.append(invoice)
     return generated
 
 
@@ -1926,7 +1947,7 @@ def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
     for schedule in schedules:
         if schedule.project.status == "inactive":
             continue
-        candidate_date = schedule.next_invoice_generation_date or schedule.first_invoice_date
+        candidate_date = first_frequency_date(schedule.next_invoice_generation_date or schedule.first_invoice_date, schedule.frequency)
         while candidate_date - timedelta(days=2) <= as_of:
             if schedule.final_invoice_date and candidate_date > schedule.final_invoice_date:
                 break

@@ -378,6 +378,32 @@ def test_project_file_upload_update_and_additional_sow():
         assert response.status_code == 201, response.text
         project = response.json()
         assert sorted(document["document_type"] for document in project["documents"]) == ["msa", "sow"]
+        msa_document = next(document for document in project["documents"] if document["document_type"] == "msa")
+        msa_download_response = client.get(f"/documents/{msa_document['id']}/download?inline=true", headers=OPS_HEADERS)
+        assert msa_download_response.status_code == 200, msa_download_response.text
+        assert msa_download_response.content == b"msa"
+        assert "inline" in msa_download_response.headers["content-disposition"]
+
+        replace_response = client.put(
+            f"/documents/{msa_document['id']}",
+            headers=OPS_HEADERS,
+            files={"document": ("msa-replaced.pdf", b"msa replaced", "application/pdf")},
+        )
+        assert replace_response.status_code == 200, replace_response.text
+        assert replace_response.json()["original_filename"] == "msa-replaced.pdf"
+        replaced_download_response = client.get(f"/documents/{msa_document['id']}/download", headers=OPS_HEADERS)
+        assert replaced_download_response.status_code == 200, replaced_download_response.text
+        assert replaced_download_response.content == b"msa replaced"
+
+        finance_remove_response = client.delete(f"/documents/{msa_document['id']}", headers=FINANCE_HEADERS)
+        assert finance_remove_response.status_code == 403
+        remove_response = client.delete(f"/documents/{msa_document['id']}", headers=OPS_HEADERS)
+        assert remove_response.status_code == 200, remove_response.text
+        assert remove_response.json()["status"] == "deleted"
+        removed_download_response = client.get(f"/documents/{msa_document['id']}/download", headers=OPS_HEADERS)
+        assert removed_download_response.status_code == 404
+        project_after_remove = client.get(f"/projects/{project['id']}", headers=OPS_HEADERS).json()
+        assert msa_document["id"] not in {document["id"] for document in project_after_remove["documents"]}
 
         update_response = client.put(
             f"/projects/{project['id']}",
@@ -454,6 +480,75 @@ def test_finance_can_cancel_unpaid_invoice():
         assert cancel_response.json()["status"] == "cancelled"
         assert cancel_response.json()["cancelled_amount"] == "4000.00"
         assert cancel_response.json()["balance_due"] == "0.00"
+
+
+def test_finance_can_delete_unsent_unpaid_test_invoice_but_not_sent_invoice():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        payload = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]}
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Test invoice cleanup",
+                "item_description": "Dummy client invoice",
+                "amount": "100.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(date.today()),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+        invoice_id = client.get("/client-invoices", headers=FINANCE_HEADERS).json()[0]["id"]
+
+        ops_delete_response = client.delete(f"/client-invoices/{invoice_id}", headers=OPS_HEADERS)
+        assert ops_delete_response.status_code == 403
+        delete_response = client.delete(f"/client-invoices/{invoice_id}", headers=FINANCE_HEADERS)
+        assert delete_response.status_code == 200, delete_response.text
+        assert delete_response.json()["status"] == "deleted"
+        assert client.get(f"/client-invoices/{invoice_id}", headers=FINANCE_HEADERS).status_code == 404
+
+        sent_schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Sent invoice cleanup blocked",
+                "item_description": "Real sent invoice",
+                "amount": "200.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(date.today()),
+            },
+        )
+        assert sent_schedule_response.status_code == 201, sent_schedule_response.text
+        sent_invoice = client.get("/client-invoices", headers=FINANCE_HEADERS).json()[0]
+        sent_invoice_id = sent_invoice["id"]
+        assert client.post(
+            f"/client-invoices/{sent_invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"approver_name": "Client Account Executive"},
+        ).status_code == 200
+        assert client.post(
+            f"/client-invoices/{sent_invoice_id}/finance-approval",
+            headers=FINANCE_HEADERS,
+            json={"approver_name": "Finance Manager"},
+        ).status_code == 200
+        assert client.post(
+            f"/client-invoices/{sent_invoice_id}/send",
+            headers=FINANCE_HEADERS,
+            json={"sender_name": "Finance Manager", "recipient_email": "anita@example.com"},
+        ).status_code == 200
+        sent_delete_response = client.delete(f"/client-invoices/{sent_invoice_id}", headers=FINANCE_HEADERS)
+        assert sent_delete_response.status_code == 400
+        assert "sent or paid" in sent_delete_response.text
 
 
 def test_partially_paid_invoice_cancels_only_unpaid_remainder():
@@ -1005,6 +1100,15 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         other_interviews = client.get("/interviews", headers={"x-test-email": "other-interviewer@example.com", "x-test-role": "internal_interviewer"})
         assert own_interviews.status_code == 200, own_interviews.text
         assert len(own_interviews.json()) == 1
+        own_interview = own_interviews.json()[0]
+        assert own_interview["candidate_name"] == "Priya Candidate"
+        assert own_interview["candidate_email"] == "priya@example.com"
+        assert own_interview["candidate_status"] == "interview_round_1_scheduled"
+        assert own_interview["recruitment_need_id"] == need["id"]
+        assert own_interview["position_title"] == "Senior Recruitment Analyst"
+        assert own_interview["project_code"] == project["project_code"]
+        assert own_interview["project_title"] == project["title"]
+        assert own_interview["client_company_name"] == project["client_company_name"]
         assert other_interviews.status_code == 200, other_interviews.text
         assert len(other_interviews.json()) == 0
 
@@ -1016,6 +1120,9 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         )
         assert scorecard_response.status_code == 200, scorecard_response.text
         assert scorecard_response.json()["status"] == "completed"
+        assert scorecard_response.json()["candidate_name"] == "Priya Candidate"
+        assert scorecard_response.json()["candidate_status"] == "awaiting_hr_interview_review"
+        assert scorecard_response.json()["position_title"] == "Senior Recruitment Analyst"
         assert scorecard_response.json()["evaluation_document_name"] == "scorecard.pdf"
         scorecard_document_id = scorecard_response.json()["evaluation_document_id"]
         with SessionLocal() as db:

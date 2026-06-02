@@ -82,6 +82,7 @@ from .schemas import (
     CandidateVendorInvoiceRead,
     ClientInvoiceRead,
     CurrentUserRead,
+    DocumentRead,
     GenerateInvoicesResult,
     HistoricalHireCreate,
     InvoiceDetailRead,
@@ -131,6 +132,13 @@ INDIA_HIRE_ENTITY = "mbox_india"
 MBOX_BILLING_NAME = "Mbox Contract Solutions Pvt. Ltd."
 MBOX_BILLING_ADDRESS = "M-68, Sector 7, Vashi, Navi Mumbai"
 APPROVAL_TOKEN_MAX_AGE_SECONDS = int(getenv("APPROVAL_TOKEN_MAX_AGE_SECONDS", "7200"))
+PROJECT_FILE_DOCUMENT_TYPES = {"msa", "sow", "sow_amendment"}
+CLIENT_INVOICE_DELETE_BLOCKED_STATUSES = {
+    InvoiceStatus.sent_to_client.value,
+    InvoiceStatus.partially_paid.value,
+    InvoiceStatus.partially_paid_remainder_cancelled.value,
+    InvoiceStatus.paid.value,
+}
 
 
 @asynccontextmanager
@@ -530,11 +538,13 @@ async def request_payload_and_file_lists(request: Request) -> tuple[dict[str, ob
 async def save_uploaded_document(
     db: Session,
     *,
-    file: UploadFile | None,
+    file: UploadFile | list[UploadFile] | None,
     project_id: int | None,
     document_type: str,
     uploaded_by_name: str | None,
 ) -> UploadedDocument | None:
+    if isinstance(file, list):
+        file = file[0] if file else None
     if file is None or not file.filename:
         return None
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -556,6 +566,35 @@ async def save_uploaded_document(
     )
     db.add(document)
     db.flush()
+    return document
+
+
+async def replace_uploaded_document_contents(document: UploadedDocument, file: UploadFile | list[UploadFile] | None) -> UploadedDocument:
+    if isinstance(file, list):
+        file = file[0] if file else None
+    if file is None or not file.filename:
+        raise HTTPException(status_code=400, detail="Replacement file is required")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    old_storage_uri = document.storage_uri
+    original_filename = Path(file.filename).name
+    stored_filename = f"{uuid4().hex}-{original_filename}"
+    target = UPLOAD_DIR / stored_filename
+    content = await file.read()
+    target.write_bytes(content)
+    document.original_filename = original_filename
+    document.storage_uri = str(target)
+    document.stored_filename = stored_filename
+    document.content_type = file.content_type
+    document.file_size = len(content)
+    document.content_bytes = content
+    document.uploaded_at = utcnow()
+    if old_storage_uri:
+        old_path = Path(old_storage_uri)
+        if old_path.exists() and old_path != target:
+            try:
+                old_path.unlink()
+            except OSError:
+                pass
     return document
 
 
@@ -803,7 +842,7 @@ def document_name(db: Session, document_id: int | None) -> str | None:
     return document.original_filename if document else None
 
 
-def document_download_response(document: UploadedDocument) -> Response:
+def document_download_response(document: UploadedDocument, *, inline: bool = False) -> Response:
     content = document.content_bytes
     if content is None and document.storage_uri:
         path = Path(document.storage_uri)
@@ -815,8 +854,29 @@ def document_download_response(document: UploadedDocument) -> Response:
     return Response(
         content=content,
         media_type=document.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        headers={"Content-Disposition": f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{filename}"},
     )
+
+
+def ensure_project_file_document(document: UploadedDocument, db: Session) -> ProjectSOW:
+    if document.document_type not in PROJECT_FILE_DOCUMENT_TYPES or document.project_id is None:
+        raise HTTPException(status_code=400, detail="Only project MSA/SOW files can be changed here")
+    project = db.get(ProjectSOW, document.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_project_active(project)
+    return project
+
+
+def remove_document_storage(document: UploadedDocument) -> None:
+    if not document.storage_uri:
+        return
+    path = Path(document.storage_uri)
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def serialize_candidate_invoice_documents(invoice_id: int, db: Session) -> list[CandidateInvoiceDocumentRead]:
@@ -857,6 +917,9 @@ def serialize_recruitment_need_detail(need: RecruitmentNeed, db: Session) -> Rec
 
 
 def serialize_interview(interview: Interview, db: Session) -> InterviewRead:
+    candidate = db.get(Candidate, interview.candidate_id)
+    project = load_project_for_read(candidate.project_id, db) if candidate else None
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate and candidate.recruitment_need_id else None
     scorecard = db.scalar(
         select(InterviewScorecard)
         .where(InterviewScorecard.interview_id == interview.id)
@@ -865,6 +928,15 @@ def serialize_interview(interview: Interview, db: Session) -> InterviewRead:
     return InterviewRead(
         id=interview.id,
         candidate_id=interview.candidate_id,
+        candidate_name=candidate.full_name if candidate else None,
+        candidate_email=candidate.email if candidate else None,
+        candidate_status=candidate.status if candidate else None,
+        recruitment_need_id=candidate.recruitment_need_id if candidate else None,
+        position_title=need.position_title if need else None,
+        project_id=project.id if project else None,
+        project_code=project.project_code if project else None,
+        project_title=project.title if project else None,
+        client_company_name=project.company.name if project else None,
         interviewer_user_id=interview.interviewer_user_id,
         interviewer_name=interview.interviewer_name,
         interview_order=interview.interview_order,
@@ -2588,7 +2660,7 @@ def get_project(project_id: int, _: AuthContext = Depends(require_login), db: Se
 
 
 @app.get("/documents/{document_id}/download")
-def download_document(document_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> Response:
+def download_document(document_id: int, context: AuthContext = Depends(require_login), inline: bool = Query(default=False), db: Session = Depends(get_db)) -> Response:
     document = db.get(UploadedDocument, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -2611,7 +2683,39 @@ def download_document(document_id: int, context: AuthContext = Depends(require_l
     if not allowed:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    return document_download_response(document)
+    return document_download_response(document, inline=inline)
+
+
+@app.put("/documents/{document_id}", response_model=DocumentRead)
+async def replace_project_document(document_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> DocumentRead:
+    document = db.get(UploadedDocument, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    project = ensure_project_file_document(document, db)
+    _, files = await request_payload_and_files(request)
+    replacement = files.get("document") or files.get("file")
+    await replace_uploaded_document_contents(document, replacement)
+    document.uploaded_by_name = context.user.full_name
+    log_event(db, project_id=project.id, actor_name=context.user.full_name, action="project_document_replaced", details=f"{document.document_type}: {document.original_filename}")
+    db.commit()
+    db.refresh(document)
+    return DocumentRead.model_validate(document)
+
+
+@app.delete("/documents/{document_id}")
+def delete_project_document(document_id: int, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> dict[str, str]:
+    document = db.get(UploadedDocument, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    project = ensure_project_file_document(document, db)
+    if project.msa and project.msa.document_id == document.id:
+        project.msa.document_id = None
+    details = f"{document.document_type}: {document.original_filename}"
+    remove_document_storage(document)
+    db.delete(document)
+    log_event(db, project_id=project.id, actor_name=context.user.full_name, action="project_document_removed", details=details)
+    db.commit()
+    return {"status": "deleted"}
 
 
 @app.post("/projects/{project_id}/recruitment-needs", response_model=RecruitmentNeedRead, status_code=201)
@@ -3639,6 +3743,26 @@ def list_upcoming_invoices(
 @app.get("/client-invoices/{invoice_id}", response_model=InvoiceDetailRead)
 def get_invoice(invoice_id: int, context: AuthContext = Depends(require_login), db: Session = Depends(get_db)) -> InvoiceDetailRead:
     return load_invoice_detail(invoice_id, db, context)
+
+
+@app.delete("/client-invoices/{invoice_id}")
+def delete_test_client_invoice(invoice_id: int, context: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> dict[str, str]:
+    invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.payments)))
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.payments:
+        raise HTTPException(status_code=400, detail="Client invoices with recorded payments cannot be deleted")
+    if invoice.sent_at is not None or invoice.status in CLIENT_INVOICE_DELETE_BLOCKED_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Client invoice cannot be deleted after it has been sent or paid: {invoice.status}")
+    project_id = invoice.project_id
+    details = f"{invoice.invoice_number} · {invoice.currency} {invoice.amount}"
+    db.execute(delete(ClientInvoiceApproval).where(ClientInvoiceApproval.invoice_id == invoice.id))
+    db.execute(delete(EmailNotification).where(EmailNotification.invoice_id == invoice.id))
+    db.execute(delete(ActivityLog).where(ActivityLog.invoice_id == invoice.id))
+    db.delete(invoice)
+    log_event(db, project_id=project_id, actor_name=context.user.full_name, action="test_client_invoice_deleted", details=details)
+    db.commit()
+    return {"status": "deleted"}
 
 
 @app.get("/client-invoices/{invoice_id}/client-account-approval-view", response_model=InvoiceDetailRead)

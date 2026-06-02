@@ -187,6 +187,7 @@ type ClientInvoice = {
   amount: string;
   currency: string;
   status: string;
+  sent_at?: string | null;
   project_code?: string;
   project_title?: string;
   client_company_name?: string;
@@ -217,6 +218,15 @@ type UpcomingInvoice = {
 type Interview = {
   id: number;
   candidate_id: number;
+  candidate_name: string | null;
+  candidate_email: string | null;
+  candidate_status: string | null;
+  recruitment_need_id: number | null;
+  position_title: string | null;
+  project_id: number | null;
+  project_code: string | null;
+  project_title: string | null;
+  client_company_name: string | null;
   interviewer_user_id: number | null;
   interviewer_name: string;
   interview_order: number | null;
@@ -621,6 +631,12 @@ function App() {
       .filter((interview) => interview.candidate_id === selectedInterview.candidate_id && interview.status === 'not_released' && (interview.interview_order ?? 0) > currentOrder)
       .sort((left, right) => (left.interview_order ?? left.id) - (right.interview_order ?? right.id))[0];
   }, [selectedInterview, visibleInterviews]);
+  const pendingHrInterviewReviews = useMemo(
+    () => visibleInterviews
+      .filter((interview) => interview.status === 'completed' && interview.candidate_status === 'awaiting_hr_interview_review')
+      .sort((left, right) => (left.interview_order ?? left.id) - (right.interview_order ?? right.id)),
+    [visibleInterviews],
+  );
   const projectRows = useMemo(() => pagedItems(projects, projectPage), [projects, projectPage]);
   const recruitmentNeedRows = useMemo(() => pagedItems(recruitmentNeeds, recruitmentPage), [recruitmentNeeds, recruitmentPage]);
   const candidateRowsForNeed = useMemo(() => pagedItems(candidatesForNeed, candidatePage), [candidatesForNeed, candidatePage]);
@@ -901,6 +917,28 @@ function App() {
       setEditingProject(false);
       setSelectedProjectId(null);
       return `Inactivated ${selectedProject.project_code}`;
+    });
+  }
+
+  async function replaceProjectDocument(event: FormEvent<HTMLFormElement>, document: UploadedDocument) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    await mutate(async () => {
+      await api<UploadedDocument>(`/documents/${document.id}`, {
+        method: 'PUT',
+        body: payload,
+      });
+      formElement.reset();
+      return `${document.document_type.toUpperCase()} file replaced`;
+    });
+  }
+
+  async function deleteProjectDocument(document: UploadedDocument) {
+    if (!window.confirm(`Remove ${document.document_type.toUpperCase()} file?\n\n${document.original_filename}`)) return;
+    await mutate(async () => {
+      await api(`/documents/${document.id}`, { method: 'DELETE' });
+      return `${document.document_type.toUpperCase()} file removed`;
     });
   }
 
@@ -1293,6 +1331,17 @@ function App() {
     });
   }
 
+  async function deleteSelectedClientInvoice() {
+    if (!selectedInvoice) return;
+    const confirmed = window.confirm(`Delete this unsent unpaid test invoice?\n\nInvoice ${selectedInvoice.invoice_number} · ${selectedInvoice.currency} ${selectedInvoice.amount}\n\nThis does not inactivate the source invoicing schedule.`);
+    if (!confirmed) return;
+    await mutate(async () => {
+      await api(`/client-invoices/${selectedInvoice.id}`, { method: 'DELETE' });
+      setSelectedInvoiceId(null);
+      return 'Test invoice deleted';
+    });
+  }
+
   async function approvalInvoiceAction() {
     if (!approvalInvoice) return;
     setLoading(true);
@@ -1381,6 +1430,11 @@ function App() {
   function downloadDocument(documentId: number | null) {
     if (!documentId) return;
     window.open(`${API_BASE}/documents/${documentId}/download`, '_blank', 'noopener,noreferrer');
+  }
+
+  function viewDocument(documentId: number | null) {
+    if (!documentId) return;
+    window.open(`${API_BASE}/documents/${documentId}/download?inline=true`, '_blank', 'noopener,noreferrer');
   }
 
   async function submitInvoiceFilters(event: FormEvent<HTMLFormElement>) {
@@ -2252,19 +2306,34 @@ function App() {
           {(canInterview || canHrManage) && (
             <section className="panel wide">
               <PanelTitle icon={<UserCheck size={18} />} title={canInterview ? 'My Interview Evaluations' : 'Interview Evaluations'} />
+              {canHrManage && pendingHrInterviewReviews.length > 0 && (
+                <div className="reviewQueue">
+                  <strong>Pending HR interview reviews</strong>
+                  {pendingHrInterviewReviews.map((interview) => (
+                    <button className="secondary" type="button" key={interview.id} onClick={() => setSelectedInterviewId(interview.id)}>
+                      <span>{interview.candidate_name ?? `Candidate ${interview.candidate_id}`} · {interview.position_title ?? 'Position not set'} · Round {interview.interview_order ?? '-'} · {interview.recommendation ?? 'No recommendation'}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <label className="field">
                 <span>Interview</span>
                 <select value={selectedInterview?.id ?? ''} onChange={(event) => setSelectedInterviewId(Number(event.target.value))}>
                   {visibleInterviews.map((interview) => {
                     const candidate = candidates.find((item) => item.id === interview.candidate_id);
-                    return <option key={interview.id} value={interview.id}>{candidate?.full_name ?? `Candidate ${interview.candidate_id}`} · #{interview.interview_order ?? '-'} · {interview.interviewer_name} · {interview.status}</option>;
+                    return <option key={interview.id} value={interview.id}>{candidate?.full_name ?? interview.candidate_name ?? `Candidate ${interview.candidate_id}`} · {interview.position_title ?? 'Position not set'} · #{interview.interview_order ?? '-'} · {interview.interviewer_name} · {interview.status}</option>;
                   })}
                 </select>
               </label>
               {selectedInterview ? (
                 <>
                   <dl className="facts">
-                    <div><dt>Candidate</dt><dd>{selectedInterviewCandidate?.full_name ?? `Candidate ${selectedInterview.candidate_id}`}</dd></div>
+                    <div><dt>Candidate</dt><dd>{selectedInterviewCandidate?.full_name ?? selectedInterview.candidate_name ?? `Candidate ${selectedInterview.candidate_id}`}</dd></div>
+                    <div><dt>Candidate email</dt><dd>{selectedInterviewCandidate?.email ?? selectedInterview.candidate_email ?? 'Not available'}</dd></div>
+                    <div><dt>Position / Job ID</dt><dd>{selectedInterview.position_title ?? 'Position not set'} · Job {selectedInterview.recruitment_need_id ?? 'not set'}</dd></div>
+                    <div><dt>SOW</dt><dd>{selectedInterview.project_title ?? 'Not available'}</dd></div>
+                    <div><dt>Project</dt><dd>{selectedInterview.project_code ?? 'Not available'}</dd></div>
+                    <div><dt>Client</dt><dd>{selectedInterview.client_company_name ?? 'Not available'}</dd></div>
                     <div><dt>Interviewer</dt><dd>{selectedInterview.interviewer_name}</dd></div>
                     <div><dt>Interview order</dt><dd>{selectedInterview.interview_order ?? 'Not set'}</dd></div>
                     <div><dt>Status</dt><dd><Status value={selectedInterview.status} /></dd></div>
@@ -2308,7 +2377,11 @@ function App() {
           {canInterview && activeForm === 'scorecard' && (
             <form className="panel" onSubmit={(event) => void submitScorecard(event)}>
               <PanelTitle icon={<Upload size={18} />} title="Upload Evaluation Checklist" />
-              <p className="contextLine">{selectedInterview ? `Interview ${selectedInterview.id}` : 'Select an interview first'}</p>
+              <p className="contextLine">
+                {selectedInterview
+                  ? `${selectedInterview.candidate_name ?? `Candidate ${selectedInterview.candidate_id}`} · ${selectedInterview.position_title ?? 'Position not set'} · Job ${selectedInterview.recruitment_need_id ?? 'not set'} · Round ${selectedInterview.interview_order ?? '-'}`
+                  : 'Select an interview first'}
+              </p>
               {selectedInterview && !['active', 'pending'].includes(selectedInterview.status) && (
                 <p className="contextLine">This interview round is not active for scorecard submission.</p>
               )}
@@ -2533,6 +2606,7 @@ function App() {
                   invoiceAction={invoiceAction}
                   currentUserName={me.full_name}
                   onRecordPayment={() => setActiveForm('client-payment')}
+                  onDeleteTestInvoice={deleteSelectedClientInvoice}
                 />
               </>
             )}
@@ -2869,7 +2943,37 @@ function App() {
                 {selectedProject.documents.length > 0 && (
                   <div className="documentList">
                     {selectedProject.documents.map((document) => (
-                      <span className="status" key={document.id}>{document.document_type.toUpperCase()}: {document.original_filename}</span>
+                      <div className="documentRow" key={document.id}>
+                        <div>
+                          <strong>{document.document_type.toUpperCase()}</strong>
+                          <span>{document.original_filename}</span>
+                        </div>
+                        <div className="horizontalActions">
+                          <button className="secondary" type="button" onClick={() => viewDocument(document.id)}>
+                            <FileText size={18} />
+                            <span>View</span>
+                          </button>
+                          <button className="secondary" type="button" onClick={() => downloadDocument(document.id)}>
+                            <Download size={18} />
+                            <span>Download</span>
+                          </button>
+                          {canOperate && (
+                            <>
+                              <form className="inlineUpload" onSubmit={(event) => void replaceProjectDocument(event, document)}>
+                                <input aria-label={`Replacement file for ${document.original_filename}`} name="document" type="file" required />
+                                <button className="secondary" disabled={loading}>
+                                  <Upload size={18} />
+                                  <span>Replace</span>
+                                </button>
+                              </form>
+                              <button className="secondary danger" type="button" onClick={() => void deleteProjectDocument(document)} disabled={loading}>
+                                <Trash2 size={18} />
+                                <span>Remove</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -3559,6 +3663,7 @@ function InvoiceDetail({
   invoiceAction,
   currentUserName,
   onRecordPayment,
+  onDeleteTestInvoice,
 }: {
   selectedInvoice: ClientInvoice | undefined;
   loading: boolean;
@@ -3568,8 +3673,15 @@ function InvoiceDetail({
   invoiceAction: (path: string, body: Record<string, unknown>, message: string) => Promise<void>;
   currentUserName: string | null;
   onRecordPayment?: () => void;
+  onDeleteTestInvoice?: () => void;
 }) {
   if (!selectedInvoice) return <p className="empty">No invoices yet.</p>;
+  const paidTotal = Number(selectedInvoice.paid_total ?? '0');
+  const canDeleteTestInvoice = canFinance
+    && !Number.isNaN(paidTotal)
+    && paidTotal <= 0
+    && !selectedInvoice.sent_at
+    && !['sent_to_client', 'partially_paid', 'partially_paid_remainder_cancelled', 'paid'].includes(selectedInvoice.status);
 
   return (
     <div className="invoiceGrid">
@@ -3637,6 +3749,17 @@ function InvoiceDetail({
             >
               <span>Cancel Invoice</span>
             </button>
+            <button
+              className="secondary danger"
+              disabled={loading || !canDeleteTestInvoice}
+              onClick={onDeleteTestInvoice}
+            >
+              <Trash2 size={18} />
+              <span>Delete Test Invoice</span>
+            </button>
+            {!canDeleteTestInvoice && (
+              <p className="contextLine">Test invoice deletion is available only before the invoice is sent and before any payment is recorded.</p>
+            )}
             {!['sent_to_client', 'partially_paid'].includes(selectedInvoice.status) && (
               <p className="contextLine">Client payment can be recorded after Finance sends the invoice to the client.</p>
             )}

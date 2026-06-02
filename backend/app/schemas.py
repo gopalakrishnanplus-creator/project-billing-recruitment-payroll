@@ -280,6 +280,15 @@ class RecruitmentNeedDetailRead(RecruitmentNeedRead):
 class InterviewRead(BaseModel):
     id: int
     candidate_id: int
+    candidate_name: str | None = None
+    candidate_email: str | None = None
+    candidate_status: str | None = None
+    recruitment_need_id: int | None = None
+    position_title: str | None = None
+    project_id: int | None = None
+    project_code: str | None = None
+    project_title: str | None = None
+    client_company_name: str | None = None
     interviewer_user_id: int | None
     interviewer_name: str
     interview_order: int | None = None

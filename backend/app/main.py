@@ -733,9 +733,7 @@ def next_date(current: date, frequency: str) -> date:
     if frequency == "weekly":
         return current + timedelta(days=7)
     if frequency == "twice_monthly":
-        if current.day < 15:
-            return date(current.year, current.month, 15)
-        return add_months(date(current.year, current.month, 1), 1)
+        return current + timedelta(days=15)
     if frequency == "quarterly":
         return add_months(current, 3)
     if frequency == "monthly":
@@ -744,13 +742,7 @@ def next_date(current: date, frequency: str) -> date:
 
 
 def first_frequency_date(start_date: date, frequency: str) -> date:
-    if frequency != "twice_monthly":
-        return start_date
-    if start_date.day <= 1:
-        return date(start_date.year, start_date.month, 1)
-    if start_date.day <= 15:
-        return date(start_date.year, start_date.month, 15)
-    return add_months(date(start_date.year, start_date.month, 1), 1)
+    return start_date
 
 
 def next_unraised_invoice_date(schedule: ClientInvoiceSchedule) -> date | None:
@@ -1955,6 +1947,74 @@ def queue_invoice_approval_email(db: Session, invoice: ClientInvoice) -> None:
             status=status,
         )
     )
+
+
+def client_invoice_finance_review_template(invoice: ClientInvoice, approver_name: str, notes: str | None) -> tuple[str, str, str]:
+    review_link = f"{FRONTEND_URL}/?view=invoices"
+    subject = f"Client invoice {invoice.invoice_number} approved by CAE"
+    text = "\n".join(
+        [
+            f"Client invoice {invoice.invoice_number} has been approved by the Client Account Executive and is ready for Finance approval.",
+            "",
+            f"Client: {invoice.project.company.name}",
+            f"SOW: {invoice.project.title} ({invoice.project.project_code})",
+            f"Amount: {invoice.currency} {invoice.amount}",
+            f"Invoice date: {invoice.issue_date}",
+            f"Due date: {invoice.due_date}",
+            f"Approved by: {approver_name}",
+            f"CAE notes: {notes or 'None'}",
+            "",
+            f"Log in to review, approve, and send: {review_link}",
+        ]
+    )
+    html = f"""
+    <h2>Client invoice approved by CAE</h2>
+    <p>Client invoice {escape(invoice.invoice_number)} has been approved by the Client Account Executive and is ready for Finance approval.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Client</strong></td><td>{escape(invoice.project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(invoice.project.title)} ({escape(invoice.project.project_code)})</td></tr>
+      <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+      <tr><td><strong>Invoice date</strong></td><td>{escape(str(invoice.issue_date))}</td></tr>
+      <tr><td><strong>Due date</strong></td><td>{escape(str(invoice.due_date))}</td></tr>
+      <tr><td><strong>Approved by</strong></td><td>{escape(approver_name)}</td></tr>
+      <tr><td><strong>CAE notes</strong></td><td>{escape(notes or 'None')}</td></tr>
+    </table>
+    <p><a href="{escape(review_link)}">Log in to review, approve, and send this invoice</a></p>
+    """
+    return subject, text, html
+
+
+def queue_client_invoice_finance_review_email(db: Session, invoice: ClientInvoice, approver_name: str, notes: str | None) -> None:
+    recipients = finance_manager_emails(db)
+    cc_emails = [invoice.project.client_account_executive.email] if invoice.project.client_account_executive else []
+    subject, text_body, html = client_invoice_finance_review_template(invoice, approver_name, notes)
+    if not recipients:
+        db.add(
+            EmailNotification(
+                project_id=invoice.project_id,
+                invoice_id=invoice.id,
+                recipient_email="",
+                cc_email=",".join(cc_emails) or None,
+                subject=subject,
+                body="No active Finance Manager user is assigned in the system.",
+                status="failed",
+            )
+        )
+        return
+    for recipient in recipients:
+        filtered_cc = [email for email in cc_emails if email and email != recipient]
+        status, detail = send_sendgrid_email(to_email=recipient, cc_emails=filtered_cc, subject=subject, text=text_body, html=html)
+        db.add(
+            EmailNotification(
+                project_id=invoice.project_id,
+                invoice_id=invoice.id,
+                recipient_email=recipient,
+                cc_email=",".join(filtered_cc) if filtered_cc else None,
+                subject=subject,
+                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                status=status,
+            )
+        )
 
 
 def create_due_invoices(db: Session, as_of: date) -> list[ClientInvoice]:
@@ -3511,7 +3571,15 @@ def download_invoice(invoice_id: int, request: Request, db: Session = Depends(ge
 
 @app.post("/client-invoices/{invoice_id}/client-account-approval", response_model=InvoiceDetailRead)
 def approve_client_account(invoice_id: int, payload: ApprovalCreate, request: Request, db: Session = Depends(get_db)) -> InvoiceDetailRead:
-    invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.project)))
+    invoice = db.scalar(
+        select(ClientInvoice)
+        .where(ClientInvoice.id == invoice_id)
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_account_executive),
+        )
+    )
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
     auth = approval_auth_from_request(request, db, kind="client_invoice", invoice_id=invoice_id)
@@ -3521,6 +3589,7 @@ def approve_client_account(invoice_id: int, payload: ApprovalCreate, request: Re
         raise HTTPException(status_code=400, detail=f"Invoice is not ready for client account approval: {invoice.status}")
     invoice.status = InvoiceStatus.approved_by_client_account.value
     db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="client_account_executive", approver_name=payload.approver_name, decision="approved", notes=payload.notes))
+    queue_client_invoice_finance_review_email(db, invoice, payload.approver_name, payload.notes)
     log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.approver_name, action="client_account_approved_invoice")
     db.commit()
     return load_invoice_detail(invoice_id, db)

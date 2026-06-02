@@ -145,6 +145,12 @@ def test_project_to_client_collection_flow():
             assert notification.cc_email == "finance@example.com"
             assert "Log in to review and approve this invoice" in notification.body
             assert f"/auth/login?approval_invoice_id={invoice_id}" in notification.body
+            cae = db.query(app_main.AppUser).filter(app_main.AppUser.email == "cae@example.com").one()
+            approval_token = app_main.approval_token_for_user("client_invoice", invoice_id, cae)
+
+        token_download_response = client.get(f"/client-invoices/{invoice_id}/download?approval_token={approval_token}")
+        assert token_download_response.status_code == 200
+        assert token_download_response.headers["content-type"] == "application/pdf"
 
         client_account_response = client.post(
             f"/client-invoices/{invoice_id}/client-account-approval",
@@ -153,6 +159,15 @@ def test_project_to_client_collection_flow():
         )
         assert client_account_response.status_code == 200, client_account_response.text
         assert client_account_response.json()["status"] == "approved_by_client_account"
+        with SessionLocal() as db:
+            finance_notification = (
+                db.query(EmailNotification)
+                .filter(EmailNotification.invoice_id == invoice_id, EmailNotification.recipient_email == "finance@example.com", EmailNotification.subject.like("%approved by CAE%"))
+                .one()
+            )
+            assert "ready for Finance approval" in finance_notification.body
+            assert "Matches SOW schedule." in finance_notification.body
+            assert "cae@example.com" in (finance_notification.cc_email or "")
 
         finance_response = client.post(
             f"/client-invoices/{invoice_id}/finance-approval",
@@ -775,7 +790,7 @@ def test_historical_client_invoice_schedule_starts_from_next_cycle():
         assert "next current/future cycle" in past_next_cycle_response.text
 
 
-def test_twice_monthly_schedules_generate_first_and_fifteenth_catchup():
+def test_twice_monthly_schedules_generate_every_fifteen_days_from_first_date():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
@@ -784,7 +799,7 @@ def test_twice_monthly_schedules_generate_first_and_fifteenth_catchup():
         provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
         provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
         previous_month_first = app_main.add_months(date.today().replace(day=1), -1)
-        previous_month_fifteenth = previous_month_first.replace(day=15)
+        previous_month_sixteenth = previous_month_first + timedelta(days=15)
 
         project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
         assert project_response.status_code == 201, project_response.text
@@ -799,13 +814,13 @@ def test_twice_monthly_schedules_generate_first_and_fifteenth_catchup():
                 "currency": "USD",
                 "frequency": "twice_monthly",
                 "first_invoice_date": str(previous_month_first),
-                "final_invoice_date": str(previous_month_fifteenth),
+                "final_invoice_date": str(previous_month_sixteenth),
             },
         )
         assert schedule_response.status_code == 201, schedule_response.text
         invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
         assert invoices_response.status_code == 200, invoices_response.text
-        assert [invoice["issue_date"] for invoice in invoices_response.json()] == [str(previous_month_first), str(previous_month_fifteenth)]
+        assert [invoice["issue_date"] for invoice in invoices_response.json()] == [str(previous_month_first), str(previous_month_sixteenth)]
 
         need_response = client.post(
             f"/projects/{project['id']}/recruitment-needs",
@@ -841,14 +856,14 @@ def test_twice_monthly_schedules_generate_first_and_fifteenth_catchup():
                 "currency": "USD",
                 "frequency": "twice_monthly",
                 "invoice_start_date": str(previous_month_first),
-                "invoice_end_date": str(previous_month_fifteenth),
+                "invoice_end_date": str(previous_month_sixteenth),
             },
         )
         assert candidate_schedule_response.status_code == 201, candidate_schedule_response.text
 
         with SessionLocal() as db:
             candidate_invoices = db.query(CandidateVendorInvoice).order_by(CandidateVendorInvoice.invoice_due_date.asc()).all()
-            assert [invoice.invoice_due_date for invoice in candidate_invoices] == [previous_month_first, previous_month_fifteenth]
+            assert [invoice.invoice_due_date for invoice in candidate_invoices] == [previous_month_first, previous_month_sixteenth]
             assert {invoice.status for invoice in candidate_invoices} == {"awaiting_upload"}
             assert db.query(EmailNotification).filter(EmailNotification.recipient_email == "twice-monthly-candidate@example.com").count() == 2
 

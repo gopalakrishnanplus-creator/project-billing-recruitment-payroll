@@ -448,7 +448,7 @@ function contractInvoiceSummary(contract: CandidateContract | undefined): string
   if (!contract) return 'Not set';
   const currency = contract.currency ?? 'USD';
   const amount = contract.invoice_amount ?? 'Not set';
-  const frequency = contract.invoice_frequency ?? 'not set';
+  const frequency = frequencyLabel(contract.invoice_frequency);
   return `${currency} ${amount} · ${frequency}`;
 }
 
@@ -461,7 +461,7 @@ function contractInvoiceDates(contract: CandidateContract | undefined): string {
 function candidateInvoiceScheduleSummary(schedule: CandidateInvoiceSchedule): string {
   const start = schedule.invoice_date ?? schedule.invoice_start_date ?? 'No start';
   const dateRange = schedule.invoice_end_date ? `${start} to ${schedule.invoice_end_date}` : start;
-  return `${candidateInvoiceTypeLabel(schedule.invoice_type)} · ${schedule.currency} ${schedule.amount} · ${schedule.frequency} · ${dateRange} · ${schedule.status}`;
+  return `${candidateInvoiceTypeLabel(schedule.invoice_type)} · ${schedule.currency} ${schedule.amount} · ${frequencyLabel(schedule.frequency)} · ${dateRange} · ${schedule.status}`;
 }
 
 function contractingEntityLabel(value: string | undefined): string {
@@ -470,6 +470,19 @@ function contractingEntityLabel(value: string | undefined): string {
 
 function candidateInvoiceTypeLabel(value: string | undefined | null): string {
   return CANDIDATE_INVOICE_TYPE_LABELS[value ?? 'invoice'] ?? (value ?? 'invoice').replaceAll('_', ' ');
+}
+
+function frequencyLabel(value: string | undefined | null): string {
+  if (!value) return 'not set';
+  if (value === 'twice_monthly') return 'Every 15 days';
+  return value.replaceAll('_', ' ');
+}
+
+function clientInvoiceLabel(invoice: ClientInvoice): string {
+  const client = invoice.client_company_name ?? 'Client not set';
+  const project = invoice.project_code ?? 'Project not set';
+  const sow = invoice.project_title ?? invoice.item_description ?? 'SOW not set';
+  return `${client} | ${project} | ${sow} | ${invoice.currency} ${invoice.amount} | ${invoice.status.replaceAll('_', ' ')}`;
 }
 
 function pagedItems<T>(items: T[], page: number): T[] {
@@ -568,8 +581,8 @@ function App() {
     [candidates],
   );
   const selectedCandidate = useMemo(
-    () => candidates.find((candidate) => candidate.id === selectedCandidateId) ?? candidatesForNeed[0] ?? candidates[0],
-    [candidates, candidatesForNeed, selectedCandidateId],
+    () => candidatesForNeed.find((candidate) => candidate.id === selectedCandidateId) ?? candidatesForNeed[0],
+    [candidatesForNeed, selectedCandidateId],
   );
   const selectedHiredCandidate = useMemo(
     () => (selectedCandidate?.status === 'hired' ? selectedCandidate : hiredCandidates[0]),
@@ -588,9 +601,14 @@ function App() {
     () => projects.filter((project) => project.msa_reference === null),
     [projects],
   );
+  const visibleInterviews = useMemo(() => {
+    if (me?.active_role !== 'hr_manager' || !selectedNeed) return interviews;
+    const candidateIds = new Set(candidatesForNeed.map((candidate) => candidate.id));
+    return interviews.filter((interview) => candidateIds.has(interview.candidate_id));
+  }, [candidatesForNeed, interviews, me?.active_role, selectedNeed]);
   const selectedInterview = useMemo(
-    () => interviews.find((interview) => interview.id === selectedInterviewId) ?? interviews[0],
-    [interviews, selectedInterviewId],
+    () => visibleInterviews.find((interview) => interview.id === selectedInterviewId) ?? visibleInterviews[0],
+    [selectedInterviewId, visibleInterviews],
   );
   const projectRows = useMemo(() => pagedItems(projects, projectPage), [projects, projectPage]);
   const recruitmentNeedRows = useMemo(() => pagedItems(recruitmentNeeds, recruitmentPage), [recruitmentNeeds, recruitmentPage]);
@@ -1306,9 +1324,14 @@ function App() {
     });
   }
 
+  function downloadClientInvoice(invoiceId: number | undefined, token?: string | null) {
+    if (!invoiceId) return;
+    const tokenQuery = token ? `?approval_token=${encodeURIComponent(token)}` : '';
+    window.open(`${API_BASE}/client-invoices/${invoiceId}/download${tokenQuery}`, '_blank', 'noopener,noreferrer');
+  }
+
   function downloadInvoice() {
-    if (!selectedInvoice) return;
-    window.open(`${API_BASE}/client-invoices/${selectedInvoice.id}/download`, '_blank', 'noopener,noreferrer');
+    downloadClientInvoice(selectedInvoice?.id);
   }
 
   function downloadCandidateInvoice(invoiceId: number | undefined, token?: string | null) {
@@ -1387,6 +1410,7 @@ function App() {
         approvalError={approvalError}
         approvalInvoice={approvalInvoice}
         onApprove={() => void approvalInvoiceAction()}
+        onDownload={() => downloadClientInvoice(approvalInvoice?.id, approvalToken)}
       />
     );
   }
@@ -1653,7 +1677,7 @@ function App() {
                   <select name="billing_frequency" defaultValue={needBillingType === 'fixed_fee' ? 'single' : 'monthly'}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
-                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                    <option value="twice_monthly">Every 15 days</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -1771,7 +1795,7 @@ function App() {
                   <select name="billing_frequency" defaultValue={selectedNeed.billing_frequency ?? 'monthly'}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
-                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                    <option value="twice_monthly">Every 15 days</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -1861,7 +1885,7 @@ function App() {
                 <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
                   <option value="single">Single</option>
                   <option value="weekly">Weekly</option>
-                  <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                  <option value="twice_monthly">Every 15 days</option>
                   <option value="monthly">Monthly</option>
                   <option value="quarterly">Quarterly</option>
                 </select>
@@ -2057,7 +2081,7 @@ function App() {
                   <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
-                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                    <option value="twice_monthly">Every 15 days</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -2199,7 +2223,7 @@ function App() {
               <label className="field">
                 <span>Interview</span>
                 <select value={selectedInterview?.id ?? ''} onChange={(event) => setSelectedInterviewId(Number(event.target.value))}>
-                  {interviews.map((interview) => {
+                  {visibleInterviews.map((interview) => {
                     const candidate = candidates.find((item) => item.id === interview.candidate_id);
                     return <option key={interview.id} value={interview.id}>{candidate?.full_name ?? `Candidate ${interview.candidate_id}`} · #{interview.interview_order ?? '-'} · {interview.interviewer_name} · {interview.status}</option>;
                   })}
@@ -2277,7 +2301,7 @@ function App() {
                   <div className={`lineRow ${selectedClientSchedule?.id === schedule.id ? 'selectedLine' : ''}`} key={schedule.id}>
                     <div>
                       <strong>{schedule.project_code} · {schedule.client_company_name}</strong>
-                      <span>{schedule.project_title} · {schedule.currency} {schedule.amount} · {schedule.frequency.replaceAll('_', ' ')}</span>
+                      <span>{schedule.project_title} · {schedule.currency} {schedule.amount} · {frequencyLabel(schedule.frequency)}</span>
                       <span>{schedule.item_description ?? schedule.label}</span>
                       <span>First {schedule.first_invoice_date} · Next {schedule.next_invoice_date ?? 'None'}{schedule.final_invoice_date ? ` · Final ${schedule.final_invoice_date}` : ''} · Historical {schedule.historical_backfill ? 'Yes' : 'No'}</span>
                       <span>CAE: {schedule.client_account_executive_name ?? schedule.client_account_executive_email ?? 'Not assigned'}</span>
@@ -2315,7 +2339,7 @@ function App() {
                 <div><dt>Client</dt><dd>{selectedClientSchedule.client_company_name}</dd></div>
                 <div><dt>Description</dt><dd>{selectedClientSchedule.item_description ?? selectedClientSchedule.label}</dd></div>
                 <div><dt>Amount</dt><dd>{selectedClientSchedule.currency} {selectedClientSchedule.amount}</dd></div>
-                <div><dt>Frequency</dt><dd>{selectedClientSchedule.frequency.replaceAll('_', ' ')}</dd></div>
+                <div><dt>Frequency</dt><dd>{frequencyLabel(selectedClientSchedule.frequency)}</dd></div>
                 <div><dt>First invoice date</dt><dd>{selectedClientSchedule.first_invoice_date}</dd></div>
                 <div><dt>Next invoice date</dt><dd>{selectedClientSchedule.next_invoice_date ?? 'None'}</dd></div>
                 <div><dt>Final invoice date</dt><dd>{selectedClientSchedule.final_invoice_date ?? 'None'}</dd></div>
@@ -2346,7 +2370,7 @@ function App() {
                   <select name="frequency" value={editingScheduleFrequency} onChange={(event) => setEditingScheduleFrequency(event.target.value)}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
-                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                    <option value="twice_monthly">Every 15 days</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -2418,7 +2442,7 @@ function App() {
                           <span>{invoice.item_description ?? invoice.label}</span>
                         </div>
                         <div className="rolePills">
-                          <span className="status">{invoice.frequency.replaceAll('_', ' ')}</span>
+                          <span className="status">{frequencyLabel(invoice.frequency)}</span>
                           {invoice.final_invoice_date && <span className="status">Until {invoice.final_invoice_date}</span>}
                           {invoice.client_account_executive_email && <span className="status">{invoice.client_account_executive_email}</span>}
                         </div>
@@ -2437,12 +2461,12 @@ function App() {
                     {invoices.map((invoice) => (
                       <div className={`lineRow ${selectedInvoice?.id === invoice.id ? 'selectedLine' : ''}`} key={invoice.id}>
                         <div>
-                          <strong>{invoice.issue_date} · {invoice.invoice_number}</strong>
-                          <span>{invoice.client_company_name} · {invoice.project_code} · {invoice.item_description ?? 'No item description'}</span>
+                          <strong>{invoice.issue_date} · {clientInvoiceLabel(invoice)}</strong>
+                          <span>Invoice {invoice.invoice_number} · {invoice.item_description ?? 'No item description'}</span>
                           <span>{invoice.currency} {invoice.amount} · paid {invoice.paid_total ?? '0.00'} · balance {invoice.balance_due ?? invoice.amount}</span>
                         </div>
                         <div className="horizontalActions">
-                          <span className="status">{invoice.status}</span>
+                          <span className="status">{invoice.status.replaceAll('_', ' ')}</span>
                           <button className="secondary" type="button" onClick={() => setSelectedInvoiceId(invoice.id)}>View</button>
                         </div>
                       </div>
@@ -2457,10 +2481,38 @@ function App() {
                   downloadInvoice={downloadInvoice}
                   invoiceAction={invoiceAction}
                   currentUserName={me.full_name}
+                  onRecordPayment={() => setActiveForm('client-payment')}
                 />
               </>
             )}
           </section>
+
+          {canFinance && selectedInvoice && activeForm === 'client-payment' && (
+            <form
+              className="panel"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const formElement = event.currentTarget;
+                void invoiceAction('/payments', formPayload(formElement), 'Payment recorded');
+                formElement.reset();
+              }}
+            >
+              <PanelTitle icon={<Banknote size={18} />} title="Client Collection" />
+              <Field label="Amount received" name="amount_received" type="number" step="0.01" defaultValue={selectedInvoice.balance_due ?? selectedInvoice.amount} required />
+              <Field label="Received date" name="received_date" type="date" defaultValue={today()} required />
+              <Field label="Bank reference" name="bank_reference" />
+              <Field label="Recorded by" name="recorded_by_name" defaultValue={me.full_name ?? 'Finance Manager'} required />
+              <label className="field">
+                <span>Notes</span>
+                <textarea name="notes" rows={3} />
+              </label>
+              <button className="primary" disabled={loading || !['sent_to_client', 'partially_paid'].includes(selectedInvoice.status)}>
+                <Banknote size={18} />
+                <span>Record Payment</span>
+              </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+            </form>
+          )}
 
           <section className="panel wide">
             <PanelTitle icon={<Banknote size={18} />} title="Candidate Invoices" />
@@ -2475,7 +2527,7 @@ function App() {
                         <span>{invoice.currency} {invoice.amount} · paid {invoice.paid_total} · balance {invoice.balance_due}</span>
                       </div>
                       <div className="horizontalActions">
-                        <span className="status">{invoice.status}</span>
+                        <span className="status">{invoice.status.replaceAll('_', ' ')}</span>
                         <button className="secondary" type="button" onClick={() => setSelectedCandidateInvoiceId(invoice.id)}>View</button>
                       </div>
                     </div>
@@ -2542,6 +2594,9 @@ function App() {
                         </button>
                       )}
                     </div>
+                    {canFinance && !['approved', 'partially_paid', 'paid'].includes(selectedCandidateInvoice.status) && (
+                      <p className="contextLine">Candidate invoice payment can be recorded after the Client Account Executive marks this invoice approved.</p>
+                    )}
                   </div>
                 )}
                 {canFinance && selectedCandidateInvoice && activeForm === 'candidate-payment' && (
@@ -2836,7 +2891,7 @@ function App() {
                   <select name="billing_frequency" defaultValue={needBillingType === 'fixed_fee' ? 'single' : 'monthly'}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
-                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                    <option value="twice_monthly">Every 15 days</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -2879,7 +2934,7 @@ function App() {
                   <select name="frequency" value={scheduleFrequency} onChange={(event) => setScheduleFrequency(event.target.value)}>
                     <option value="single">Single</option>
                     <option value="weekly">Weekly</option>
-                    <option value="twice_monthly">Twice a month (1st and 15th)</option>
+                    <option value="twice_monthly">Every 15 days</option>
                     <option value="monthly">Monthly</option>
                     <option value="quarterly">Quarterly</option>
                   </select>
@@ -2907,7 +2962,7 @@ function App() {
               <select value={selectedInvoice?.id ?? ''} onChange={(event) => setSelectedInvoiceId(Number(event.target.value))}>
                 {invoices.map((invoice) => (
                   <option key={invoice.id} value={invoice.id}>
-                    {invoice.invoice_number} · {invoice.status}
+                    {clientInvoiceLabel(invoice)}
                   </option>
                 ))}
               </select>
@@ -3050,6 +3105,7 @@ function ApprovalShell({
   approvalError,
   approvalInvoice,
   onApprove,
+  onDownload,
 }: {
   loading: boolean;
   notice: Notice;
@@ -3059,6 +3115,7 @@ function ApprovalShell({
   approvalError?: string | null;
   approvalInvoice?: ClientInvoice | null;
   onApprove?: () => void;
+  onDownload?: () => void;
 }) {
   if (approvalError === 'not_authorized') {
     return (
@@ -3118,10 +3175,16 @@ function ApprovalShell({
               <div><dt>Amount</dt><dd>{approvalInvoice.currency} {approvalInvoice.amount}</dd></div>
               <div><dt>Balance</dt><dd>{approvalInvoice.currency} {approvalInvoice.balance_due ?? approvalInvoice.amount}</dd></div>
             </dl>
-            <button className="primary" disabled={loading || approvalInvoice.status !== 'due_for_client_approval'} onClick={onApprove}>
-              <BadgeCheck size={18} />
-              <span>Approve Invoice</span>
-            </button>
+            <div className="actions">
+              <button className="secondary" type="button" onClick={onDownload}>
+                <Download size={18} />
+                <span>Download Invoice PDF</span>
+              </button>
+              <button className="primary" disabled={loading || approvalInvoice.status !== 'due_for_client_approval'} onClick={onApprove}>
+                <BadgeCheck size={18} />
+                <span>Approve Invoice</span>
+              </button>
+            </div>
           </>
         )}
       </section>
@@ -3347,6 +3410,7 @@ function CandidateInvoiceItemForm({
 }) {
   return (
     <form className="grid four" onSubmit={onSubmit}>
+      <p className="contextLine wideField">Invoice: candidate gets a single-use upload reminder. Reimbursement: same approval and payment flow as an invoice. Auto-reimbursement: no candidate upload reminder; the system creates the fixed reimbursement and sends it for CAE approval.</p>
       <Field label="Description" name="item_description" required />
       <label className="field">
         <span>Invoice type</span>
@@ -3363,7 +3427,7 @@ function CandidateInvoiceItemForm({
         <select name="frequency" value={frequency} onChange={(event) => onFrequencyChange(event.target.value)}>
           <option value="single">Single</option>
           <option value="weekly">Weekly</option>
-          <option value="twice_monthly">Twice a month (1st and 15th)</option>
+          <option value="twice_monthly">Every 15 days</option>
           <option value="monthly">Monthly</option>
           <option value="quarterly">Quarterly</option>
         </select>
@@ -3443,6 +3507,7 @@ function InvoiceDetail({
   downloadInvoice,
   invoiceAction,
   currentUserName,
+  onRecordPayment,
 }: {
   selectedInvoice: ClientInvoice | undefined;
   loading: boolean;
@@ -3451,6 +3516,7 @@ function InvoiceDetail({
   downloadInvoice: () => void;
   invoiceAction: (path: string, body: Record<string, unknown>, message: string) => Promise<void>;
   currentUserName: string | null;
+  onRecordPayment?: () => void;
 }) {
   if (!selectedInvoice) return <p className="empty">No invoices yet.</p>;
 
@@ -3503,6 +3569,14 @@ function InvoiceDetail({
               <span>Send</span>
             </button>
             <button
+              className="secondary"
+              disabled={loading || !['sent_to_client', 'partially_paid'].includes(selectedInvoice.status)}
+              onClick={onRecordPayment}
+            >
+              <Banknote size={18} />
+              <span>Record Payment</span>
+            </button>
+            <button
               className="secondary danger"
               disabled={loading || ['paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedInvoice.status)}
               onClick={() => {
@@ -3512,6 +3586,9 @@ function InvoiceDetail({
             >
               <span>Cancel Invoice</span>
             </button>
+            {!['sent_to_client', 'partially_paid'].includes(selectedInvoice.status) && (
+              <p className="contextLine">Client payment can be recorded after Finance sends the invoice to the client.</p>
+            )}
           </>
         )}
       </div>

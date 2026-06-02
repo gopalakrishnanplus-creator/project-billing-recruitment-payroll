@@ -2827,6 +2827,7 @@ function App() {
                 <Field label="MSA upload" name="msa_document" type="file" disabled={internalRecruitmentProject} />
                 <Field label="SOW title" name="sow_title" defaultValue={internalRecruitmentProject ? internalProjectPreset.sow_title : ''} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <Field label="SOW upload" name="sow_document" type="file" disabled={internalRecruitmentProject} />
+                <Field label="SOW amendment upload" name="sow_amendment_document" type="file" disabled={internalRecruitmentProject} />
                 <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue={internalRecruitmentProject ? '0' : '12000'} disabled={internalRecruitmentProject} required={!internalRecruitmentProject} />
                 <Field label="Currency" name="currency" defaultValue="USD" required />
                 <Field label="Start date" name="start_date" type="date" defaultValue={today()} required />
@@ -2901,6 +2902,7 @@ function App() {
                   <Field label="MSA upload" name="msa_document" type="file" />
                   <Field label="SOW title" name="sow_title" defaultValue={selectedProject.title} />
                   <Field label="SOW upload" name="sow_document" type="file" />
+                  <Field label="SOW amendment upload" name="sow_amendment_document" type="file" />
                   <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue={selectedProject.sow_amount} />
                   <Field label="Currency" name="currency" defaultValue={selectedProject.currency} />
                   <Field label="Start date" name="start_date" type="date" defaultValue={selectedProject.start_date} />
@@ -2996,6 +2998,7 @@ function App() {
                 <p className="contextLine">{selectedProject ? `${selectedProject.client_company_name} · ${selectedProject.msa_reference}` : 'Select an existing SOW first'}</p>
                 <Field label="SOW title" name="sow_title" required />
                 <Field label="SOW upload" name="sow_document" type="file" />
+                <Field label="SOW amendment upload" name="sow_amendment_document" type="file" />
                 <Field label="SOW amount" name="sow_amount" type="number" step="0.01" defaultValue="5000" required />
                 <Field label="Currency" name="currency" defaultValue={selectedProject?.currency ?? 'USD'} required />
                 <Field label="Start date" name="start_date" type="date" defaultValue={today()} required />

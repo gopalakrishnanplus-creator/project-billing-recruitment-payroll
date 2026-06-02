@@ -2498,6 +2498,13 @@ async def create_project(request: Request, _: AuthContext = Depends(require_role
         document_type="sow",
         uploaded_by_name=payload.operations_manager_name,
     )
+    await save_uploaded_document(
+        db,
+        file=files.get("sow_amendment_document"),
+        project_id=project.id,
+        document_type="sow_amendment",
+        uploaded_by_name=payload.operations_manager_name,
+    )
 
     log_event(db, project_id=project.id, actor_name=payload.operations_manager_name, action="project_created", details=f"Created {project.project_code}")
     db.commit()
@@ -2532,6 +2539,13 @@ async def add_sow_to_msa(project_id: int, request: Request, _: AuthContext = Dep
         file=files.get("sow_document"),
         project_id=project.id,
         document_type="sow",
+        uploaded_by_name=payload.operations_manager_name,
+    )
+    await save_uploaded_document(
+        db,
+        file=files.get("sow_amendment_document"),
+        project_id=project.id,
+        document_type="sow_amendment",
         uploaded_by_name=payload.operations_manager_name,
     )
     log_event(db, project_id=project.id, actor_name=payload.operations_manager_name, action="sow_added", details=f"Added {project.project_code} under {source.msa.reference if source.msa else 'MSA'}")
@@ -2588,6 +2602,13 @@ async def update_project(project_id: int, request: Request, _: AuthContext = Dep
         file=files.get("sow_document"),
         project_id=project.id,
         document_type="sow",
+        uploaded_by_name=payload.operations_manager_name or project.operations_manager_name,
+    )
+    await save_uploaded_document(
+        db,
+        file=files.get("sow_amendment_document"),
+        project_id=project.id,
+        document_type="sow_amendment",
         uploaded_by_name=payload.operations_manager_name or project.operations_manager_name,
     )
     log_event(db, project_id=project.id, actor_name=project.operations_manager_name, action="project_updated", details=project.project_code)

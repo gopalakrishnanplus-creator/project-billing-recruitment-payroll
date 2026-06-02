@@ -417,6 +417,7 @@ def test_project_file_upload_update_and_additional_sow():
                 "sow_title": "Updated SOW",
                 "sow_amount": "15000.00",
             },
+            files={"sow_amendment_document": ("amendment.pdf", b"amendment", "application/pdf")},
         )
         assert update_response.status_code == 200, update_response.text
         updated_project = update_response.json()
@@ -427,6 +428,7 @@ def test_project_file_upload_update_and_additional_sow():
         assert updated_project["client_contact_phone"] == "+1-555-9999"
         assert updated_project["title"] == "Updated SOW"
         assert updated_project["sow_amount"] == "15000.00"
+        assert any(document["document_type"] == "sow_amendment" and document["original_filename"] == "amendment.pdf" for document in updated_project["documents"])
 
         sow_response = client.post(
             f"/projects/{project['id']}/sows",

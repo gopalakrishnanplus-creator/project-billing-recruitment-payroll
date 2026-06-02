@@ -631,6 +631,29 @@ function App() {
       .filter((interview) => interview.candidate_id === selectedInterview.candidate_id && interview.status === 'not_released' && (interview.interview_order ?? 0) > currentOrder)
       .sort((left, right) => (left.interview_order ?? left.id) - (right.interview_order ?? right.id))[0];
   }, [selectedInterview, visibleInterviews]);
+  const selectedCandidateInterviews = useMemo(
+    () => interviews
+      .filter((interview) => interview.candidate_id === selectedCandidate?.id)
+      .sort((left, right) => (left.interview_order ?? left.id) - (right.interview_order ?? right.id)),
+    [interviews, selectedCandidate?.id],
+  );
+  const selectedCandidateLatestCompletedInterview = useMemo(
+    () => selectedCandidateInterviews
+      .filter((interview) => interview.status === 'completed')
+      .sort((left, right) => (right.interview_order ?? right.id) - (left.interview_order ?? left.id))[0],
+    [selectedCandidateInterviews],
+  );
+  const selectedCandidateActiveInterview = useMemo(
+    () => selectedCandidateInterviews.find((interview) => ['active', 'pending'].includes(interview.status)),
+    [selectedCandidateInterviews],
+  );
+  const selectedCandidateNextUnreleasedInterview = useMemo(() => {
+    if (!selectedCandidateLatestCompletedInterview) return undefined;
+    const currentOrder = selectedCandidateLatestCompletedInterview.interview_order ?? 0;
+    return selectedCandidateInterviews
+      .filter((interview) => interview.status === 'not_released' && (interview.interview_order ?? 0) > currentOrder)
+      .sort((left, right) => (left.interview_order ?? left.id) - (right.interview_order ?? right.id))[0];
+  }, [selectedCandidateInterviews, selectedCandidateLatestCompletedInterview]);
   const pendingHrInterviewReviews = useMemo(
     () => visibleInterviews
       .filter((interview) => interview.status === 'completed' && interview.candidate_status === 'awaiting_hr_interview_review')
@@ -1107,6 +1130,33 @@ function App() {
       const interview = await api<Interview>(`/interviews/${selectedInterview.id}/release-next`, { method: 'POST' });
       setSelectedInterviewId(interview.id);
       return `Interview round ${interview.interview_order ?? ''} released`;
+    });
+  }
+
+  async function releaseNextInterviewRoundForCandidate() {
+    if (!selectedCandidateLatestCompletedInterview) return;
+    await mutate(async () => {
+      const interview = await api<Interview>(`/interviews/${selectedCandidateLatestCompletedInterview.id}/release-next`, { method: 'POST' });
+      setSelectedInterviewId(interview.id);
+      return `Interview round ${interview.interview_order ?? ''} released`;
+    });
+  }
+
+  async function submitNextInterviewRound(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedCandidate) return;
+    const formElement = event.currentTarget;
+    const formData = new FormData(formElement);
+    const interviewerEmail = String(formData.get('interviewer_email') ?? '').trim();
+    await mutate(async () => {
+      const interview = await api<Interview>(`/candidates/${selectedCandidate.id}/interviews/next`, {
+        method: 'POST',
+        body: JSON.stringify({ interviewer_emails: [interviewerEmail] }),
+      });
+      setSelectedInterviewId(interview.id);
+      formElement.reset();
+      setActiveForm(null);
+      return `Interview round ${interview.interview_order ?? ''} added`;
     });
   }
 
@@ -2034,20 +2084,32 @@ function App() {
                 {candidatesForNeed.length > 0 && (
                   <>
                     <div className="lineList">
-                      {candidateRowsForNeed.map((candidate) => (
-                        <div className={`lineRow ${selectedCandidate?.id === candidate.id ? 'selectedLine' : ''}`} key={candidate.id}>
-                          <div>
-                            <strong>{candidate.full_name}</strong>
-                            <span>{candidate.email} · {candidate.position_title ?? 'No position'}</span>
+                      {candidateRowsForNeed.map((candidate) => {
+                        const candidateHasInterviews = interviews.some((interview) => interview.candidate_id === candidate.id);
+                        return (
+                          <div className={`lineRow ${selectedCandidate?.id === candidate.id ? 'selectedLine' : ''}`} key={candidate.id}>
+                            <div>
+                              <strong>{candidate.full_name}</strong>
+                              <span>{candidate.email} · {candidate.position_title ?? 'No position'}</span>
+                            </div>
+                            <div className="horizontalActions">
+                              <span className="status">{candidate.status}</span>
+                              <button className="secondary" type="button" onClick={() => setSelectedCandidateId(candidate.id)}>View</button>
+                              <button
+                                className="secondary"
+                                type="button"
+                                onClick={() => {
+                                  setSelectedCandidateId(candidate.id);
+                                  setActiveForm(candidateHasInterviews ? null : 'assign-interview');
+                                }}
+                              >
+                                {candidateHasInterviews ? 'Interview Flow' : 'Interview'}
+                              </button>
+                              <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('candidate-terms'); }}>Terms</button>
+                            </div>
                           </div>
-                          <div className="horizontalActions">
-                            <span className="status">{candidate.status}</span>
-                            <button className="secondary" type="button" onClick={() => setSelectedCandidateId(candidate.id)}>View</button>
-                            <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('assign-interview'); }}>Interview</button>
-                            <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('candidate-terms'); }}>Terms</button>
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                     <Pager page={candidatePage} total={candidatesForNeed.length} onPageChange={setCandidatePage} />
                   </>
@@ -2060,12 +2122,41 @@ function App() {
                       <div><dt>Position</dt><dd>{selectedCandidate.position_title}</dd></div>
                       <div><dt>Status</dt><dd><Status value={selectedCandidate.status} /></dd></div>
                     </dl>
+                    {selectedCandidateInterviews.length > 0 && (
+                      <div className="scheduleList">
+                        <h3>Interview rounds</h3>
+                        {selectedCandidateInterviews.map((interview) => (
+                          <div className="scheduleRow" key={interview.id}>
+                            <div>
+                              <strong>Round {interview.interview_order ?? '-'} · {interview.interviewer_name}</strong>
+                              <span>{interview.status.replaceAll('_', ' ')}{interview.recommendation ? ` · ${interview.recommendation}` : ''}</span>
+                            </div>
+                            <button className="secondary" type="button" onClick={() => setSelectedInterviewId(interview.id)}>View</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <div className="actions horizontalActions">
                       <button className="secondary" onClick={() => void updateCandidateStatus('shortlisted_for_interview')} disabled={loading}>Shortlist</button>
                       <button className="secondary" onClick={() => void updateCandidateStatus('backup_candidate')} disabled={loading}>Back-up</button>
                       <button className="secondary danger" onClick={() => void updateCandidateStatus('rejected')} disabled={loading}>Reject</button>
                       <button className="secondary" onClick={() => void updateCandidateStatus('send_contract')} disabled={loading}>Send Contract</button>
+                      {selectedCandidateNextUnreleasedInterview && (
+                        <button className="primary" type="button" onClick={() => void releaseNextInterviewRoundForCandidate()} disabled={loading}>
+                          <BadgeCheck size={18} />
+                          <span>Release Round {selectedCandidateNextUnreleasedInterview.interview_order ?? ''}</span>
+                        </button>
+                      )}
+                      {selectedCandidateLatestCompletedInterview && !selectedCandidateNextUnreleasedInterview && !selectedCandidateActiveInterview && (selectedCandidateLatestCompletedInterview.interview_order ?? 1) < 3 && (
+                        <button className="primary" type="button" onClick={() => setActiveForm('next-interview-round')} disabled={loading}>
+                          <CalendarPlus size={18} />
+                          <span>Add Next Round</span>
+                        </button>
+                      )}
                     </div>
+                    {selectedCandidateActiveInterview && (
+                      <p className="contextLine">Round {selectedCandidateActiveInterview.interview_order ?? '-'} is already active with {selectedCandidateActiveInterview.interviewer_name}.</p>
+                    )}
                   </>
                 ) : (
                   <p className="empty">No candidates for the selected position.</p>
@@ -2086,6 +2177,26 @@ function App() {
                 <button className="secondary" disabled={!selectedCandidate || loading}>
                   <CalendarPlus size={18} />
                   <span>Assign Interview</span>
+                </button>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
+
+              {activeForm === 'next-interview-round' && <form className="panel" onSubmit={(event) => void submitNextInterviewRound(event)}>
+                <PanelTitle icon={<CalendarPlus size={18} />} title="Add Next Interview Round" />
+                <p className="contextLine">
+                  {selectedCandidateLatestCompletedInterview && selectedCandidate
+                    ? `${selectedCandidate.full_name} · completed round ${selectedCandidateLatestCompletedInterview.interview_order ?? '-'}`
+                    : 'Select a candidate with a completed interview first'}
+                </p>
+                <Field label="Next round interviewer email" name="interviewer_email" type="email" list="internal-interviewer-emails-next" required />
+                <datalist id="internal-interviewer-emails-next">
+                  {internalInterviewers.map((user) => (
+                    <option key={user.id} value={user.email}>{user.full_name}</option>
+                  ))}
+                </datalist>
+                <button className="primary" disabled={!selectedCandidateLatestCompletedInterview || loading}>
+                  <CalendarPlus size={18} />
+                  <span>Add And Email Next Round</span>
                 </button>
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}

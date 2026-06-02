@@ -3101,6 +3101,58 @@ def release_next_interview_round(interview_id: int, context: AuthContext = Depen
     return serialize_interview(next_interview, db)
 
 
+@app.post("/candidates/{candidate_id}/interviews/next", response_model=InterviewRead, status_code=201)
+def add_next_interview_round(candidate_id: int, payload: InterviewCreate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> InterviewRead:
+    candidate = load_candidate(candidate_id, db)
+    ensure_project_active(load_project_for_read(candidate.project_id, db))
+    active_interview = db.scalar(
+        select(Interview)
+        .where(Interview.candidate_id == candidate.id, Interview.status.in_(["active", "pending"]))
+        .order_by(Interview.interview_order.desc(), Interview.id.desc())
+    )
+    if active_interview is not None:
+        raise HTTPException(status_code=400, detail="Candidate already has an active interview round")
+    unreleased_interview = db.scalar(
+        select(Interview)
+        .where(Interview.candidate_id == candidate.id, Interview.status == "not_released")
+        .order_by(Interview.interview_order.asc(), Interview.id.asc())
+    )
+    if unreleased_interview is not None:
+        raise HTTPException(status_code=400, detail="Release the existing next interview round instead of adding another")
+    completed_interview = db.scalar(
+        select(Interview)
+        .where(Interview.candidate_id == candidate.id, Interview.status == "completed")
+        .order_by(Interview.interview_order.desc(), Interview.id.desc())
+    )
+    if completed_interview is None:
+        raise HTTPException(status_code=400, detail="A completed interview round is required before adding the next round")
+    next_order = (completed_interview.interview_order or 1) + 1
+    if next_order > 3:
+        raise HTTPException(status_code=400, detail="A maximum of 3 interview rounds can be assigned")
+    interviewer_email = str(payload.interviewer_emails[0]) if payload.interviewer_emails else None
+    if not interviewer_email:
+        raise HTTPException(status_code=422, detail="Next round interviewer email is required")
+    interviewer = validate_internal_interviewer_email(db, normalize_email(interviewer_email))
+    interview = Interview(
+        candidate_id=candidate.id,
+        interviewer_user_id=interviewer.id,
+        interviewer_name=interviewer.full_name,
+        interview_order=next_order,
+        calendly_url=None,
+        scheduled_at=None,
+        status="active",
+    )
+    db.add(interview)
+    db.flush()
+    candidate.status = f"interview_round_{next_order}_scheduled"
+    records = interview_records_for_candidate(db, candidate.id)
+    notify_interview_round_release(db, candidate, interviewer, interview, records, context.user.email)
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="interview_round_added", details=f"{candidate.full_name}: round {next_order}")
+    db.commit()
+    db.refresh(interview)
+    return serialize_interview(interview, db)
+
+
 @app.post("/candidates/{candidate_id}/contract", response_model=CandidateRead)
 async def upload_candidate_contract(candidate_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> CandidateRead:
     candidate = load_candidate(candidate_id, db)

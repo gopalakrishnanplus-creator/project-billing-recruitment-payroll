@@ -1242,6 +1242,77 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert any(interview["recommendation"] == "hire" for interview in candidates_response.json()[0]["interviews"])
 
 
+def test_hr_can_add_next_interview_round_after_first_round_scorecard():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        provision_user(client, full_name="First Interviewer", email="interviewer@example.com", roles=["internal_interviewer"])
+        provision_user(client, full_name="Second Interviewer", email="second-interviewer@example.com", roles=["internal_interviewer"])
+
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            json={
+                "position_title": "Round Two Candidate",
+                "number_of_positions": 1,
+                "employment_type": "FTE",
+                "description": "Candidate needs sequential interview rounds.",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        candidate_response = client.post(
+            f"/recruitment-needs/{need_response.json()['id']}/candidates",
+            headers=HR_HEADERS,
+            json={"full_name": "Sequential Candidate", "email": "sequential@example.com"},
+        )
+        assert candidate_response.status_code == 201, candidate_response.text
+        candidate = candidate_response.json()
+
+        first_round_response = client.post(
+            f"/candidates/{candidate['id']}/interviews",
+            headers=HR_HEADERS,
+            json={"interviewer_emails": ["interviewer@example.com"]},
+        )
+        assert first_round_response.status_code == 201, first_round_response.text
+        first_round = first_round_response.json()[0]
+        assert first_round["interview_order"] == 1
+        assert first_round["status"] == "active"
+
+        scorecard_response = client.post(
+            f"/interviews/{first_round['id']}/scorecard",
+            headers=INTERVIEWER_HEADERS,
+            data={"score": "72", "recommendation": "advance", "notes": "Proceed to second round."},
+        )
+        assert scorecard_response.status_code == 200, scorecard_response.text
+        assert scorecard_response.json()["candidate_status"] == "awaiting_hr_interview_review"
+
+        next_round_response = client.post(
+            f"/candidates/{candidate['id']}/interviews/next",
+            headers=HR_HEADERS,
+            json={"interviewer_emails": ["second-interviewer@example.com"]},
+        )
+        assert next_round_response.status_code == 201, next_round_response.text
+        next_round = next_round_response.json()
+        assert next_round["interview_order"] == 2
+        assert next_round["status"] == "active"
+        assert next_round["interviewer_name"] == "Second Interviewer"
+        assert next_round["candidate_status"] == "interview_round_2_scheduled"
+
+        duplicate_next_response = client.post(
+            f"/candidates/{candidate['id']}/interviews/next",
+            headers=HR_HEADERS,
+            json={"interviewer_emails": ["second-interviewer@example.com"]},
+        )
+        assert duplicate_next_response.status_code == 400
+        assert "active interview round" in duplicate_next_response.text
+
+
 def test_historical_completed_recruitment_backfill_without_hr_notification():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)

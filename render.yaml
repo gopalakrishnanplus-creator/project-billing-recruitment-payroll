@@ -68,11 +68,12 @@ services:
         sync: false
 
   - type: cron
-    name: pbrp-invoice-reminder-cron
+    name: pbrp-invoice-generator
     runtime: python
     rootDir: backend
     plan: starter
-    schedule: "30 2 * * *"
+    region: singapore
+    schedule: "0 1 * * *"
     buildCommand: pip install -r requirements.txt
     startCommand: python scripts/generate_due_invoices.py
     envVars:

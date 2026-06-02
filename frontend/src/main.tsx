@@ -610,6 +610,17 @@ function App() {
     () => visibleInterviews.find((interview) => interview.id === selectedInterviewId) ?? visibleInterviews[0],
     [selectedInterviewId, visibleInterviews],
   );
+  const selectedInterviewCandidate = useMemo(
+    () => candidates.find((candidate) => candidate.id === selectedInterview?.candidate_id),
+    [candidates, selectedInterview],
+  );
+  const nextUnreleasedInterview = useMemo(() => {
+    if (!selectedInterview || selectedInterview.status !== 'completed') return undefined;
+    const currentOrder = selectedInterview.interview_order ?? 0;
+    return visibleInterviews
+      .filter((interview) => interview.candidate_id === selectedInterview.candidate_id && interview.status === 'not_released' && (interview.interview_order ?? 0) > currentOrder)
+      .sort((left, right) => (left.interview_order ?? left.id) - (right.interview_order ?? right.id))[0];
+  }, [selectedInterview, visibleInterviews]);
   const projectRows = useMemo(() => pagedItems(projects, projectPage), [projects, projectPage]);
   const recruitmentNeedRows = useMemo(() => pagedItems(recruitmentNeeds, recruitmentPage), [recruitmentNeeds, recruitmentPage]);
   const candidateRowsForNeed = useMemo(() => pagedItems(candidatesForNeed, candidatePage), [candidatesForNeed, candidatePage]);
@@ -1049,6 +1060,27 @@ function App() {
       });
       formElement.reset();
       return 'Evaluation checklist uploaded';
+    });
+  }
+
+  async function releaseNextInterviewRound() {
+    if (!selectedInterview) return;
+    await mutate(async () => {
+      const interview = await api<Interview>(`/interviews/${selectedInterview.id}/release-next`, { method: 'POST' });
+      setSelectedInterviewId(interview.id);
+      return `Interview round ${interview.interview_order ?? ''} released`;
+    });
+  }
+
+  async function rejectInterviewCandidate() {
+    if (!selectedInterviewCandidate) return;
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/candidates/${selectedInterviewCandidate.id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'rejected_after_interview' }),
+      });
+      setSelectedCandidateId(candidate.id);
+      return 'Candidate rejected and remaining interview rounds cancelled';
     });
   }
 
@@ -2230,27 +2262,43 @@ function App() {
                 </select>
               </label>
               {selectedInterview ? (
-                <dl className="facts">
-                  <div><dt>Interviewer</dt><dd>{selectedInterview.interviewer_name}</dd></div>
-                  <div><dt>Interview order</dt><dd>{selectedInterview.interview_order ?? 'Not set'}</dd></div>
-                  <div><dt>Status</dt><dd><Status value={selectedInterview.status} /></dd></div>
-                  <div><dt>Score</dt><dd>{selectedInterview.score ?? 'Not submitted'}</dd></div>
-                  <div><dt>Recommendation</dt><dd>{selectedInterview.recommendation ?? 'Not submitted'}</dd></div>
-                  <div>
-                    <dt>Checklist</dt>
-                    <dd>
-                      {selectedInterview.evaluation_document_id ? (
-                        <button className="secondary" type="button" onClick={() => downloadDocument(selectedInterview.evaluation_document_id)}>
-                          <Download size={18} />
-                          <span>{selectedInterview.evaluation_document_name ?? 'Download checklist'}</span>
-                        </button>
-                      ) : (
-                        'Not uploaded'
-                      )}
-                    </dd>
-                  </div>
-                  <div><dt>Calendly</dt><dd>{selectedInterview.calendly_url ?? 'Not set'}</dd></div>
-                </dl>
+                <>
+                  <dl className="facts">
+                    <div><dt>Candidate</dt><dd>{selectedInterviewCandidate?.full_name ?? `Candidate ${selectedInterview.candidate_id}`}</dd></div>
+                    <div><dt>Interviewer</dt><dd>{selectedInterview.interviewer_name}</dd></div>
+                    <div><dt>Interview order</dt><dd>{selectedInterview.interview_order ?? 'Not set'}</dd></div>
+                    <div><dt>Status</dt><dd><Status value={selectedInterview.status} /></dd></div>
+                    <div><dt>Score</dt><dd>{selectedInterview.score ?? 'Not submitted'}</dd></div>
+                    <div><dt>Recommendation</dt><dd>{selectedInterview.recommendation ?? 'Not submitted'}</dd></div>
+                    <div>
+                      <dt>Checklist</dt>
+                      <dd>
+                        {selectedInterview.evaluation_document_id ? (
+                          <button className="secondary" type="button" onClick={() => downloadDocument(selectedInterview.evaluation_document_id)}>
+                            <Download size={18} />
+                            <span>{selectedInterview.evaluation_document_name ?? 'Download checklist'}</span>
+                          </button>
+                        ) : (
+                          'Not uploaded'
+                        )}
+                      </dd>
+                    </div>
+                    <div><dt>Next unreleased round</dt><dd>{nextUnreleasedInterview ? `${nextUnreleasedInterview.interview_order ?? '-'} · ${nextUnreleasedInterview.interviewer_name}` : 'None'}</dd></div>
+                    <div><dt>Calendly</dt><dd>{selectedInterview.calendly_url ?? 'Not set'}</dd></div>
+                  </dl>
+                  {canHrManage && selectedInterview.status === 'completed' && (
+                    <div className="actions horizontalActions">
+                      <button className="primary" type="button" onClick={() => void releaseNextInterviewRound()} disabled={loading || !nextUnreleasedInterview}>
+                        <BadgeCheck size={18} />
+                        <span>Release Next Round</span>
+                      </button>
+                      <button className="secondary danger" type="button" onClick={() => void rejectInterviewCandidate()} disabled={loading || !selectedInterviewCandidate}>
+                        <span>Reject Candidate</span>
+                      </button>
+                      {!nextUnreleasedInterview && <p className="contextLine">There is no later unreleased interview round for this candidate.</p>}
+                    </div>
+                  )}
+                </>
               ) : (
                 <p className="empty">No interviews yet.</p>
               )}
@@ -2261,6 +2309,9 @@ function App() {
             <form className="panel" onSubmit={(event) => void submitScorecard(event)}>
               <PanelTitle icon={<Upload size={18} />} title="Upload Evaluation Checklist" />
               <p className="contextLine">{selectedInterview ? `Interview ${selectedInterview.id}` : 'Select an interview first'}</p>
+              {selectedInterview && !['active', 'pending'].includes(selectedInterview.status) && (
+                <p className="contextLine">This interview round is not active for scorecard submission.</p>
+              )}
               <Field label="Checklist upload" name="evaluation_checklist" type="file" />
               <Field label="Score" name="score" type="number" min="0" max="100" required />
               <label className="field">
@@ -2276,7 +2327,7 @@ function App() {
                 <span>Notes</span>
                 <textarea name="notes" rows={4} />
               </label>
-              <button className="primary" disabled={!selectedInterview || loading}>
+              <button className="primary" disabled={!selectedInterview || loading || !['active', 'pending'].includes(selectedInterview.status)}>
                 <FileCheck2 size={18} />
                 <span>Submit Evaluation</span>
               </button>

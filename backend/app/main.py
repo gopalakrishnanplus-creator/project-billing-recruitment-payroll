@@ -1131,114 +1131,105 @@ def notify_hr_for_recruitment_need(db: Session, project: ProjectSOW, need: Recru
         )
 
 
-def interview_assignment_email_templates(candidate: Candidate, interviewer_records: list[tuple[AppUser, Interview]], project: ProjectSOW, need: RecruitmentNeed | None) -> tuple[tuple[str, str, str], list[tuple[AppUser, Interview, str, str, str]]]:
+def interview_round_email_templates(
+    candidate: Candidate,
+    released_interviewer: AppUser,
+    released_interview: Interview,
+    interviewer_records: list[tuple[AppUser, Interview]],
+    project: ProjectSOW,
+    need: RecruitmentNeed | None,
+) -> tuple[tuple[str, str, str], tuple[str, str, str]]:
     position = need.position_title if need else "Not set"
-    interviewer_lines = [f"{index}. {interviewer.full_name} ({interviewer.email})" for index, (interviewer, _) in enumerate(interviewer_records, start=1)]
+    round_number = released_interview.interview_order or 1
+    interviewer_lines = [f"{interview.interview_order or index}. {interviewer.full_name} ({interviewer.email})" for index, (interviewer, interview) in enumerate(interviewer_records, start=1)]
     interviewer_text = "\n".join(f"- {line}" for line in interviewer_lines)
     interviewer_html_rows = "\n".join(
-        f"<tr><td>{index}</td><td>{escape(interviewer.full_name)}</td><td>{escape(interviewer.email)}</td></tr>"
-        for index, (interviewer, _) in enumerate(interviewer_records, start=1)
+        f"<tr><td>{interview.interview_order or index}</td><td>{escape(interviewer.full_name)}</td><td>{escape(interviewer.email)}</td><td>{escape(interview.status.replace('_', ' '))}</td></tr>"
+        for index, (interviewer, interview) in enumerate(interviewer_records, start=1)
     )
-    candidate_subject = f"Interview scheduled for {position}"
+    candidate_subject = f"Interview round {round_number} scheduled for {position}"
     candidate_text = "\n".join(
         [
             f"Dear {candidate.full_name},",
             "",
-            "Your interview has been assigned.",
+            f"Interview round {round_number} has been released by HR.",
             "",
             f"Position: {position}",
             f"Candidate: {candidate.full_name}",
             f"Candidate email: {candidate.email}",
+            f"Interviewer: {released_interviewer.full_name} ({released_interviewer.email})",
             "",
-            "Internal interviewers:",
-            interviewer_text,
-            "",
-            "Each interviewer will interview you separately. Please schedule the interviews in the order listed above.",
-            "Please coordinate directly with the interviewers copied here to schedule the interviews.",
+            "Please coordinate directly with this interviewer to schedule this round.",
+            "Do not schedule later interview rounds until HR confirms the next round.",
         ]
     )
     candidate_html = f"""
-    <h2>Interview assigned</h2>
+    <h2>Interview round {round_number} scheduled</h2>
     <p>Dear {escape(candidate.full_name)},</p>
-    <p>Your interview has been assigned.</p>
+    <p>Interview round {round_number} has been released by HR.</p>
     <table cellpadding="6" cellspacing="0" border="0">
       <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
       <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
       <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
+      <tr><td><strong>Interviewer</strong></td><td>{escape(released_interviewer.full_name)} ({escape(released_interviewer.email)})</td></tr>
     </table>
-    <p>Each interviewer will interview you separately. Please schedule the interviews in the order listed below.</p>
-    <p>Please coordinate directly with the interviewers copied here to schedule the interviews.</p>
+    <p>Please coordinate directly with this interviewer to schedule this round.</p>
+    <p>Do not schedule later interview rounds until HR confirms the next round.</p>
+    """
+    interview_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': released_interview.id})}"
+    order_text = "\n".join(interviewer_lines)
+    subject = f"Candidate interview scorecard and review: {candidate.full_name} - Round {round_number}"
+    text_body = "\n".join(
+        [
+            f"Dear {released_interviewer.full_name},",
+            "",
+            f"Interview round {round_number} has been released to you.",
+            "",
+            f"Candidate: {candidate.full_name}",
+            f"Candidate email: {candidate.email}",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Position: {position}",
+            "",
+            f"Your interview order: {round_number}",
+            "Full interview order:",
+            order_text,
+            "",
+            "Please conduct this interview and submit the scorecard in the system. Later rounds will be released by HR only after this round is reviewed.",
+            "",
+            f"Log in to review and submit the scorecard: {interview_link}",
+        ]
+    )
+    html = f"""
+    <h2>Candidate interview scorecard and review</h2>
+    <p>Dear {escape(released_interviewer.full_name)},</p>
+    <p>Interview round {round_number} has been released to you.</p>
     <table cellpadding="6" cellspacing="0" border="0">
-      <tr><th align="left">Order</th><th align="left">Interviewer</th><th align="left">Email</th></tr>
+      <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
+      <tr><td><strong>Your interview order</strong></td><td>{round_number}</td></tr>
+    </table>
+    <p>Please conduct this interview and submit the scorecard in the system. Later rounds will be released by HR only after this round is reviewed.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><th align="left">Order</th><th align="left">Interviewer</th><th align="left">Email</th><th align="left">Status</th></tr>
       {interviewer_html_rows}
     </table>
+    <p><a href="{escape(interview_link)}">Log in to review and submit the scorecard</a></p>
     """
-    interviewer_templates: list[tuple[AppUser, Interview, str, str, str]] = []
-    for index, (interviewer, interview) in enumerate(interviewer_records, start=1):
-        interview_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': interview.id})}"
-        previous_interviewer = interviewer_records[index - 2][0] if index > 1 else None
-        order_text = "\n".join(f"{order}. {user.full_name} ({user.email})" for order, (user, _) in enumerate(interviewer_records, start=1))
-        order_rows = "\n".join(
-            f"<tr><td>{order}</td><td>{escape(user.full_name)}</td><td>{escape(user.email)}</td></tr>"
-            for order, (user, _) in enumerate(interviewer_records, start=1)
-        )
-        sequence_instruction = (
-            "You are first in the interview order. Please conduct your interview before the later interviewers."
-            if previous_interviewer is None
-            else f"You are interview {index}. Please conduct your interview only after {previous_interviewer.full_name} ({previous_interviewer.email}) has already conducted the previous interview."
-        )
-        subject = f"Candidate interview scorecard and review: {candidate.full_name}"
-        text_body = "\n".join(
-            [
-                f"Dear {interviewer.full_name},",
-                "",
-                "A candidate interview scorecard and review has been assigned to you.",
-                "",
-                f"Candidate: {candidate.full_name}",
-                f"Candidate email: {candidate.email}",
-                f"Client: {project.company.name}",
-                f"SOW: {project.title} ({project.project_code})",
-                f"Position: {position}",
-                "",
-                f"Your interview order: {index}",
-                "Full interview order:",
-                order_text,
-                "",
-                sequence_instruction,
-                "",
-                f"Log in to review and submit the scorecard: {interview_link}",
-            ]
-        )
-        html = f"""
-        <h2>Candidate interview scorecard and review</h2>
-        <p>Dear {escape(interviewer.full_name)},</p>
-        <p>A candidate interview scorecard and review has been assigned to you.</p>
-        <table cellpadding="6" cellspacing="0" border="0">
-          <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
-          <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
-          <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
-          <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
-          <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
-          <tr><td><strong>Your interview order</strong></td><td>{index}</td></tr>
-        </table>
-        <p>{escape(sequence_instruction)}</p>
-        <table cellpadding="6" cellspacing="0" border="0">
-          <tr><th align="left">Order</th><th align="left">Interviewer</th><th align="left">Email</th></tr>
-          {order_rows}
-        </table>
-        <p><a href="{escape(interview_link)}">Log in to review and submit the scorecard</a></p>
-        """
-        interviewer_templates.append((interviewer, interview, subject, text_body, html))
-    return (candidate_subject, candidate_text, candidate_html), interviewer_templates
+    return (candidate_subject, candidate_text, candidate_html), (subject, text_body, html)
 
 
-def notify_interview_assignment(db: Session, candidate: Candidate, interviewer_records: list[tuple[AppUser, Interview]], hr_email: str | None) -> None:
+def notify_interview_round_release(db: Session, candidate: Candidate, released_interviewer: AppUser, released_interview: Interview, interviewer_records: list[tuple[AppUser, Interview]], hr_email: str | None) -> None:
     project = load_project_for_read(candidate.project_id, db)
     need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
-    candidate_template, interviewer_templates = interview_assignment_email_templates(candidate, interviewer_records, project, need)
-    interviewer_emails = [interviewer.email for interviewer, _ in interviewer_records]
-    notifications = [(candidate.email, [*(interviewer_emails), *([hr_email] if hr_email else [])], *candidate_template)]
-    notifications.extend((interviewer.email, [hr_email] if hr_email else [], subject, text_body, html) for interviewer, _, subject, text_body, html in interviewer_templates)
+    candidate_template, interviewer_template = interview_round_email_templates(candidate, released_interviewer, released_interview, interviewer_records, project, need)
+    notifications = [
+        (candidate.email, [released_interviewer.email, *([hr_email] if hr_email else [])], *candidate_template),
+        (released_interviewer.email, [hr_email] if hr_email else [], *interviewer_template),
+    ]
     for recipient, cc_emails, subject, text, html in notifications:
         cc_emails = [email for email in cc_emails if email and email != recipient]
         status, detail = send_sendgrid_email(to_email=recipient, cc_emails=cc_emails, subject=subject, text=text, html=html)
@@ -1252,6 +1243,83 @@ def notify_interview_assignment(db: Session, candidate: Candidate, interviewer_r
                 status=status,
             )
         )
+
+
+def notify_hr_interview_scorecard_submitted(db: Session, candidate: Candidate, interview: Interview, scorecard: InterviewScorecard, interviewer_email: str | None) -> None:
+    project = load_project_for_read(candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    position = need.position_title if need else "Not set"
+    review_link = f"{FRONTEND_URL}/?{urlencode({'view': 'recruitment', 'interview_id': interview.id})}"
+    round_number = interview.interview_order or 1
+    subject = f"Interview round {round_number} scorecard submitted: {candidate.full_name}"
+    text = "\n".join(
+        [
+            f"Interview round {round_number} scorecard has been submitted.",
+            "",
+            f"Candidate: {candidate.full_name}",
+            f"Candidate email: {candidate.email}",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Position: {position}",
+            f"Interviewer: {interview.interviewer_name}",
+            f"Score: {scorecard.score}",
+            f"Recommendation: {scorecard.recommendation}",
+            f"Notes: {scorecard.notes or 'None'}",
+            "",
+            "Log in to review the scorecard and release the next round or reject the candidate:",
+            review_link,
+        ]
+    )
+    html = f"""
+    <h2>Interview scorecard submitted</h2>
+    <p>Interview round {round_number} scorecard has been submitted.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(position or 'Not set')}</td></tr>
+      <tr><td><strong>Interviewer</strong></td><td>{escape(interview.interviewer_name)}</td></tr>
+      <tr><td><strong>Score</strong></td><td>{scorecard.score}</td></tr>
+      <tr><td><strong>Recommendation</strong></td><td>{escape(scorecard.recommendation)}</td></tr>
+      <tr><td><strong>Notes</strong></td><td>{escape(scorecard.notes or 'None')}</td></tr>
+    </table>
+    <p><a href="{escape(review_link)}">Log in to review and release the next round or reject the candidate</a></p>
+    """
+    recipients = hr_manager_emails(db)
+    cc_emails = [interviewer_email] if interviewer_email else []
+    if not recipients:
+        db.add(EmailNotification(project_id=candidate.project_id, recipient_email="", cc_email=",".join(cc_emails) or None, subject=subject, body="No active HR Manager user is assigned in the system.", status="failed"))
+        return
+    for recipient in recipients:
+        filtered_cc = [email for email in cc_emails if email and email != recipient]
+        status, detail = send_sendgrid_email(to_email=recipient, cc_emails=filtered_cc, subject=subject, text=text, html=html)
+        db.add(
+            EmailNotification(
+                project_id=candidate.project_id,
+                recipient_email=recipient,
+                cc_email=",".join(filtered_cc) if filtered_cc else None,
+                subject=subject,
+                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                status=status,
+            )
+        )
+
+
+def interview_records_for_candidate(db: Session, candidate_id: int) -> list[tuple[AppUser, Interview]]:
+    interviews = db.scalars(
+        select(Interview)
+        .where(Interview.candidate_id == candidate_id)
+        .order_by(Interview.interview_order.asc(), Interview.id.asc())
+    ).all()
+    records: list[tuple[AppUser, Interview]] = []
+    for interview in interviews:
+        if interview.interviewer_user_id is None:
+            continue
+        interviewer = db.get(AppUser, interview.interviewer_user_id)
+        if interviewer is not None:
+            records.append((interviewer, interview))
+    return records
 
 
 def candidate_invoice_due_dates(contract: CandidateContract, db: Session, cutoff: date, schedule: CandidateInvoiceSchedule | None = None) -> list[date]:
@@ -2769,6 +2837,15 @@ def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_r
 def update_candidate_status(candidate_id: int, payload: CandidateStatusUpdate, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> CandidateRead:
     candidate = load_candidate(candidate_id, db)
     candidate.status = payload.status
+    if payload.status in {"rejected", "rejected_after_interview"}:
+        open_interviews = db.scalars(
+            select(Interview).where(
+                Interview.candidate_id == candidate.id,
+                Interview.status.in_(["active", "not_released", "pending"]),
+            )
+        ).all()
+        for interview in open_interviews:
+            interview.status = "cancelled_not_required"
     log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_status_updated", details=f"{candidate.full_name}: {payload.status}")
     db.commit()
     db.refresh(candidate)
@@ -2803,14 +2880,14 @@ def assign_interview(candidate_id: int, payload: InterviewCreate, context: AuthC
             interview_order=index,
             calendly_url=None,
             scheduled_at=None,
-            status="pending",
+            status="active" if index == 1 else "not_released",
         )
         db.add(interview)
         db.flush()
         interviewer_records.append((interviewer, interview))
-    candidate.status = "interview_scheduled"
+    candidate.status = "interview_round_1_scheduled"
     log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="interview_assigned", details=f"{candidate.full_name}: {', '.join(interviewer.full_name for interviewer in interviewers)}")
-    notify_interview_assignment(db, candidate, interviewer_records, context.user.email)
+    notify_interview_round_release(db, candidate, interviewer_records[0][0], interviewer_records[0][1], interviewer_records, context.user.email)
     db.commit()
     for _, interview in interviewer_records:
         db.refresh(interview)
@@ -2827,7 +2904,10 @@ def list_interviews(context: AuthContext = Depends(require_role(UserRole.hr_mana
         .order_by(Interview.id.desc())
     )
     if context.active_role == UserRole.internal_interviewer.value:
-        query = query.where(Interview.interviewer_user_id == context.user.id)
+        query = query.where(
+            Interview.interviewer_user_id == context.user.id,
+            Interview.status.in_(["active", "completed", "pending"]),
+        )
     interviews = db.scalars(query).all()
     return [serialize_interview(interview, db) for interview in interviews]
 
@@ -2837,6 +2917,8 @@ async def submit_scorecard(interview_id: int, request: Request, context: AuthCon
     interview = db.get(Interview, interview_id)
     if interview is None or interview.interviewer_user_id != context.user.id:
         raise HTTPException(status_code=404, detail="Interview not found")
+    if interview.status not in {"active", "pending"}:
+        raise HTTPException(status_code=400, detail=f"Interview round is not released for scorecard submission: {interview.status}")
     candidate = load_candidate(interview.candidate_id, db)
     data, files = await request_payload_and_files(request)
     payload: ScorecardCreate = parse_model(ScorecardCreate, data)
@@ -2850,12 +2932,48 @@ async def submit_scorecard(interview_id: int, request: Request, context: AuthCon
         evaluation_document_id=document.id if document else None,
     )
     interview.status = "completed"
-    candidate.status = "evaluation_submitted"
+    candidate.status = "awaiting_hr_interview_review"
     db.add(scorecard)
+    notify_hr_interview_scorecard_submitted(db, candidate, interview, scorecard, context.user.email)
     log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="scorecard_submitted", details=candidate.full_name)
     db.commit()
     db.refresh(interview)
     return serialize_interview(interview, db)
+
+
+@app.post("/interviews/{interview_id}/release-next", response_model=InterviewRead)
+def release_next_interview_round(interview_id: int, context: AuthContext = Depends(require_role(UserRole.hr_manager.value)), db: Session = Depends(get_db)) -> InterviewRead:
+    completed_interview = db.get(Interview, interview_id)
+    if completed_interview is None:
+        raise HTTPException(status_code=404, detail="Interview not found")
+    candidate = load_candidate(completed_interview.candidate_id, db)
+    ensure_project_active(load_project_for_read(candidate.project_id, db))
+    if completed_interview.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Current interview must be completed before releasing the next round: {completed_interview.status}")
+    next_interview = db.scalar(
+        select(Interview)
+        .where(
+            Interview.candidate_id == candidate.id,
+            Interview.status == "not_released",
+            Interview.interview_order > (completed_interview.interview_order or 0),
+        )
+        .order_by(Interview.interview_order.asc(), Interview.id.asc())
+    )
+    if next_interview is None:
+        raise HTTPException(status_code=400, detail="No unreleased next interview round is available")
+    if next_interview.interviewer_user_id is None:
+        raise HTTPException(status_code=400, detail="Next interview round has no interviewer user")
+    next_interviewer = db.get(AppUser, next_interview.interviewer_user_id)
+    if next_interviewer is None:
+        raise HTTPException(status_code=400, detail="Next interviewer's user account is not available")
+    next_interview.status = "active"
+    candidate.status = f"interview_round_{next_interview.interview_order or 1}_scheduled"
+    records = interview_records_for_candidate(db, candidate.id)
+    notify_interview_round_release(db, candidate, next_interviewer, next_interview, records, context.user.email)
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="interview_round_released", details=f"{candidate.full_name}: round {next_interview.interview_order}")
+    db.commit()
+    db.refresh(next_interview)
+    return serialize_interview(next_interview, db)
 
 
 @app.post("/candidates/{candidate_id}/contract", response_model=CandidateRead)

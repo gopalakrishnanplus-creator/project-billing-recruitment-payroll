@@ -972,6 +972,7 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         interviews = interview_response.json()
         assert [interview["interviewer_name"] for interview in interviews] == ["Internal Interviewer", "Other Interviewer"]
         assert [interview["interview_order"] for interview in interviews] == [1, 2]
+        assert [interview["status"] for interview in interviews] == ["active", "not_released"]
         interview = interviews[0]
 
         with SessionLocal() as db:
@@ -981,17 +982,13 @@ def test_recruitment_flow_from_position_to_hired_candidate():
                 .order_by(EmailNotification.id)
                 .all()
             )
-            assert [notification.recipient_email for notification in interview_notifications] == ["priya@example.com", "interviewer@example.com", "other-interviewer@example.com"]
-            assert interview_notifications[0].cc_email == "interviewer@example.com,other-interviewer@example.com,hr@example.com"
+            assert [notification.recipient_email for notification in interview_notifications] == ["priya@example.com", "interviewer@example.com"]
+            assert interview_notifications[0].cc_email == "interviewer@example.com,hr@example.com"
             assert interview_notifications[1].cc_email == "hr@example.com"
-            assert interview_notifications[2].cc_email == "hr@example.com"
             assert "Please coordinate directly" in interview_notifications[0].body
-            assert "Please schedule the interviews in the order listed below" in interview_notifications[0].body
-            assert "<td>1</td><td>Internal Interviewer</td><td>interviewer@example.com</td>" in interview_notifications[0].body
-            assert "<td>2</td><td>Other Interviewer</td><td>other-interviewer@example.com</td>" in interview_notifications[0].body
-            assert "Interviewer</th>" in interview_notifications[0].body
+            assert "Do not schedule later interview rounds" in interview_notifications[0].body
             assert "interviewer@example.com" in interview_notifications[0].body
-            assert "other-interviewer@example.com" in interview_notifications[0].body
+            assert "other-interviewer@example.com" not in interview_notifications[0].body
             assert "Client</strong>" not in interview_notifications[0].body
             assert "SOW</strong>" not in interview_notifications[0].body
             assert "Scheduled at" not in interview_notifications[0].body
@@ -1001,16 +998,15 @@ def test_recruitment_flow_from_position_to_hired_candidate():
             assert "Candidate interview scorecard and review" in interview_notifications[1].subject
             assert f"interview_id={interview['id']}" in interview_notifications[1].body
             assert "Your interview order</strong></td><td>1</td>" in interview_notifications[1].body
-            assert "Please conduct your interview before the later interviewers" in interview_notifications[1].body
-            assert "Your interview order</strong></td><td>2</td>" in interview_notifications[2].body
-            assert "Please conduct your interview only after Internal Interviewer (interviewer@example.com)" in interview_notifications[2].body
+            assert "Later rounds will be released by HR" in interview_notifications[1].body
+            assert "<td>2</td><td>Other Interviewer</td><td>other-interviewer@example.com</td><td>not released</td>" in interview_notifications[1].body
 
         own_interviews = client.get("/interviews", headers=INTERVIEWER_HEADERS)
         other_interviews = client.get("/interviews", headers={"x-test-email": "other-interviewer@example.com", "x-test-role": "internal_interviewer"})
         assert own_interviews.status_code == 200, own_interviews.text
         assert len(own_interviews.json()) == 1
         assert other_interviews.status_code == 200, other_interviews.text
-        assert len(other_interviews.json()) == 1
+        assert len(other_interviews.json()) == 0
 
         scorecard_response = client.post(
             f"/interviews/{interview['id']}/scorecard",
@@ -1022,6 +1018,33 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert scorecard_response.json()["status"] == "completed"
         assert scorecard_response.json()["evaluation_document_name"] == "scorecard.pdf"
         scorecard_document_id = scorecard_response.json()["evaluation_document_id"]
+        with SessionLocal() as db:
+            hr_scorecard_notification = (
+                db.query(EmailNotification)
+                .filter(EmailNotification.recipient_email == "hr@example.com", EmailNotification.subject.like("%scorecard submitted%"))
+                .one()
+            )
+            assert "Strong candidate." in hr_scorecard_notification.body
+            assert f"interview_id={interview['id']}" in hr_scorecard_notification.body
+
+        release_response = client.post(f"/interviews/{interview['id']}/release-next", headers=HR_HEADERS)
+        assert release_response.status_code == 200, release_response.text
+        assert release_response.json()["status"] == "active"
+        assert release_response.json()["interviewer_name"] == "Other Interviewer"
+        released_interview_id = release_response.json()["id"]
+        with SessionLocal() as db:
+            release_notifications = (
+                db.query(EmailNotification)
+                .filter(EmailNotification.project_id == project["id"], EmailNotification.subject.like("%Round 2%"))
+                .order_by(EmailNotification.id)
+                .all()
+            )
+            assert [notification.recipient_email for notification in release_notifications] == ["priya@example.com", "other-interviewer@example.com"]
+            assert release_notifications[0].cc_email == "other-interviewer@example.com,hr@example.com"
+            assert f"interview_id={released_interview_id}" in release_notifications[1].body
+        other_interviews = client.get("/interviews", headers={"x-test-email": "other-interviewer@example.com", "x-test-role": "internal_interviewer"})
+        assert other_interviews.status_code == 200, other_interviews.text
+        assert len(other_interviews.json()) == 1
 
         hr_document_response = client.get(f"/documents/{scorecard_document_id}/download", headers=HR_HEADERS)
         interviewer_document_response = client.get(f"/documents/{scorecard_document_id}/download", headers=INTERVIEWER_HEADERS)

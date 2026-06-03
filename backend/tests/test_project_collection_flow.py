@@ -1875,7 +1875,7 @@ def test_operations_can_upload_past_candidate_invoice_with_multiple_documents_an
         assert payment_response.json()["status"] == "paid"
 
 
-def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):
+def test_sendgrid_uses_ops_sender_reply_to_and_pdf_attachment(monkeypatch):
     captured = {}
 
     class FakeResponse:
@@ -1891,8 +1891,8 @@ def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr(app_main, "SENDGRID_API_KEY", "test-key")
-    monkeypatch.setattr(app_main, "SENDGRID_FROM_EMAIL", "finance@flexGCC.com")
-    monkeypatch.setattr(app_main, "SENDGRID_REPLY_TO_EMAIL", "finance@flexGCC.com")
+    monkeypatch.setattr(app_main, "SENDGRID_FROM_EMAIL", "ops@flexgcc.com")
+    monkeypatch.setattr(app_main, "SENDGRID_REPLY_TO_EMAIL", "ops@flexgcc.com")
     monkeypatch.setattr(app_main.httpx, "post", fake_post)
 
     status, detail = app_main.send_sendgrid_email(
@@ -1913,8 +1913,8 @@ def test_sendgrid_uses_finance_sender_reply_to_and_pdf_attachment(monkeypatch):
 
     assert status == "sent"
     assert detail == "message-123"
-    assert captured["json"]["from"]["email"] == "finance@flexGCC.com"
-    assert captured["json"]["reply_to"]["email"] == "finance@flexGCC.com"
+    assert captured["json"]["from"]["email"] == "ops@flexgcc.com"
+    assert captured["json"]["reply_to"]["email"] == "ops@flexgcc.com"
     assert captured["json"]["attachments"][0]["filename"] == "2026-015.pdf"
     assert captured["json"]["attachments"][0]["type"] == "application/pdf"
 

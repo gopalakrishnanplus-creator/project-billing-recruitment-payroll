@@ -378,6 +378,35 @@ def test_project_file_upload_update_and_additional_sow():
         assert response.status_code == 201, response.text
         project = response.json()
         assert sorted(document["document_type"] for document in project["documents"]) == ["msa", "sow"]
+
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Document Filter Position",
+                "number_of_positions": "1",
+                "employment_type": "FTE",
+                "description": "Position document should not appear as a project file.",
+                "historical_completed": "on",
+            },
+            files={"detail_document": ("position-detail.pdf", b"position detail", "application/pdf")},
+        )
+        assert need_response.status_code == 201, need_response.text
+        historical_hire_response = client.post(
+            f"/recruitment-needs/{need_response.json()['id']}/historical-hires",
+            headers=OPS_HEADERS,
+            data={
+                "full_name": "Candidate With Contract",
+                "email": "candidate-contract@example.com",
+                "invoice_terms": "Historical candidate terms.",
+            },
+            files={"signed_contract": ("candidate-contract.pdf", b"signed contract", "application/pdf")},
+        )
+        assert historical_hire_response.status_code == 201, historical_hire_response.text
+        project_with_recruitment_documents = client.get(f"/projects/{project['id']}", headers=OPS_HEADERS)
+        assert project_with_recruitment_documents.status_code == 200, project_with_recruitment_documents.text
+        assert sorted(document["document_type"] for document in project_with_recruitment_documents.json()["documents"]) == ["msa", "sow"]
+
         msa_document = next(document for document in project["documents"] if document["document_type"] == "msa")
         msa_download_response = client.get(f"/documents/{msa_document['id']}/download?inline=true", headers=OPS_HEADERS)
         assert msa_download_response.status_code == 200, msa_download_response.text

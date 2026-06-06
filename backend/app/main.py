@@ -635,6 +635,10 @@ async def save_candidate_invoice_documents(
 
 
 def serialize_project(project: ProjectSOW) -> ProjectRead:
+    project_documents = sorted(
+        (document for document in project.documents if document.document_type in PROJECT_FILE_DOCUMENT_TYPES),
+        key=lambda document: document.id,
+    )
     return ProjectRead(
         id=project.id,
         project_code=project.project_code,
@@ -655,7 +659,7 @@ def serialize_project(project: ProjectSOW) -> ProjectRead:
         client_account_executive_name=project.client_account_executive.full_name if project.client_account_executive else None,
         client_account_executive_email=project.client_account_executive.email if project.client_account_executive else None,
         msa_reference=project.msa.reference if project.msa else None,
-        documents=project.documents,
+        documents=project_documents,
         recruitment_needs=[RecruitmentNeedRead.model_validate(need) for need in project.recruitment_needs],
         invoice_schedules=[InvoiceScheduleRead.model_validate(schedule) for schedule in project.invoice_schedules],
         client_invoices=[ClientInvoiceRead.model_validate(invoice) for invoice in project.client_invoices],

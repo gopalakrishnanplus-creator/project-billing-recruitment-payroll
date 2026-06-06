@@ -55,6 +55,7 @@ const CANDIDATE_INVOICE_TYPE_LABELS: Record<string, string> = {
   reimbursement: 'Reimbursement',
   auto_reimbursement: 'Auto-reimbursement',
 };
+const PROJECT_DOCUMENT_TYPES = new Set(['msa', 'sow', 'sow_amendment']);
 const LIST_PAGE_SIZE = 20;
 const INTERNAL_PROJECT_PRESETS: Record<string, {
   label: string;
@@ -945,6 +946,7 @@ function App() {
 
   async function replaceProjectDocument(event: FormEvent<HTMLFormElement>, document: UploadedDocument) {
     event.preventDefault();
+    if (!PROJECT_DOCUMENT_TYPES.has(document.document_type)) return;
     const formElement = event.currentTarget;
     const payload = new FormData(formElement);
     await mutate(async () => {
@@ -958,6 +960,7 @@ function App() {
   }
 
   async function deleteProjectDocument(document: UploadedDocument) {
+    if (!PROJECT_DOCUMENT_TYPES.has(document.document_type)) return;
     if (!window.confirm(`Remove ${document.document_type.toUpperCase()} file?\n\n${document.original_filename}`)) return;
     await mutate(async () => {
       await api(`/documents/${document.id}`, { method: 'DELETE' });
@@ -3070,7 +3073,7 @@ function App() {
                             <Download size={18} />
                             <span>Download</span>
                           </button>
-                          {canOperate && (
+                          {canOperate && PROJECT_DOCUMENT_TYPES.has(document.document_type) && (
                             <>
                               <form className="inlineUpload" onSubmit={(event) => void replaceProjectDocument(event, document)}>
                                 <input aria-label={`Replacement file for ${document.original_filename}`} name="document" type="file" required />

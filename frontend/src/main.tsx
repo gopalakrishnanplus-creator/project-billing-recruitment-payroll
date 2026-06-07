@@ -1490,6 +1490,32 @@ function App() {
     window.open(`${API_BASE}/documents/${documentId}/download?inline=true`, '_blank', 'noopener,noreferrer');
   }
 
+  function renderStoredDocument(label: string, documentId: number | null, filename: string | null): React.ReactNode {
+    if (!documentId && !filename) return null;
+    return (
+      <div className="documentRow" key={`${label}-${documentId ?? filename ?? 'missing'}`}>
+        <div>
+          <strong>{label}</strong>
+          <span>{filename ?? 'Uploaded document'}</span>
+        </div>
+        {documentId ? (
+          <div className="horizontalActions">
+            <button className="secondary" type="button" onClick={() => viewDocument(documentId)}>
+              <FileText size={18} />
+              <span>View</span>
+            </button>
+            <button className="secondary" type="button" onClick={() => downloadDocument(documentId)}>
+              <Download size={18} />
+              <span>Download</span>
+            </button>
+          </div>
+        ) : (
+          <span className="status">File reference only</span>
+        )}
+      </div>
+    );
+  }
+
   async function submitInvoiceFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setInvoicePage(1);
@@ -1886,10 +1912,20 @@ function App() {
                   <div><dt>Billing</dt><dd>{selectedNeed.position_billing_type ?? 'not set'} · {selectedNeed.billing_frequency ?? 'not set'}</dd></div>
                 </dl>
                 <div className="documentList">
-                  {selectedNeed.detail_document_name && <span className="status">Position: {selectedNeed.detail_document_name}</span>}
-                  {selectedNeed.jd_document_name && <span className="status">JD: {selectedNeed.jd_document_name}</span>}
-                  {selectedNeed.job_ad_document_name && <span className="status">Ad: {selectedNeed.job_ad_document_name}</span>}
-                  {selectedNeed.linkedin_ad_url && <a className="status" href={selectedNeed.linkedin_ad_url} target="_blank" rel="noreferrer">LinkedIn ad</a>}
+                  {renderStoredDocument('Position detail upload', selectedNeed.detail_document_id, selectedNeed.detail_document_name)}
+                  {renderStoredDocument('Job description', selectedNeed.jd_document_id, selectedNeed.jd_document_name)}
+                  {renderStoredDocument('Job ad', selectedNeed.job_ad_document_id, selectedNeed.job_ad_document_name)}
+                  {selectedNeed.linkedin_ad_url && (
+                    <div className="documentRow">
+                      <div>
+                        <strong>LinkedIn ad</strong>
+                        <span>{selectedNeed.linkedin_ad_url}</span>
+                      </div>
+                      <div className="horizontalActions">
+                        <a className="secondary linkButton" href={selectedNeed.linkedin_ad_url} target="_blank" rel="noreferrer">Open</a>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>
             ) : (
@@ -2125,6 +2161,11 @@ function App() {
                       <div><dt>Position</dt><dd>{selectedCandidate.position_title}</dd></div>
                       <div><dt>Status</dt><dd><Status value={selectedCandidate.status} /></dd></div>
                     </dl>
+                    {selectedCandidateContract && (selectedCandidateContract.contract_document_id || selectedCandidateContract.contract_document_name) && (
+                      <div className="documentList">
+                        {renderStoredDocument('Signed candidate contract', selectedCandidateContract.contract_document_id, selectedCandidateContract.contract_document_name)}
+                      </div>
+                    )}
                     {selectedCandidateInterviews.length > 0 && (
                       <div className="scheduleList">
                         <h3>Interview rounds</h3>
@@ -2229,10 +2270,16 @@ function App() {
                           </div>
                           <div className="horizontalActions">
                           {contract?.contract_document_id && (
-                            <button className="secondary" type="button" onClick={() => downloadDocument(contract.contract_document_id)}>
-                              <Download size={18} />
-                              <span>Download Contract</span>
-                            </button>
+                            <>
+                              <button className="secondary" type="button" onClick={() => viewDocument(contract.contract_document_id)}>
+                                <FileText size={18} />
+                                <span>View Contract</span>
+                              </button>
+                              <button className="secondary" type="button" onClick={() => downloadDocument(contract.contract_document_id)}>
+                                <Download size={18} />
+                                <span>Download Contract</span>
+                              </button>
+                            </>
                           )}
                           <button className="secondary" type="button" onClick={() => { editCandidateInvoiceTerms(candidate); setActiveForm('candidate-terms'); }}>
                             <Pencil size={18} />
@@ -2357,6 +2404,11 @@ function App() {
                     <div><dt>Project</dt><dd>{selectedHiredCandidate?.project_code} · {selectedHiredCandidate?.project_title}</dd></div>
                     <div><dt>Invoice to</dt><dd>{selectedHiredCandidateContract.billing_entity_address ? `${selectedHiredCandidateContract.billing_entity_name}, ${selectedHiredCandidateContract.billing_entity_address}` : selectedHiredCandidateContract.billing_entity_name}</dd></div>
                   </dl>
+                  {(selectedHiredCandidateContract.contract_document_id || selectedHiredCandidateContract.contract_document_name) && (
+                    <div className="documentList">
+                      {renderStoredDocument('Signed candidate contract', selectedHiredCandidateContract.contract_document_id, selectedHiredCandidateContract.contract_document_name)}
+                    </div>
+                  )}
 	                  <CandidateInvoiceScheduleList
 	                    schedules={selectedHiredCandidateContract.invoice_schedules}
                     emptyMessage="No additional invoice items yet."

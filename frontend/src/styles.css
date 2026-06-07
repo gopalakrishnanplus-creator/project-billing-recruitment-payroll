@@ -197,7 +197,8 @@ textarea {
   resize: vertical;
 }
 
-button {
+button,
+.linkButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -207,6 +208,9 @@ button {
   border-radius: 6px;
   padding: 8px 12px;
   font-weight: 700;
+}
+
+button {
   cursor: pointer;
 }
 

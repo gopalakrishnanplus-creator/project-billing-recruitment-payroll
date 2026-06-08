@@ -2817,7 +2817,7 @@ def list_recruitment_needs(_: AuthContext = Depends(require_role(UserRole.operat
     needs = db.scalars(
         select(RecruitmentNeed)
         .join(ProjectSOW, ProjectSOW.id == RecruitmentNeed.project_id)
-        .where(active_project_filter())
+        .where(active_project_filter(), RecruitmentNeed.status != "deleted")
         .order_by(RecruitmentNeed.created_at.desc(), RecruitmentNeed.id.desc())
     ).all()
     return [serialize_recruitment_need_detail(need, db) for need in needs]

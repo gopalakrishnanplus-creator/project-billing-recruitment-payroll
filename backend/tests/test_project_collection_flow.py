@@ -1342,6 +1342,55 @@ def test_hr_can_add_next_interview_round_after_first_round_scorecard():
         assert "active interview round" in duplicate_next_response.text
 
 
+def test_deleted_recruitment_needs_are_hidden_from_normal_recruitment_list():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+
+        deleted_need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            json={
+                "position_title": "Deleted Test Position",
+                "number_of_positions": 1,
+                "employment_type": "FTE",
+                "description": "This position should disappear from the normal recruitment list.",
+            },
+        )
+        assert deleted_need_response.status_code == 201, deleted_need_response.text
+        deleted_need = deleted_need_response.json()
+
+        closed_need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            json={
+                "position_title": "Closed Historical Position",
+                "number_of_positions": 1,
+                "employment_type": "FTE",
+                "description": "Closed historical positions should remain visible for historical hires.",
+                "historical_completed": True,
+            },
+        )
+        assert closed_need_response.status_code == 201, closed_need_response.text
+        closed_need = closed_need_response.json()
+
+        delete_response = client.delete(f"/recruitment-needs/{deleted_need['id']}", headers=OPS_HEADERS)
+        assert delete_response.status_code == 200, delete_response.text
+        assert delete_response.json()["status"] == "deleted"
+
+        needs_response = client.get("/recruitment/needs", headers=HR_HEADERS)
+        assert needs_response.status_code == 200, needs_response.text
+        need_ids = [need["id"] for need in needs_response.json()]
+        assert deleted_need["id"] not in need_ids
+        assert closed_need["id"] in need_ids
+
+
 def test_historical_completed_recruitment_backfill_without_hr_notification():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)

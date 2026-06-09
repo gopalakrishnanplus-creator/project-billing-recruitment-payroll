@@ -3605,7 +3605,7 @@ async def upload_candidate_invoice(token: str, request: Request, db: Session = D
 async def add_historical_candidate_invoice(
     contract_id: int,
     request: Request,
-    context: AuthContext = Depends(require_role(UserRole.operations_manager.value)),
+    context: AuthContext = Depends(require_role(UserRole.operations_manager.value, UserRole.hr_manager.value)),
     db: Session = Depends(get_db),
 ) -> CandidateVendorInvoiceRead:
     contract = db.get(CandidateContract, contract_id)
@@ -3632,6 +3632,16 @@ async def add_historical_candidate_invoice(
     invoice_files = uploaded_files_for_keys(files, "invoice_documents", "invoice_document", "supporting_documents")
     if not invoice_files:
         raise HTTPException(status_code=422, detail="At least one invoice or supporting file is required")
+    already_paid = str(data.get("already_paid") or "").strip().lower() in {"1", "true", "on", "yes"}
+    paid_date_value = data.get("paid_date")
+    paid_date = None
+    if already_paid:
+        if not paid_date_value:
+            raise HTTPException(status_code=422, detail="Paid date is required when a historical invoice is already paid")
+        try:
+            paid_date = date.fromisoformat(str(paid_date_value))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Paid date must be a valid date") from exc
     invoice = CandidateVendorInvoice(
         candidate_id=candidate.id,
         contract_id=contract.id,
@@ -3641,11 +3651,21 @@ async def add_historical_candidate_invoice(
         invoice_due_date=payload.invoice_date,
         amount=payload.amount,
         currency=payload.currency.upper(),
-        status="approved",
+        status="paid" if already_paid else "approved",
         submitted_at=utcnow(),
     )
     db.add(invoice)
     db.flush()
+    if already_paid:
+        db.add(
+            CandidatePayment(
+                vendor_invoice_id=invoice.id,
+                amount_paid=payload.amount,
+                paid_date=paid_date,
+                bank_reference=data.get("bank_reference") or None,
+                recorded_by_name=context.user.full_name,
+            )
+        )
     await save_candidate_invoice_documents(
         db,
         invoice=invoice,

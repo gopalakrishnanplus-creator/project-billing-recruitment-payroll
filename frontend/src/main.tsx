@@ -2489,7 +2489,7 @@ function App() {
                       <Banknote size={18} />
                       <span>Add Invoice Item</span>
                     </button>
-                    {canOperate && (
+                    {(canOperate || canHrManage) && (
                       <button className="secondary" type="button" onClick={() => setActiveForm('historical-candidate-invoice')}>
                         <Upload size={18} />
                         <span>Upload Past Invoice</span>
@@ -2508,7 +2508,7 @@ function App() {
 	                    <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
                     </>
 	                  )}
-	                  {canOperate && activeForm === 'historical-candidate-invoice' && (
+	                  {(canOperate || canHrManage) && activeForm === 'historical-candidate-invoice' && (
 	                    <form className="grid four" onSubmit={(event) => void submitHistoricalCandidateInvoice(event)}>
                       <Field label="Past invoice description" name="item_description" required />
                       <label className="field">
@@ -2523,6 +2523,12 @@ function App() {
                       <Field label="Currency" name="currency" defaultValue={selectedHiredCandidateContract.currency ?? 'USD'} required />
                       <Field label="Past invoice date" name="invoice_due_date" type="date" defaultValue={yesterday()} required />
                       <Field label="Invoice and supporting files" name="invoice_documents" type="file" multiple required />
+                      <label className="field checkbox">
+                        <input name="already_paid" type="checkbox" />
+                        <span>Already paid</span>
+                      </label>
+                      <Field label="Paid date" name="paid_date" type="date" defaultValue={yesterday()} />
+                      <Field label="Bank reference" name="bank_reference" />
 	                      <button className="primary" disabled={loading}>
 	                        <Upload size={18} />
 	                        <span>Upload Past Invoice</span>

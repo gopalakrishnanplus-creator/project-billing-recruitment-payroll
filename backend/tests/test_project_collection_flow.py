@@ -1945,6 +1945,7 @@ def test_operations_can_upload_past_candidate_invoice_with_multiple_documents_an
     with TestClient(app) as client:
         cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
         provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
         project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
         assert project_response.status_code == 201, project_response.text
         project = project_response.json()
@@ -2037,6 +2038,32 @@ def test_operations_can_upload_past_candidate_invoice_with_multiple_documents_an
         )
         assert payment_response.status_code == 201, payment_response.text
         assert payment_response.json()["status"] == "paid"
+
+        historical_paid_response = client.post(
+            f"/candidate-contracts/{contract_id}/historical-invoices",
+            headers=HR_HEADERS,
+            data={
+                "item_description": "Already paid historical invoice",
+                "invoice_type": "invoice",
+                "amount": "125.00",
+                "currency": "USD",
+                "invoice_due_date": str(date.today() - timedelta(days=15)),
+                "already_paid": "on",
+                "paid_date": str(date.today() - timedelta(days=5)),
+                "bank_reference": "HIST-PAID-1",
+            },
+            files={"invoice_document": ("paid-invoice.pdf", b"paid invoice", "application/pdf")},
+        )
+        assert historical_paid_response.status_code == 201, historical_paid_response.text
+        historical_paid_invoice = historical_paid_response.json()
+        assert historical_paid_invoice["status"] == "paid"
+        assert historical_paid_invoice["paid_total"] == "125.00"
+        assert historical_paid_invoice["balance_due"] == "0.00"
+        assert historical_paid_invoice["payments"][0]["bank_reference"] == "HIST-PAID-1"
+        assert historical_paid_invoice["payments"][0]["recorded_by_name"] == "HR Manager"
+
+        with SessionLocal() as db:
+            assert db.query(EmailNotification).filter(EmailNotification.recipient_email.in_(["magicbox@example.com", "cae@example.com", "finance@example.com"])).count() == 0
 
 
 def test_sendgrid_uses_ops_sender_reply_to_and_pdf_attachment(monkeypatch):

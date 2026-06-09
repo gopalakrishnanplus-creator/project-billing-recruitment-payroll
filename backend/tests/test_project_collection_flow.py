@@ -662,6 +662,7 @@ def test_partially_paid_invoice_cancels_only_unpaid_remainder():
         )
         assert payment_response.status_code == 201, payment_response.text
         assert payment_response.json()["status"] == "partially_paid"
+        payment_id = payment_response.json()["payments"][0]["id"]
         cancel_response = client.post(
             f"/client-invoices/{invoice_id}/cancel",
             headers=FINANCE_HEADERS,
@@ -672,6 +673,16 @@ def test_partially_paid_invoice_cancels_only_unpaid_remainder():
         assert cancel_response.json()["paid_total"] == "1000.00"
         assert cancel_response.json()["cancelled_amount"] == "3000.00"
         assert cancel_response.json()["balance_due"] == "0.00"
+        reverse_payment_response = client.post(
+            f"/client-invoices/{invoice_id}/payments/{payment_id}/reverse",
+            headers=FINANCE_HEADERS,
+            json={"reversed_by_name": "Finance Manager", "reason": "Payment was entered by mistake after partial close"},
+        )
+        assert reverse_payment_response.status_code == 200, reverse_payment_response.text
+        assert reverse_payment_response.json()["status"] == "cancelled"
+        assert reverse_payment_response.json()["paid_total"] == "0.00"
+        assert reverse_payment_response.json()["cancelled_amount"] == "4000.00"
+        assert reverse_payment_response.json()["balance_due"] == "0.00"
 
 
 def test_due_or_past_invoice_schedule_generates_approval_email_immediately():
@@ -1761,6 +1772,13 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         assert paid_response.json()["status"] == "paid"
         assert paid_response.json()["balance_due"] == "0.00"
         final_payment_id = paid_response.json()["payments"][1]["id"]
+        paid_cancel_response = client.post(
+            f"/candidate-invoices/{invoice_id}/cancel",
+            headers=FINANCE_HEADERS,
+            json={"cancelled_by_name": "Finance Manager", "reason": "Should reverse mistaken payment first"},
+        )
+        assert paid_cancel_response.status_code == 400
+        assert "payments are reversed" in paid_cancel_response.text
         paid_delete_response = client.delete(f"/candidate-invoices/{invoice_id}", headers=FINANCE_HEADERS)
         assert paid_delete_response.status_code == 400
         assert "recorded payments" in paid_delete_response.text
@@ -1775,6 +1793,17 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         assert reverse_final_payment_response.json()["paid_total"] == "500.00"
         assert reverse_final_payment_response.json()["balance_due"] == "1000.00"
         assert reverse_final_payment_response.json()["payments"][1]["reversed_at"] is not None
+        partial_cancel_response = client.post(
+            f"/candidate-invoices/{invoice_id}/cancel",
+            headers=FINANCE_HEADERS,
+            json={"cancelled_by_name": "Finance Manager", "reason": "Contract closed after partial payment"},
+        )
+        assert partial_cancel_response.status_code == 200, partial_cancel_response.text
+        assert partial_cancel_response.json()["status"] == "partially_paid_remainder_cancelled"
+        assert partial_cancel_response.json()["paid_total"] == "500.00"
+        assert partial_cancel_response.json()["cancelled_amount"] == "1000.00"
+        assert partial_cancel_response.json()["balance_due"] == "0.00"
+        assert partial_cancel_response.json()["cancelled_reason"] == "Contract closed after partial payment"
 
         reverse_partial_payment_response = client.post(
             f"/candidate-invoices/{invoice_id}/payments/{partial_payment_id}/reverse",
@@ -1782,9 +1811,10 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
             json={"reversed_by_name": "Finance Manager", "reason": "Remaining payment was also entered by mistake"},
         )
         assert reverse_partial_payment_response.status_code == 200, reverse_partial_payment_response.text
-        assert reverse_partial_payment_response.json()["status"] == "approved"
+        assert reverse_partial_payment_response.json()["status"] == "cancelled"
         assert reverse_partial_payment_response.json()["paid_total"] == "0.00"
-        assert reverse_partial_payment_response.json()["balance_due"] == "1500.00"
+        assert reverse_partial_payment_response.json()["cancelled_amount"] == "1500.00"
+        assert reverse_partial_payment_response.json()["balance_due"] == "0.00"
 
         reversed_payment_delete_response = client.delete(f"/candidate-invoices/{invoice_id}", headers=FINANCE_HEADERS)
         assert reversed_payment_delete_response.status_code == 400

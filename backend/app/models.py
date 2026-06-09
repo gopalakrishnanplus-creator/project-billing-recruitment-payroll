@@ -375,6 +375,7 @@ class CandidateVendorInvoice(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(12), default="USD")
     status: Mapped[str] = mapped_column(String(80), default="submitted")
+    cancelled_reason: Mapped[str | None] = mapped_column(Text)
     upload_token: Mapped[str | None] = mapped_column(String(96), unique=True)
     upload_token_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     upload_token_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

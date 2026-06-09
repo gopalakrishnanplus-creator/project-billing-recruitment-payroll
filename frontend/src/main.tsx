@@ -45,7 +45,7 @@ const INVOICE_STATUSES = [
   'cancelled',
 ];
 const UPCOMING_INVOICES_FILTER = 'upcoming_invoices';
-const CANDIDATE_INVOICE_STATUSES = ['submitted', 'on-hold', 'rejected', 'approved', 'paid', 'partially_paid'];
+const CANDIDATE_INVOICE_STATUSES = ['submitted', 'on-hold', 'rejected', 'approved', 'paid', 'partially_paid', 'partially_paid_remainder_cancelled', 'cancelled'];
 const CONTRACTING_ENTITY_LABELS: Record<string, string> = {
   flexgcc_direct: 'FlexGCC direct hire',
   mbox_india: 'India hire - Mbox Contract Solutions Pvt. Ltd.',
@@ -367,11 +367,13 @@ type CandidateInvoice = {
   billing_entity_name: string;
   billing_entity_address: string | null;
   status: string;
+  cancelled_reason: string | null;
   submitted_at: string;
   approval_comments: string | null;
   documents: CandidateInvoiceDocument[];
   payments: CandidatePayment[];
   paid_total: string;
+  cancelled_amount: string;
   balance_due: string;
 };
 
@@ -1507,6 +1509,20 @@ function App() {
       });
       setSelectedCandidateInvoiceId(invoice.id);
       return 'Candidate invoice payment reversed';
+    });
+  }
+
+  async function cancelCandidateInvoice() {
+    if (!selectedCandidateInvoice) return;
+    const reason = window.prompt('Reason for cancelling this candidate invoice');
+    if (!reason) return;
+    await mutate(async () => {
+      const invoice = await api<CandidateInvoice>(`/candidate-invoices/${selectedCandidateInvoice.id}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({ cancelled_by_name: me?.full_name ?? 'Finance Manager', reason }),
+      });
+      setSelectedCandidateInvoiceId(invoice.id);
+      return 'Candidate invoice cancelled';
     });
   }
 
@@ -2892,7 +2908,13 @@ function App() {
                       <div><dt>Amount</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.amount}</dd></div>
                       <div><dt>Status</dt><dd><Status value={selectedCandidateInvoice.status} /></dd></div>
                       <div><dt>Paid</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.paid_total}</dd></div>
+                      {selectedCandidateInvoice.cancelled_amount !== '0.00' && (
+                        <div><dt>Cancelled</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.cancelled_amount}</dd></div>
+                      )}
                       <div><dt>Balance</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.balance_due}</dd></div>
+                      {selectedCandidateInvoice.cancelled_reason && (
+                        <div><dt>Cancel reason</dt><dd>{selectedCandidateInvoice.cancelled_reason}</dd></div>
+                      )}
                       <div><dt>CAE comments</dt><dd>{selectedCandidateInvoice.approval_comments ?? 'None'}</dd></div>
                     </dl>
                     {selectedCandidateInvoice.documents.length > 0 && (
@@ -2955,12 +2977,22 @@ function App() {
                           <span>Record Payment</span>
                         </button>
                       )}
+                      {canFinance && (
+                        <button
+                          className="secondary danger"
+                          type="button"
+                          onClick={() => void cancelCandidateInvoice()}
+                          disabled={loading || ['paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedCandidateInvoice.status)}
+                        >
+                          <span>Cancel Invoice</span>
+                        </button>
+                      )}
                       {canDeleteCandidateInvoices && (
                         <button
                           className="secondary danger"
                           type="button"
                           onClick={() => void deleteSelectedCandidateInvoice()}
-                          disabled={loading || ['paid', 'partially_paid'].includes(selectedCandidateInvoice.status) || selectedCandidateInvoice.payments.length > 0}
+                          disabled={loading || ['paid', 'partially_paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedCandidateInvoice.status) || selectedCandidateInvoice.payments.length > 0}
                         >
                           <Trash2 size={18} />
                           <span>Delete Invoice</span>

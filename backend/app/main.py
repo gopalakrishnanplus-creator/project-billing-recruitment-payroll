@@ -294,6 +294,7 @@ def ensure_workflow_columns() -> None:
                 "invoice_due_date": "DATE",
                 "item_description": "TEXT",
                 "invoice_type": "VARCHAR(40) DEFAULT 'invoice'",
+                "cancelled_reason": "TEXT",
                 "upload_token": "VARCHAR(96)",
                 "upload_token_sent_at": "TIMESTAMP",
                 "upload_token_used_at": "TIMESTAMP",
@@ -688,12 +689,16 @@ def active_client_payments(payments: list[ClientPayment]) -> list[ClientPayment]
 
 
 def client_invoice_status_from_paid_total(invoice: ClientInvoice, paid_total: Decimal) -> str:
+    if invoice.status == InvoiceStatus.partially_paid_remainder_cancelled.value or invoice.cancelled_reason:
+        return InvoiceStatus.cancelled.value if paid_total <= 0 else InvoiceStatus.partially_paid_remainder_cancelled.value
     if paid_total <= 0:
         return InvoiceStatus.sent_to_client.value
     return InvoiceStatus.paid.value if paid_total >= invoice.amount else InvoiceStatus.partially_paid.value
 
 
 def candidate_invoice_status_from_paid_total(invoice: CandidateVendorInvoice, paid_total: Decimal) -> str:
+    if invoice.status == "partially_paid_remainder_cancelled" or invoice.cancelled_reason:
+        return "cancelled" if paid_total <= 0 else "partially_paid_remainder_cancelled"
     if paid_total <= 0:
         return "approved"
     return "paid" if paid_total >= invoice.amount else "partially_paid"
@@ -1075,7 +1080,9 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         .order_by(CandidateInvoiceApproval.decided_at.desc(), CandidateInvoiceApproval.id.desc())
     )
     paid_total = sum((payment.amount_paid for payment in payments if payment.reversed_at is None), Decimal("0.00"))
-    balance_due = max(invoice.amount - paid_total, Decimal("0.00"))
+    open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
+    cancelled_amount = open_balance if invoice.status in {"cancelled", "partially_paid_remainder_cancelled"} else Decimal("0.00")
+    balance_due = Decimal("0.00") if cancelled_amount else open_balance
     return CandidateVendorInvoiceRead(
         id=invoice.id,
         candidate_id=invoice.candidate_id,
@@ -1099,11 +1106,13 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         billing_entity_name=billing_entity_name,
         billing_entity_address=billing_entity_address,
         status=invoice.status,
+        cancelled_reason=invoice.cancelled_reason,
         submitted_at=invoice.submitted_at,
         approval_comments=latest_approval.notes if latest_approval else None,
         documents=serialize_candidate_invoice_documents(invoice.id, db),
         payments=[CandidatePaymentRead.model_validate(payment) for payment in payments],
         paid_total=paid_total,
+        cancelled_amount=cancelled_amount,
         balance_due=balance_due,
     )
 
@@ -3732,7 +3741,7 @@ def decide_candidate_invoice(invoice_id: int, payload: CandidateInvoiceApprovalC
     auth = approval_auth_from_request(request, db, kind="candidate_invoice", invoice_id=invoice_id)
     context = auth.context
     authorize_candidate_invoice_approval(invoice, context, db)
-    if invoice.status in {"paid", "partially_paid"}:
+    if invoice.status in {"paid", "partially_paid", "cancelled", "partially_paid_remainder_cancelled"}:
         raise HTTPException(status_code=400, detail=f"Candidate invoice cannot be changed after payment status: {invoice.status}")
     if invoice.status == "awaiting_upload":
         raise HTTPException(status_code=400, detail="Candidate invoice has not been uploaded yet")
@@ -3760,6 +3769,42 @@ def delete_candidate_invoice(
     log_event(db, project_id=project_id, actor_name=context.user.full_name, action="candidate_invoice_deleted", details=details)
     db.commit()
     return {"status": "deleted"}
+
+
+@app.post("/candidate-invoices/{invoice_id}/cancel", response_model=CandidateVendorInvoiceRead)
+def cancel_candidate_invoice(
+    invoice_id: int,
+    payload: CancelInvoiceCreate,
+    _: AuthContext = Depends(require_role(UserRole.finance_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateVendorInvoiceRead:
+    invoice = load_candidate_invoice(invoice_id, db)
+    if invoice.status == "paid":
+        raise HTTPException(status_code=400, detail="Paid candidate invoices cannot be cancelled until payments are reversed")
+    if invoice.status in {"cancelled", "partially_paid_remainder_cancelled"}:
+        raise HTTPException(status_code=400, detail=f"Candidate invoice is already cancelled: {invoice.status}")
+    paid_total = (
+        db.scalar(
+            select(func.coalesce(func.sum(CandidatePayment.amount_paid), 0)).where(
+                CandidatePayment.vendor_invoice_id == invoice.id,
+                CandidatePayment.reversed_at.is_(None),
+            )
+        )
+        or Decimal("0.00")
+    )
+    invoice.status = "partially_paid_remainder_cancelled" if paid_total > 0 else "cancelled"
+    invoice.cancelled_reason = payload.reason
+    cancelled_amount = max(invoice.amount - paid_total, Decimal("0.00"))
+    log_event(
+        db,
+        project_id=invoice.project_id,
+        actor_name=payload.cancelled_by_name,
+        action="candidate_invoice_cancelled",
+        details=f"{payload.reason}; cancelled_amount={cancelled_amount}; paid_total={paid_total}",
+    )
+    db.commit()
+    db.refresh(invoice)
+    return serialize_candidate_invoice(invoice, db)
 
 
 @app.post("/candidate-invoices/{invoice_id}/payments", response_model=CandidateVendorInvoiceRead, status_code=201)
@@ -3795,7 +3840,7 @@ def reverse_candidate_invoice_payment(
     db: Session = Depends(get_db),
 ) -> CandidateVendorInvoiceRead:
     invoice = load_candidate_invoice(invoice_id, db)
-    if invoice.status not in {"partially_paid", "paid"}:
+    if invoice.status not in {"partially_paid", "paid", "partially_paid_remainder_cancelled"}:
         raise HTTPException(status_code=400, detail=f"Candidate invoice payment can only be reversed after payment: {invoice.status}")
     payment = db.scalar(select(CandidatePayment).where(CandidatePayment.id == payment_id, CandidatePayment.vendor_invoice_id == invoice.id))
     if payment is None:
@@ -4132,7 +4177,7 @@ def reverse_client_invoice_payment(
     invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.payments)))
     if invoice is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    if invoice.status not in {InvoiceStatus.partially_paid.value, InvoiceStatus.paid.value}:
+    if invoice.status not in {InvoiceStatus.partially_paid.value, InvoiceStatus.paid.value, InvoiceStatus.partially_paid_remainder_cancelled.value}:
         raise HTTPException(status_code=400, detail=f"Client invoice payment can only be reversed after payment: {invoice.status}")
     payment = db.scalar(select(ClientPayment).where(ClientPayment.id == payment_id, ClientPayment.invoice_id == invoice.id))
     if payment is None:

@@ -557,11 +557,13 @@ class CandidateVendorInvoiceRead(BaseModel):
     billing_entity_name: str
     billing_entity_address: str | None = None
     status: str
+    cancelled_reason: str | None = None
     submitted_at: datetime
     approval_comments: str | None = None
     documents: list[CandidateInvoiceDocumentRead] = Field(default_factory=list)
     payments: list[CandidatePaymentRead] = Field(default_factory=list)
     paid_total: Decimal
+    cancelled_amount: Decimal
     balance_due: Decimal
 
 

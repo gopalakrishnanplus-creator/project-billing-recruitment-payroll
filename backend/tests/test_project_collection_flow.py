@@ -1501,6 +1501,30 @@ def test_historical_completed_recruitment_backfill_without_hr_notification():
         assert past_hire_response.status_code == 400
         assert "next future candidate invoice" in past_hire_response.text
 
+        terminated_hire_response = client.post(
+            f"/recruitment-needs/{need['id']}/historical-hires",
+            headers=HR_HEADERS,
+            data={
+                "full_name": "Terminated Historical Hire",
+                "email": "terminated-historical@example.com",
+                "phone": "+1-555-8888",
+                "invoice_terms": "Historical contract retained for records only.",
+                "invoice_amount": "1750.00",
+                "currency": "USD",
+                "no_invoice_reminders": "on",
+            },
+            files={"signed_contract": ("terminated-contract.pdf", b"signed", "application/pdf")},
+        )
+        assert terminated_hire_response.status_code == 201, terminated_hire_response.text
+        terminated_candidate = terminated_hire_response.json()
+        assert terminated_candidate["status"] == "terminated"
+        assert terminated_candidate["contracts"][0]["status"] == "terminated"
+        assert terminated_candidate["contracts"][0]["invoice_frequency"] is None
+        assert terminated_candidate["contracts"][0]["invoice_start_date"] is None
+        assert terminated_candidate["contracts"][0]["contract_document_name"] == "terminated-contract.pdf"
+        with SessionLocal() as db:
+            assert db.query(EmailNotification).filter(EmailNotification.recipient_email == "terminated-historical@example.com").count() == 0
+
 
 def test_internal_flexgcc_sales_support_historical_hires_without_msa_or_sow():
     Base.metadata.drop_all(bind=engine)

@@ -101,6 +101,7 @@ class CandidateCreate(BaseModel):
 
 
 class HistoricalHireCreate(CandidateCreate):
+    no_invoice_reminders: bool = False
     invoice_terms: str | None = None
     invoice_description: str | None = None
     invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")

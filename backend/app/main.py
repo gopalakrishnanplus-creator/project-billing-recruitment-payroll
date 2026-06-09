@@ -2924,6 +2924,11 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
     ensure_project_active(project)
     data, files = await request_payload_and_files(request)
     payload: HistoricalHireCreate = parse_model(HistoricalHireCreate, data)
+    if payload.no_invoice_reminders:
+        payload.invoice_frequency = None
+        payload.invoice_start_date = None
+        payload.invoice_end_date = None
+        payload.invoice_date = None
     next_candidate_invoice_date = payload.invoice_date if payload.invoice_frequency == "single" else payload.invoice_start_date
     if next_candidate_invoice_date and next_candidate_invoice_date < date.today():
         raise HTTPException(status_code=400, detail="Historical hires should use the next future candidate invoice/reminder date, not a completed past date")
@@ -2936,7 +2941,7 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
         linkedin_profile_url=payload.linkedin_profile_url,
         notes=payload.notes,
         candidate_type=payload.candidate_type,
-        status="hired",
+        status="terminated" if payload.no_invoice_reminders else "hired",
     )
     db.add(candidate)
     db.flush()
@@ -2955,13 +2960,14 @@ async def add_historical_hire(need_id: int, request: Request, context: AuthConte
         invoice_date=payload.invoice_date,
         contracting_entity=payload.contracting_entity,
         signed_at=utcnow() if document else None,
-        status="signed" if document else "draft",
+        status="terminated" if payload.no_invoice_reminders else ("signed" if document else "draft"),
     )
     need.status = "closed"
     db.add(contract)
     db.flush()
     log_event(db, project_id=need.project_id, actor_name=context.user.full_name, action="historical_hire_added", details=candidate.full_name)
-    send_due_candidate_invoice_reminders(db, date.today())
+    if not payload.no_invoice_reminders:
+        send_due_candidate_invoice_reminders(db, date.today())
     db.commit()
     db.refresh(candidate)
     return serialize_candidate(candidate, db)

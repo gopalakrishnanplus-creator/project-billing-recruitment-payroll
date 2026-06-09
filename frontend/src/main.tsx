@@ -575,6 +575,7 @@ function App() {
   const [internalProjectType, setInternalProjectType] = useState('flexgcc_sales_support');
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [candidateScheduleFrequency, setCandidateScheduleFrequency] = useState('monthly');
+  const [historicalHireNoReminders, setHistoricalHireNoReminders] = useState(false);
   const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment' | 'schedules'>(
     requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : requestedView === 'schedules' ? 'schedules' : 'workflow',
   );
@@ -1044,6 +1045,7 @@ function App() {
       });
       setSelectedCandidateId(candidate.id);
       formElement.reset();
+      setHistoricalHireNoReminders(false);
       return 'Historical hired candidate saved';
     });
   }
@@ -2112,33 +2114,41 @@ function App() {
                   <option value="mbox_india">India hire - invoice to Mbox</option>
                 </select>
               </label>
-              <Field label="Next candidate invoice amount" name="invoice_amount" type="number" step="0.01" />
+              <label className="checkField">
+                <input name="no_invoice_reminders" type="checkbox" checked={historicalHireNoReminders} onChange={(event) => setHistoricalHireNoReminders(event.currentTarget.checked)} />
+                <span>Record only - contract already terminated, no future invoice reminders</span>
+              </label>
+              <Field label={historicalHireNoReminders ? 'Historical invoice amount' : 'Next candidate invoice amount'} name="invoice_amount" type="number" step="0.01" />
               <Field label="Currency" name="currency" defaultValue="USD" />
               <Field label="Invoice description" name="invoice_description" />
-              <label className="field">
-                <span>Invoice type</span>
-                <select name="invoice_type" defaultValue="invoice">
-                  <option value="invoice">Invoice</option>
-                  <option value="reimbursement">Reimbursement</option>
-                  <option value="auto_reimbursement">Auto-reimbursement</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Invoice frequency</span>
-                <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
-                  <option value="single">Single</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="twice_monthly">Every 15 days</option>
-                  <option value="monthly">Monthly</option>
-                  <option value="quarterly">Quarterly</option>
-                </select>
-              </label>
-              {contractInvoiceFrequency === 'single' ? (
-                <Field label="Next candidate invoice date" name="invoice_date" type="date" defaultValue={endOfCurrentMonth()} />
-              ) : (
+              {!historicalHireNoReminders && (
                 <>
-                  <Field label="Next candidate invoice reminder date" name="invoice_start_date" type="date" defaultValue={endOfCurrentMonth()} />
-                  <Field label="Reminder end date" name="invoice_end_date" type="date" />
+                  <label className="field">
+                    <span>Invoice type</span>
+                    <select name="invoice_type" defaultValue="invoice">
+                      <option value="invoice">Invoice</option>
+                      <option value="reimbursement">Reimbursement</option>
+                      <option value="auto_reimbursement">Auto-reimbursement</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Invoice frequency</span>
+                    <select name="invoice_frequency" value={contractInvoiceFrequency} onChange={(event) => setContractInvoiceFrequency(event.target.value)}>
+                      <option value="single">Single</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="twice_monthly">Every 15 days</option>
+                      <option value="monthly">Monthly</option>
+                      <option value="quarterly">Quarterly</option>
+                    </select>
+                  </label>
+                  {contractInvoiceFrequency === 'single' ? (
+                    <Field label="Next candidate invoice date" name="invoice_date" type="date" defaultValue={endOfCurrentMonth()} />
+                  ) : (
+                    <>
+                      <Field label="Next candidate invoice reminder date" name="invoice_start_date" type="date" defaultValue={endOfCurrentMonth()} />
+                      <Field label="Reminder end date" name="invoice_end_date" type="date" />
+                    </>
+                  )}
                 </>
               )}
               <label className="field">

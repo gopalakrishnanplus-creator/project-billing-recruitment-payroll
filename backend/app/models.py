@@ -248,6 +248,9 @@ class ClientPayment(Base):
     bank_reference: Mapped[str | None] = mapped_column(String(180))
     notes: Mapped[str | None] = mapped_column(Text)
     recorded_by_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reversed_by_name: Mapped[str | None] = mapped_column(String(160))
+    reversal_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     invoice: Mapped[ClientInvoice] = relationship(back_populates="payments")
@@ -409,6 +412,9 @@ class CandidatePayment(Base):
     paid_date: Mapped[date] = mapped_column(Date, nullable=False)
     bank_reference: Mapped[str | None] = mapped_column(String(180))
     recorded_by_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reversed_by_name: Mapped[str | None] = mapped_column(String(160))
+    reversal_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class AgentTask(Base):

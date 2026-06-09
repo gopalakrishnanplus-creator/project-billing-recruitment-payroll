@@ -92,6 +92,7 @@ from .schemas import (
     InvoiceScheduleUpdate,
     PaymentCreate,
     PaymentRead,
+    PaymentReversalCreate,
     ProjectClientAccountExecutiveUpdate,
     ProjectCreate,
     ProjectRead,
@@ -301,6 +302,22 @@ def ensure_workflow_columns() -> None:
                 add_column(conn, "candidate_vendor_invoices", existing, name, definition)
             conn.execute(text("UPDATE candidate_vendor_invoices SET invoice_type = 'invoice' WHERE invoice_type IS NULL"))
             conn.execute(text("UPDATE candidate_vendor_invoices SET item_description = 'Candidate services' WHERE item_description IS NULL"))
+        if "client_payments" in tables:
+            existing = {column["name"] for column in inspector.get_columns("client_payments")}
+            for name, definition in {
+                "reversed_at": "TIMESTAMP",
+                "reversed_by_name": "VARCHAR(160)",
+                "reversal_reason": "TEXT",
+            }.items():
+                add_column(conn, "client_payments", existing, name, definition)
+        if "candidate_payments" in tables:
+            existing = {column["name"] for column in inspector.get_columns("candidate_payments")}
+            for name, definition in {
+                "reversed_at": "TIMESTAMP",
+                "reversed_by_name": "VARCHAR(160)",
+                "reversal_reason": "TEXT",
+            }.items():
+                add_column(conn, "candidate_payments", existing, name, definition)
         if "email_notifications" in tables:
             existing = {column["name"] for column in inspector.get_columns("email_notifications")}
             add_column(conn, "email_notifications", existing, "cc_email", "TEXT")
@@ -666,8 +683,24 @@ def serialize_project(project: ProjectSOW) -> ProjectRead:
     )
 
 
+def active_client_payments(payments: list[ClientPayment]) -> list[ClientPayment]:
+    return [payment for payment in payments if payment.reversed_at is None]
+
+
+def client_invoice_status_from_paid_total(invoice: ClientInvoice, paid_total: Decimal) -> str:
+    if paid_total <= 0:
+        return InvoiceStatus.sent_to_client.value
+    return InvoiceStatus.paid.value if paid_total >= invoice.amount else InvoiceStatus.partially_paid.value
+
+
+def candidate_invoice_status_from_paid_total(invoice: CandidateVendorInvoice, paid_total: Decimal) -> str:
+    if paid_total <= 0:
+        return "approved"
+    return "paid" if paid_total >= invoice.amount else "partially_paid"
+
+
 def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
-    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
+    paid_total = sum((payment.amount_received for payment in active_client_payments(invoice.payments)), Decimal("0.00"))
     open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
     cancelled_amount = open_balance if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value} else Decimal("0.00")
     balance_due = Decimal("0.00") if cancelled_amount else open_balance
@@ -690,7 +723,7 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
         client_contact_name=invoice.project.client_contact.full_name,
         client_contact_email=invoice.project.client_contact.email,
         client_account_executive_email=invoice.project.client_account_executive.email if invoice.project.client_account_executive else None,
-        payments=[PaymentRead.model_validate(payment) for payment in invoice.payments],
+        payments=[PaymentRead.model_validate(payment) for payment in sorted(invoice.payments, key=lambda item: (item.received_date, item.id))],
         paid_total=paid_total,
         cancelled_amount=cancelled_amount,
         balance_due=balance_due,
@@ -1041,7 +1074,7 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         .where(CandidateInvoiceApproval.vendor_invoice_id == invoice.id)
         .order_by(CandidateInvoiceApproval.decided_at.desc(), CandidateInvoiceApproval.id.desc())
     )
-    paid_total = sum((payment.amount_paid for payment in payments), Decimal("0.00"))
+    paid_total = sum((payment.amount_paid for payment in payments if payment.reversed_at is None), Decimal("0.00"))
     balance_due = max(invoice.amount - paid_total, Decimal("0.00"))
     return CandidateVendorInvoiceRead(
         id=invoice.id,
@@ -1889,7 +1922,7 @@ def amount_in_words(amount: Decimal) -> str:
 
 
 def invoice_pdf_bytes(invoice: ClientInvoice) -> bytes:
-    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
+    paid_total = sum((payment.amount_received for payment in active_client_payments(invoice.payments)), Decimal("0.00"))
     open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
     cancelled_amount = open_balance if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value} else Decimal("0.00")
     net_due = Decimal("0.00") if cancelled_amount else open_balance
@@ -1985,7 +2018,7 @@ def invoice_pdf_bytes(invoice: ClientInvoice) -> bytes:
 
 
 def invoice_download_html(invoice: ClientInvoice) -> str:
-    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
+    paid_total = sum((payment.amount_received for payment in active_client_payments(invoice.payments)), Decimal("0.00"))
     open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
     cancelled_amount = open_balance if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value} else Decimal("0.00")
     balance_due = Decimal("0.00") if cancelled_amount else open_balance
@@ -3737,9 +3770,59 @@ def record_candidate_invoice_payment(invoice_id: int, payload: CandidatePaymentC
     payment = CandidatePayment(vendor_invoice_id=invoice.id, amount_paid=payload.amount_paid, paid_date=payload.paid_date, bank_reference=payload.bank_reference, recorded_by_name=payload.recorded_by_name)
     db.add(payment)
     db.flush()
-    paid_total = (db.scalar(select(func.coalesce(func.sum(CandidatePayment.amount_paid), 0)).where(CandidatePayment.vendor_invoice_id == invoice.id)) or Decimal("0.00"))
+    paid_total = (
+        db.scalar(
+            select(func.coalesce(func.sum(CandidatePayment.amount_paid), 0)).where(
+                CandidatePayment.vendor_invoice_id == invoice.id,
+                CandidatePayment.reversed_at.is_(None),
+            )
+        )
+        or Decimal("0.00")
+    )
     invoice.status = payload.status or (("paid" if paid_total >= invoice.amount else "partially_paid"))
     log_event(db, project_id=invoice.project_id, actor_name=payload.recorded_by_name, action="candidate_invoice_payment_recorded", details=str(payload.amount_paid))
+    db.commit()
+    db.refresh(invoice)
+    return serialize_candidate_invoice(invoice, db)
+
+
+@app.post("/candidate-invoices/{invoice_id}/payments/{payment_id}/reverse", response_model=CandidateVendorInvoiceRead)
+def reverse_candidate_invoice_payment(
+    invoice_id: int,
+    payment_id: int,
+    payload: PaymentReversalCreate,
+    _: AuthContext = Depends(require_role(UserRole.finance_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateVendorInvoiceRead:
+    invoice = load_candidate_invoice(invoice_id, db)
+    if invoice.status not in {"partially_paid", "paid"}:
+        raise HTTPException(status_code=400, detail=f"Candidate invoice payment can only be reversed after payment: {invoice.status}")
+    payment = db.scalar(select(CandidatePayment).where(CandidatePayment.id == payment_id, CandidatePayment.vendor_invoice_id == invoice.id))
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Candidate payment not found")
+    if payment.reversed_at is not None:
+        raise HTTPException(status_code=400, detail="Candidate payment is already reversed")
+    payment.reversed_at = utcnow()
+    payment.reversed_by_name = payload.reversed_by_name
+    payment.reversal_reason = payload.reason
+    db.flush()
+    paid_total = (
+        db.scalar(
+            select(func.coalesce(func.sum(CandidatePayment.amount_paid), 0)).where(
+                CandidatePayment.vendor_invoice_id == invoice.id,
+                CandidatePayment.reversed_at.is_(None),
+            )
+        )
+        or Decimal("0.00")
+    )
+    invoice.status = candidate_invoice_status_from_paid_total(invoice, paid_total)
+    log_event(
+        db,
+        project_id=invoice.project_id,
+        actor_name=payload.reversed_by_name,
+        action="candidate_invoice_payment_reversed",
+        details=f"{payment.amount_paid}; reason={payload.reason}; paid_total={paid_total}",
+    )
     db.commit()
     db.refresh(invoice)
     return serialize_candidate_invoice(invoice, db)
@@ -3997,7 +4080,7 @@ def cancel_invoice(invoice_id: int, payload: CancelInvoiceCreate, _: AuthContext
         raise HTTPException(status_code=400, detail="Paid invoices cannot be cancelled")
     if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value}:
         raise HTTPException(status_code=400, detail=f"Invoice is already cancelled: {invoice.status}")
-    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00"))
+    paid_total = sum((payment.amount_received for payment in active_client_payments(invoice.payments)), Decimal("0.00"))
     invoice.status = InvoiceStatus.partially_paid_remainder_cancelled.value if paid_total > 0 else InvoiceStatus.cancelled.value
     invoice.cancelled_reason = payload.reason
     cancelled_amount = max(invoice.amount - paid_total, Decimal("0.00"))
@@ -4023,8 +4106,60 @@ def record_payment(invoice_id: int, payload: PaymentCreate, _: AuthContext = Dep
     payment = ClientPayment(invoice_id=invoice_id, **payload.model_dump())
     db.add(payment)
     db.flush()
-    paid_total = sum((payment.amount_received for payment in invoice.payments), Decimal("0.00")) + payload.amount_received
+    paid_total = (
+        db.scalar(
+            select(func.coalesce(func.sum(ClientPayment.amount_received), 0)).where(
+                ClientPayment.invoice_id == invoice.id,
+                ClientPayment.reversed_at.is_(None),
+            )
+        )
+        or Decimal("0.00")
+    )
     invoice.status = InvoiceStatus.paid.value if paid_total >= invoice.amount else InvoiceStatus.partially_paid.value
     log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.recorded_by_name, action="client_payment_recorded", details=str(payload.amount_received))
+    db.commit()
+    return load_invoice_detail(invoice_id, db)
+
+
+@app.post("/client-invoices/{invoice_id}/payments/{payment_id}/reverse", response_model=InvoiceDetailRead)
+def reverse_client_invoice_payment(
+    invoice_id: int,
+    payment_id: int,
+    payload: PaymentReversalCreate,
+    _: AuthContext = Depends(require_role(UserRole.finance_manager.value)),
+    db: Session = Depends(get_db),
+) -> InvoiceDetailRead:
+    invoice = db.scalar(select(ClientInvoice).where(ClientInvoice.id == invoice_id).options(selectinload(ClientInvoice.payments)))
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.status not in {InvoiceStatus.partially_paid.value, InvoiceStatus.paid.value}:
+        raise HTTPException(status_code=400, detail=f"Client invoice payment can only be reversed after payment: {invoice.status}")
+    payment = db.scalar(select(ClientPayment).where(ClientPayment.id == payment_id, ClientPayment.invoice_id == invoice.id))
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Client payment not found")
+    if payment.reversed_at is not None:
+        raise HTTPException(status_code=400, detail="Client payment is already reversed")
+    payment.reversed_at = utcnow()
+    payment.reversed_by_name = payload.reversed_by_name
+    payment.reversal_reason = payload.reason
+    db.flush()
+    paid_total = (
+        db.scalar(
+            select(func.coalesce(func.sum(ClientPayment.amount_received), 0)).where(
+                ClientPayment.invoice_id == invoice.id,
+                ClientPayment.reversed_at.is_(None),
+            )
+        )
+        or Decimal("0.00")
+    )
+    invoice.status = client_invoice_status_from_paid_total(invoice, paid_total)
+    log_event(
+        db,
+        project_id=invoice.project_id,
+        invoice_id=invoice.id,
+        actor_name=payload.reversed_by_name,
+        action="client_payment_reversed",
+        details=f"{payment.amount_received}; reason={payload.reason}; paid_total={paid_total}",
+    )
     db.commit()
     return load_invoice_detail(invoice_id, db)

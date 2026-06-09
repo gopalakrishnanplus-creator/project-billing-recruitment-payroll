@@ -178,6 +178,19 @@ type CandidateInvoiceDocument = {
   file_size: number | null;
 };
 
+type ClientPayment = {
+  id: number;
+  invoice_id: number;
+  amount_received: string;
+  received_date: string;
+  bank_reference: string | null;
+  notes: string | null;
+  recorded_by_name: string;
+  reversed_at: string | null;
+  reversed_by_name: string | null;
+  reversal_reason: string | null;
+};
+
 type ClientInvoice = {
   id: number;
   project_id: number;
@@ -198,6 +211,7 @@ type ClientInvoice = {
   paid_total?: string;
   cancelled_amount?: string;
   balance_due?: string;
+  payments?: ClientPayment[];
 };
 
 type UpcomingInvoice = {
@@ -318,6 +332,18 @@ type CandidateInvoiceUpload = {
   documents: CandidateInvoiceDocument[];
 };
 
+type CandidatePayment = {
+  id: number;
+  vendor_invoice_id: number;
+  amount_paid: string;
+  paid_date: string;
+  bank_reference: string | null;
+  recorded_by_name: string;
+  reversed_at: string | null;
+  reversed_by_name: string | null;
+  reversal_reason: string | null;
+};
+
 type CandidateInvoice = {
   id: number;
   candidate_id: number;
@@ -344,6 +370,7 @@ type CandidateInvoice = {
   submitted_at: string;
   approval_comments: string | null;
   documents: CandidateInvoiceDocument[];
+  payments: CandidatePayment[];
   paid_total: string;
   balance_due: string;
 };
@@ -1384,6 +1411,17 @@ function App() {
     });
   }
 
+  async function reverseClientPayment(payment: ClientPayment) {
+    if (!selectedInvoice || payment.reversed_at) return;
+    const reason = window.prompt('Reason for reversing this payment');
+    if (!reason) return;
+    await invoiceAction(
+      `/payments/${payment.id}/reverse`,
+      { reversed_by_name: me?.full_name ?? 'Finance Manager', reason },
+      'Payment reversed',
+    );
+  }
+
   async function deleteSelectedClientInvoice() {
     if (!selectedInvoice) return;
     const confirmed = window.confirm(`Delete this unsent unpaid test invoice?\n\nInvoice ${selectedInvoice.invoice_number} · ${selectedInvoice.currency} ${selectedInvoice.amount}\n\nThis does not inactivate the source invoicing schedule.`);
@@ -1455,6 +1493,20 @@ function App() {
       setSelectedCandidateInvoiceId(invoice.id);
       formElement.reset();
       return 'Candidate invoice payment recorded';
+    });
+  }
+
+  async function reverseCandidateInvoicePayment(payment: CandidatePayment) {
+    if (!selectedCandidateInvoice || payment.reversed_at) return;
+    const reason = window.prompt('Reason for reversing this candidate payment');
+    if (!reason) return;
+    await mutate(async () => {
+      const invoice = await api<CandidateInvoice>(`/candidate-invoices/${selectedCandidateInvoice.id}/payments/${payment.id}/reverse`, {
+        method: 'POST',
+        body: JSON.stringify({ reversed_by_name: me?.full_name ?? 'Finance Manager', reason }),
+      });
+      setSelectedCandidateInvoiceId(invoice.id);
+      return 'Candidate invoice payment reversed';
     });
   }
 
@@ -2772,6 +2824,7 @@ function App() {
                   invoiceAction={invoiceAction}
                   currentUserName={me.full_name}
                   onRecordPayment={() => setActiveForm('client-payment')}
+                  onReversePayment={(payment) => void reverseClientPayment(payment)}
                   onDeleteTestInvoice={deleteSelectedClientInvoice}
                 />
               </>
@@ -2857,6 +2910,35 @@ function App() {
                         ))}
                       </div>
                     )}
+                    {selectedCandidateInvoice.payments.length > 0 && (
+                      <div className="scheduleList">
+                        <h3>Payment history</h3>
+                        {selectedCandidateInvoice.payments.map((payment) => (
+                          <div className="scheduleRow" key={payment.id}>
+                            <div>
+                              <strong>{selectedCandidateInvoice.currency} {payment.amount_paid} · {payment.paid_date}</strong>
+                              <span>{payment.bank_reference ? `Bank ref ${payment.bank_reference} · ` : ''}Recorded by {payment.recorded_by_name}</span>
+                              {payment.reversed_at && (
+                                <span>Reversed by {payment.reversed_by_name ?? 'Finance Manager'} · {payment.reversal_reason ?? 'No reason entered'}</span>
+                              )}
+                            </div>
+                            <div className="horizontalActions">
+                              <span className={`status ${payment.reversed_at ? 'cancelled' : 'paid'}`}>{payment.reversed_at ? 'reversed' : 'active'}</span>
+                              {canFinance && (
+                                <button
+                                  className="secondary danger"
+                                  type="button"
+                                  disabled={loading || Boolean(payment.reversed_at)}
+                                  onClick={() => void reverseCandidateInvoicePayment(payment)}
+                                >
+                                  <span>Reverse Payment</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <div className="actions">
                       <button className="secondary" type="button" onClick={() => downloadCandidateInvoice(selectedCandidateInvoice.id)} disabled={!selectedCandidateInvoice.invoice_document_id}>
                         <Download size={18} />
@@ -2878,7 +2960,7 @@ function App() {
                           className="secondary danger"
                           type="button"
                           onClick={() => void deleteSelectedCandidateInvoice()}
-                          disabled={loading || ['paid', 'partially_paid'].includes(selectedCandidateInvoice.status)}
+                          disabled={loading || ['paid', 'partially_paid'].includes(selectedCandidateInvoice.status) || selectedCandidateInvoice.payments.length > 0}
                         >
                           <Trash2 size={18} />
                           <span>Delete Invoice</span>
@@ -3832,6 +3914,7 @@ function InvoiceDetail({
   invoiceAction,
   currentUserName,
   onRecordPayment,
+  onReversePayment,
   onDeleteTestInvoice,
 }: {
   selectedInvoice: ClientInvoice | undefined;
@@ -3842,31 +3925,65 @@ function InvoiceDetail({
   invoiceAction: (path: string, body: Record<string, unknown>, message: string) => Promise<void>;
   currentUserName: string | null;
   onRecordPayment?: () => void;
+  onReversePayment?: (payment: ClientPayment) => void;
   onDeleteTestInvoice?: () => void;
 }) {
   if (!selectedInvoice) return <p className="empty">No invoices yet.</p>;
   const paidTotal = Number(selectedInvoice.paid_total ?? '0');
+  const payments = selectedInvoice.payments ?? [];
   const canDeleteTestInvoice = canFinance
     && !Number.isNaN(paidTotal)
     && paidTotal <= 0
     && !selectedInvoice.sent_at
+    && payments.length === 0
     && !['sent_to_client', 'partially_paid', 'partially_paid_remainder_cancelled', 'paid'].includes(selectedInvoice.status);
 
   return (
     <div className="invoiceGrid">
-      <dl className="facts">
-        <div><dt>Invoice</dt><dd>{selectedInvoice.invoice_number}</dd></div>
-        <div><dt>Project</dt><dd>{selectedInvoice.project_code}</dd></div>
-        <div><dt>Client</dt><dd>{selectedInvoice.client_company_name}</dd></div>
-        <div><dt>Item</dt><dd>{selectedInvoice.item_description ?? 'Not entered'}</dd></div>
-        <div><dt>Amount</dt><dd>{selectedInvoice.currency} {selectedInvoice.amount}</dd></div>
-        <div><dt>Status</dt><dd><Status value={selectedInvoice.status} /></dd></div>
-        <div><dt>Paid</dt><dd>{selectedInvoice.currency} {selectedInvoice.paid_total ?? '0.00'}</dd></div>
-        {selectedInvoice.cancelled_amount && selectedInvoice.cancelled_amount !== '0.00' && (
-          <div><dt>Cancelled</dt><dd>{selectedInvoice.currency} {selectedInvoice.cancelled_amount}</dd></div>
+      <div className="detailStack">
+        <dl className="facts">
+          <div><dt>Invoice</dt><dd>{selectedInvoice.invoice_number}</dd></div>
+          <div><dt>Project</dt><dd>{selectedInvoice.project_code}</dd></div>
+          <div><dt>Client</dt><dd>{selectedInvoice.client_company_name}</dd></div>
+          <div><dt>Item</dt><dd>{selectedInvoice.item_description ?? 'Not entered'}</dd></div>
+          <div><dt>Amount</dt><dd>{selectedInvoice.currency} {selectedInvoice.amount}</dd></div>
+          <div><dt>Status</dt><dd><Status value={selectedInvoice.status} /></dd></div>
+          <div><dt>Paid</dt><dd>{selectedInvoice.currency} {selectedInvoice.paid_total ?? '0.00'}</dd></div>
+          {selectedInvoice.cancelled_amount && selectedInvoice.cancelled_amount !== '0.00' && (
+            <div><dt>Cancelled</dt><dd>{selectedInvoice.currency} {selectedInvoice.cancelled_amount}</dd></div>
+          )}
+          <div><dt>Balance</dt><dd>{selectedInvoice.currency} {selectedInvoice.balance_due ?? selectedInvoice.amount}</dd></div>
+        </dl>
+        {payments.length > 0 && (
+          <div className="scheduleList">
+            <h3>Payment history</h3>
+            {payments.map((payment) => (
+              <div className="scheduleRow" key={payment.id}>
+                <div>
+                  <strong>{selectedInvoice.currency} {payment.amount_received} · {payment.received_date}</strong>
+                  <span>{payment.bank_reference ? `Bank ref ${payment.bank_reference} · ` : ''}Recorded by {payment.recorded_by_name}</span>
+                  {payment.reversed_at && (
+                    <span>Reversed by {payment.reversed_by_name ?? 'Finance Manager'} · {payment.reversal_reason ?? 'No reason entered'}</span>
+                  )}
+                </div>
+                <div className="horizontalActions">
+                  <span className={`status ${payment.reversed_at ? 'cancelled' : 'paid'}`}>{payment.reversed_at ? 'reversed' : 'active'}</span>
+                  {canFinance && (
+                    <button
+                      className="secondary danger"
+                      type="button"
+                      disabled={loading || Boolean(payment.reversed_at)}
+                      onClick={() => onReversePayment?.(payment)}
+                    >
+                      <span>Reverse Payment</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
-        <div><dt>Balance</dt><dd>{selectedInvoice.currency} {selectedInvoice.balance_due ?? selectedInvoice.amount}</dd></div>
-      </dl>
+      </div>
       <div className="actions">
         <button className="secondary" onClick={downloadInvoice}>
           <Download size={18} />

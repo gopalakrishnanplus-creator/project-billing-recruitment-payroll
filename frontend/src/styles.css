@@ -296,6 +296,11 @@ dd {
   align-items: start;
 }
 
+.detailStack {
+  display: grid;
+  gap: 12px;
+}
+
 .actions {
   display: grid;
   gap: 8px;

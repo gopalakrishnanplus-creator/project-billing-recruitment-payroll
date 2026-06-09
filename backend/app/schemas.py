@@ -201,6 +201,11 @@ class PaymentCreate(BaseModel):
     recorded_by_name: str = Field(min_length=2, max_length=160)
 
 
+class PaymentReversalCreate(BaseModel):
+    reversed_by_name: str = Field(min_length=2, max_length=160)
+    reason: str = Field(min_length=2)
+
+
 class CandidateInvoiceApprovalCreate(BaseModel):
     decision: str = Field(pattern="^(approved|rejected|on-hold)$")
     comments: str | None = None
@@ -461,6 +466,9 @@ class PaymentRead(BaseModel):
     bank_reference: str | None
     notes: str | None
     recorded_by_name: str
+    reversed_at: datetime | None = None
+    reversed_by_name: str | None = None
+    reversal_reason: str | None = None
 
 
 class InvoiceDetailRead(ClientInvoiceRead):
@@ -521,6 +529,9 @@ class CandidatePaymentRead(BaseModel):
     paid_date: date
     bank_reference: str | None
     recorded_by_name: str
+    reversed_at: datetime | None = None
+    reversed_by_name: str | None = None
+    reversal_reason: str | None = None
 
 
 class CandidateVendorInvoiceRead(BaseModel):

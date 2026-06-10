@@ -11,8 +11,6 @@ import re
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
-from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
-from authlib.integrations.starlette_client import OAuth
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -170,17 +168,8 @@ app.add_middleware(
     https_only=getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
 )
 
-oauth = OAuth()
-if GOOGLE_CONFIGURED:
-    oauth.register(
-        name="google",
-        client_id=getenv("GOOGLE_CLIENT_ID"),
-        client_secret=getenv("GOOGLE_CLIENT_SECRET"),
-        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid email profile"},
-    )
-
 approval_token_serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="pbrp-approval-token")
+oauth_state_serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="pbrp-google-oauth-state")
 
 
 @dataclass
@@ -377,6 +366,57 @@ def approval_token_for_user(kind: str, invoice_id: int, user: AppUser) -> str:
             "email": normalize_email(user.email),
         }
     )
+
+
+def google_redirect_uri() -> str:
+    return getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
+
+
+def google_auth_state(approval_invoice_id: int | None, candidate_invoice_id: int | None) -> str:
+    payload: dict[str, str | int] = {"nonce": uuid4().hex}
+    if approval_invoice_id is not None:
+        payload["approval_invoice_id"] = approval_invoice_id
+    if candidate_invoice_id is not None:
+        payload["candidate_invoice_id"] = candidate_invoice_id
+    return oauth_state_serializer.dumps(payload)
+
+
+def google_auth_url(state: str, *, prompt_select_account: bool) -> str:
+    params = {
+        "response_type": "code",
+        "client_id": getenv("GOOGLE_CLIENT_ID", ""),
+        "redirect_uri": google_redirect_uri(),
+        "scope": "openid email profile",
+        "state": state,
+        "nonce": uuid4().hex,
+    }
+    if prompt_select_account:
+        params["prompt"] = "select_account"
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+
+
+async def google_profile_from_code(code: str) -> dict[str, str]:
+    async with httpx.AsyncClient(timeout=15) as client:
+        token_response = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": getenv("GOOGLE_CLIENT_ID", ""),
+                "client_secret": getenv("GOOGLE_CLIENT_SECRET", ""),
+                "redirect_uri": google_redirect_uri(),
+                "grant_type": "authorization_code",
+            },
+        )
+        token_response.raise_for_status()
+        access_token = token_response.json().get("access_token")
+        if not access_token:
+            raise ValueError("Google token response did not include an access token")
+        profile_response = await client.get(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        profile_response.raise_for_status()
+        return profile_response.json()
 
 
 def auth_context_from_approval_token(token: str, kind: str, invoice_id: int, db: Session) -> AuthContext:
@@ -2274,28 +2314,32 @@ async def auth_login(
             return RedirectResponse(f"{FRONTEND_URL}/?auth_error=candidate_invoice_not_found")
         pending_candidate_invoice_id = candidate_invoice_id
     request.session.clear()
-    if pending_approval_invoice_id is not None:
-        request.session["pending_approval_invoice_id"] = pending_approval_invoice_id
-    if pending_candidate_invoice_id is not None:
-        request.session["pending_candidate_invoice_id"] = pending_candidate_invoice_id
-    redirect_uri = getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
-    kwargs = {"prompt": "select_account"} if approval_invoice_id is not None or candidate_invoice_id is not None else {}
-    return await oauth.google.authorize_redirect(request, redirect_uri, **kwargs)
+    state = google_auth_state(pending_approval_invoice_id, pending_candidate_invoice_id)
+    return RedirectResponse(google_auth_url(state, prompt_select_account=True))
 
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request, db: Session = Depends(get_db)):
     if not GOOGLE_CONFIGURED:
         raise HTTPException(status_code=503, detail="Google OAuth is not configured")
-    try:
-        token = await oauth.google.authorize_access_token(request)
-    except MismatchingStateError:
-        request.session.clear()
-        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_expired")
-    except OAuthError:
+    state = request.query_params.get("state")
+    code = request.query_params.get("code")
+    if not state or not code:
         request.session.clear()
         return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_failed")
-    profile = token.get("userinfo") or await oauth.google.userinfo(token=token)
+    try:
+        state_payload = oauth_state_serializer.loads(state, max_age=600)
+    except SignatureExpired:
+        request.session.clear()
+        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_expired")
+    except BadSignature:
+        request.session.clear()
+        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_failed")
+    try:
+        profile = await google_profile_from_code(code)
+    except (httpx.HTTPError, ValueError):
+        request.session.clear()
+        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_failed")
     email = normalize_email(profile.get("email", ""))
     if not email:
         raise HTTPException(status_code=400, detail="Google account did not return an email address")
@@ -2309,10 +2353,14 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
     user.full_name = profile.get("name") or user.full_name
     user.last_login_at = utcnow()
     db.commit()
+    request.session.clear()
     request.session["user_id"] = user.id
-    request.session.pop("active_role", None)
-    pending_approval_invoice_id = request.session.pop("pending_approval_invoice_id", None)
+    pending_approval_invoice_id = state_payload.get("approval_invoice_id")
     if pending_approval_invoice_id is not None:
+        try:
+            pending_approval_invoice_id = int(pending_approval_invoice_id)
+        except (TypeError, ValueError):
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_failed")
         invoice = db.scalar(
             select(ClientInvoice)
             .where(ClientInvoice.id == pending_approval_invoice_id)
@@ -2327,8 +2375,12 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         request.session["active_role"] = UserRole.client_account_executive.value
         token = approval_token_for_user("client_invoice", pending_approval_invoice_id, user)
         return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'approval_invoice_id': pending_approval_invoice_id, 'approval_token': token})}")
-    pending_candidate_invoice_id = request.session.pop("pending_candidate_invoice_id", None)
+    pending_candidate_invoice_id = state_payload.get("candidate_invoice_id")
     if pending_candidate_invoice_id is not None:
+        try:
+            pending_candidate_invoice_id = int(pending_candidate_invoice_id)
+        except (TypeError, ValueError):
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_failed")
         invoice = db.get(CandidateVendorInvoice, pending_candidate_invoice_id)
         candidate = db.get(Candidate, invoice.candidate_id) if invoice else None
         project = db.get(ProjectSOW, invoice.project_id or candidate.project_id) if invoice and candidate else None

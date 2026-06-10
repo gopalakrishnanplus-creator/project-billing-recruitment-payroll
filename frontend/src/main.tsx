@@ -621,13 +621,17 @@ function App() {
     () => candidates.filter((candidate) => candidate.status === 'hired'),
     [candidates],
   );
+  const candidateInvoiceEntryCandidates = useMemo(
+    () => candidates.filter((candidate) => ['hired', 'terminated', 'inactive'].includes(candidate.status) && Boolean(latestContract(candidate))),
+    [candidates],
+  );
   const selectedCandidate = useMemo(
     () => candidatesForNeed.find((candidate) => candidate.id === selectedCandidateId) ?? candidatesForNeed[0],
     [candidatesForNeed, selectedCandidateId],
   );
   const selectedHiredCandidate = useMemo(
-    () => (selectedCandidate?.status === 'hired' ? selectedCandidate : hiredCandidates[0]),
-    [hiredCandidates, selectedCandidate],
+    () => candidateInvoiceEntryCandidates.find((candidate) => candidate.id === selectedCandidateId) ?? candidateInvoiceEntryCandidates[0],
+    [candidateInvoiceEntryCandidates, selectedCandidateId],
   );
   const selectedCandidateContract = useMemo(
     () => (selectedCandidate ? latestContract(selectedCandidate) : undefined),
@@ -2367,6 +2371,12 @@ function App() {
                             <Banknote size={18} />
                             <span>Add Item</span>
                           </button>
+                          {(canOperate || canHrManage) && (
+                            <button className="secondary" type="button" disabled={!contract} onClick={() => { editCandidateInvoiceTerms(candidate); setActiveForm('historical-candidate-invoice'); }}>
+                              <Upload size={18} />
+                              <span>Upload Past Invoice</span>
+                            </button>
+                          )}
                           </div>
                         </div>
                       );
@@ -2468,9 +2478,9 @@ function App() {
             <section className="panel wide">
               <PanelTitle icon={<Banknote size={18} />} title="Candidate Invoice Items" />
               <label className="field">
-                <span>Hired candidate</span>
+                <span>Candidate with contract</span>
                 <select value={selectedHiredCandidate?.id ?? ''} onChange={(event) => setSelectedCandidateId(Number(event.target.value))}>
-                  {hiredCandidates.map((candidate) => (
+                  {candidateInvoiceEntryCandidates.map((candidate) => (
                     <option key={candidate.id} value={candidate.id}>{candidate.full_name} · {candidate.position_title ?? 'No position'} · {candidate.status}</option>
                   ))}
                 </select>
@@ -2493,12 +2503,14 @@ function App() {
                     canDelete={canManageCandidateInvoiceItems}
                     loading={loading}
 	                    onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
-	                  />
+                  />
                   <div className="horizontalActions">
-                    <button className="secondary" type="button" onClick={() => setActiveForm('candidate-invoice-item')}>
-                      <Banknote size={18} />
-                      <span>Add Invoice Item</span>
-                    </button>
+                    {selectedHiredCandidate?.status === 'hired' && (
+                      <button className="secondary" type="button" onClick={() => setActiveForm('candidate-invoice-item')}>
+                        <Banknote size={18} />
+                        <span>Add Invoice Item</span>
+                      </button>
+                    )}
                     {(canOperate || canHrManage) && (
                       <button className="secondary" type="button" onClick={() => setActiveForm('historical-candidate-invoice')}>
                         <Upload size={18} />
@@ -2506,7 +2518,7 @@ function App() {
                       </button>
                     )}
                   </div>
-	                  {activeForm === 'candidate-invoice-item' && (
+	                  {selectedHiredCandidate?.status === 'hired' && activeForm === 'candidate-invoice-item' && (
                     <>
 		                  <CandidateInvoiceItemForm
 		                    defaultCurrency={selectedHiredCandidateContract.currency ?? 'USD'}
@@ -2548,7 +2560,7 @@ function App() {
 	                  )}
                 </>
               ) : (
-                <p className="empty">Select a hired candidate with a signed contract to add invoice items.</p>
+                <p className="empty">Select a hired or historical terminated candidate with a contract to add invoice items.</p>
               )}
             </section>
           )}

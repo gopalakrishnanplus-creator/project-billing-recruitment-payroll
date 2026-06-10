@@ -859,7 +859,15 @@ function App() {
   useEffect(() => {
     const error = new URLSearchParams(window.location.search).get('auth_error');
     if (error) {
-      setNotice({ tone: 'error', message: error === 'not_provisioned' ? 'This Google account has not been added by the system admin.' : 'No roles are assigned to this account.' });
+      const authErrorMessages: Record<string, string> = {
+        invoice_not_found: 'This invoice approval link is no longer available.',
+        candidate_invoice_not_found: 'This candidate invoice approval link is no longer available.',
+        login_expired: 'The Google login session expired. Please try signing in again.',
+        login_failed: 'Google login could not be completed. Please try signing in again.',
+        no_roles: 'No roles are assigned to this account.',
+        not_provisioned: 'This Google account has not been added by the system admin.',
+      };
+      setNotice({ tone: 'error', message: authErrorMessages[error] ?? 'Google login could not be completed. Please try signing in again.' });
       window.history.replaceState({}, '', window.location.pathname);
     }
     if (candidateInvoiceToken) {

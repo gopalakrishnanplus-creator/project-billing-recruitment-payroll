@@ -11,6 +11,7 @@ import re
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
+from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
 from authlib.integrations.starlette_client import OAuth
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
@@ -2260,18 +2261,23 @@ async def auth_login(
 ):
     if not GOOGLE_CONFIGURED:
         raise HTTPException(status_code=503, detail="Google OAuth is not configured")
+    pending_approval_invoice_id = None
+    pending_candidate_invoice_id = None
     if approval_invoice_id is not None:
         invoice = db.get(ClientInvoice, approval_invoice_id)
         if invoice is None:
             return RedirectResponse(f"{FRONTEND_URL}/?auth_error=invoice_not_found")
-        request.session.clear()
-        request.session["pending_approval_invoice_id"] = approval_invoice_id
+        pending_approval_invoice_id = approval_invoice_id
     if candidate_invoice_id is not None:
         invoice = db.get(CandidateVendorInvoice, candidate_invoice_id)
         if invoice is None:
             return RedirectResponse(f"{FRONTEND_URL}/?auth_error=candidate_invoice_not_found")
-        request.session.clear()
-        request.session["pending_candidate_invoice_id"] = candidate_invoice_id
+        pending_candidate_invoice_id = candidate_invoice_id
+    request.session.clear()
+    if pending_approval_invoice_id is not None:
+        request.session["pending_approval_invoice_id"] = pending_approval_invoice_id
+    if pending_candidate_invoice_id is not None:
+        request.session["pending_candidate_invoice_id"] = pending_candidate_invoice_id
     redirect_uri = getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
     kwargs = {"prompt": "select_account"} if approval_invoice_id is not None or candidate_invoice_id is not None else {}
     return await oauth.google.authorize_redirect(request, redirect_uri, **kwargs)
@@ -2281,7 +2287,14 @@ async def auth_login(
 async def auth_callback(request: Request, db: Session = Depends(get_db)):
     if not GOOGLE_CONFIGURED:
         raise HTTPException(status_code=503, detail="Google OAuth is not configured")
-    token = await oauth.google.authorize_access_token(request)
+    try:
+        token = await oauth.google.authorize_access_token(request)
+    except MismatchingStateError:
+        request.session.clear()
+        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_expired")
+    except OAuthError:
+        request.session.clear()
+        return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_failed")
     profile = token.get("userinfo") or await oauth.google.userinfo(token=token)
     email = normalize_email(profile.get("email", ""))
     if not email:

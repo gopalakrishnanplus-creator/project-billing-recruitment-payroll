@@ -2327,7 +2327,7 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              <section className="panel wide">
+              <section className="panel wide hiredCandidatesPanel">
                 <PanelTitle icon={<BadgeCheck size={18} />} title="Hired Candidates" />
                 {hiredCandidates.length > 0 ? (
                   <>

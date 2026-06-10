@@ -493,6 +493,21 @@ dd {
   font-size: inherit;
 }
 
+.hiredCandidatesPanel .lineRow,
+.hiredCandidatesPanel .scheduleRow {
+  grid-template-columns: 1fr;
+}
+
+.hiredCandidatesPanel .horizontalActions,
+.hiredCandidatesPanel .scheduleRow button {
+  justify-content: flex-start;
+  justify-self: flex-start;
+}
+
+.hiredCandidatesPanel .scheduleList {
+  max-width: 100%;
+}
+
 .editStack {
   display: flex;
   flex-direction: column;

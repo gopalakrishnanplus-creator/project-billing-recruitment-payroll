@@ -547,14 +547,25 @@ dd {
   border-bottom: 0;
 }
 
-.lineRow strong,
-.lineRow span {
+.lineRow > div:first-child strong,
+.lineRow > div:first-child span {
   display: block;
   overflow-wrap: anywhere;
 }
 
 .lineRow > div:first-child {
   min-width: 0;
+}
+
+.horizontalActions button,
+.actions button {
+  white-space: nowrap;
+}
+
+.horizontalActions button span,
+.actions button span {
+  display: inline;
+  overflow-wrap: normal;
 }
 
 .selectedLine {

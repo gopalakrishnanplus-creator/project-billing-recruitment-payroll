@@ -172,6 +172,8 @@ class InvoiceScheduleCreate(BaseModel):
     final_invoice_date: date | None = None
     historical_backfill: bool = False
     next_invoice_generation_date: date | None = None
+    historical_paid_date: date | None = None
+    historical_bank_reference: str | None = None
 
 
 class InvoiceScheduleUpdate(InvoiceScheduleCreate):

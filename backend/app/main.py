@@ -3373,12 +3373,17 @@ def delete_candidate_invoice_schedule(
     return {"status": "deleted"}
 
 
-def validate_client_invoice_schedule_payload(payload: InvoiceScheduleCreate | InvoiceScheduleUpdate) -> None:
+def validate_client_invoice_schedule_payload(payload: InvoiceScheduleCreate | InvoiceScheduleUpdate, *, require_historical_single_paid_date: bool = False) -> None:
     if payload.frequency == "single":
         payload.final_invoice_date = None
     if payload.final_invoice_date and payload.final_invoice_date < payload.first_invoice_date:
         raise HTTPException(status_code=400, detail="Final invoice date cannot be earlier than first invoice date")
     if payload.historical_backfill:
+        if payload.frequency == "single":
+            payload.next_invoice_generation_date = None
+            if require_historical_single_paid_date and payload.historical_paid_date is None:
+                raise HTTPException(status_code=400, detail="Paid date is required for historical single client invoices")
+            return
         if payload.next_invoice_generation_date is None:
             raise HTTPException(status_code=400, detail="Next invoice/reminder date is required for historical backfill schedules")
         if payload.next_invoice_generation_date < date.today():
@@ -3392,17 +3397,46 @@ def validate_client_invoice_schedule_payload(payload: InvoiceScheduleCreate | In
 
 
 @app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)
-def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, _: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
+def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
     project = db.get(ProjectSOW, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_active(project)
-    validate_client_invoice_schedule_payload(payload)
-    schedule = ClientInvoiceSchedule(project_id=project_id, **payload.model_dump())
+    validate_client_invoice_schedule_payload(payload, require_historical_single_paid_date=True)
+    schedule = ClientInvoiceSchedule(
+        project_id=project_id,
+        **payload.model_dump(exclude={"historical_paid_date", "historical_bank_reference"}),
+    )
     db.add(schedule)
     db.flush()
-    log_event(db, project_id=project_id, actor_name=project.operations_manager_name, action="invoice_schedule_added", details=payload.label)
-    create_due_invoices(db, date.today())
+    log_event(db, project_id=project_id, actor_name=context.user.full_name, action="invoice_schedule_added", details=payload.label)
+    if schedule.historical_backfill and schedule.frequency == "single":
+        invoice = ClientInvoice(
+            schedule_id=schedule.id,
+            project_id=schedule.project_id,
+            invoice_number=next_invoice_number(db, schedule.first_invoice_date),
+            issue_date=schedule.first_invoice_date,
+            due_date=schedule.first_invoice_date + timedelta(days=7),
+            item_description=schedule.item_description or schedule.label,
+            amount=schedule.amount,
+            currency=schedule.currency,
+            status=InvoiceStatus.paid.value,
+        )
+        db.add(invoice)
+        db.flush()
+        db.add(
+            ClientPayment(
+                invoice_id=invoice.id,
+                amount_received=schedule.amount,
+                received_date=payload.historical_paid_date,
+                bank_reference=payload.historical_bank_reference,
+                notes="Historical single invoice entered as already paid",
+                recorded_by_name=context.user.full_name,
+            )
+        )
+        log_event(db, project_id=project_id, invoice_id=invoice.id, actor_name=context.user.full_name, action="historical_client_invoice_recorded_paid", details=invoice.invoice_number)
+    else:
+        create_due_invoices(db, date.today())
     db.commit()
     db.refresh(schedule)
     return InvoiceScheduleRead.model_validate(schedule)

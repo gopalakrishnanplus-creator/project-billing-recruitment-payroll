@@ -2751,7 +2751,7 @@ function App() {
                 </label>
                 <Field label={editingScheduleBackfill ? 'Original first invoice date' : editingScheduleFrequency === 'single' ? 'Invoice date' : 'First invoice date'} name="first_invoice_date" type="date" defaultValue={selectedClientSchedule.first_invoice_date} required />
                 {editingScheduleFrequency !== 'single' && <Field label="Final invoice date" name="final_invoice_date" type="date" defaultValue={selectedClientSchedule.final_invoice_date ?? ''} />}
-                {editingScheduleBackfill && <Field label="Next invoice/reminder date" name="next_invoice_generation_date" type="date" defaultValue={selectedClientSchedule.next_invoice_generation_date ?? selectedClientSchedule.next_invoice_date ?? today()} required />}
+                {editingScheduleBackfill && editingScheduleFrequency !== 'single' && <Field label="Next invoice/reminder date" name="next_invoice_generation_date" type="date" defaultValue={selectedClientSchedule.next_invoice_generation_date ?? selectedClientSchedule.next_invoice_date ?? today()} required />}
               </div>
               <label className="field full">
                 <span>Invoice item description</span>
@@ -2759,7 +2759,7 @@ function App() {
               </label>
               <label className="checkField">
                 <input name="historical_backfill" type="checkbox" checked={editingScheduleBackfill} onChange={(event) => setEditingScheduleBackfill(event.currentTarget.checked)} />
-                <span>Historical schedule - start reminders from next cycle</span>
+                <span>{editingScheduleFrequency === 'single' ? 'Historical single invoice - already raised and paid, do not send reminders' : 'Historical schedule - start reminders from next cycle'}</span>
               </label>
               <div className="toolbar">
                 <button className="primary" disabled={loading}>
@@ -3397,9 +3397,15 @@ function App() {
                 {scheduleFrequency !== 'single' && <Field label="Final invoice date" name="final_invoice_date" type="date" />}
                 <label className="checkField">
                   <input name="historical_backfill" type="checkbox" checked={scheduleBackfill} onChange={(event) => setScheduleBackfill(event.currentTarget.checked)} />
-                  <span>Historical schedule - start reminders from next cycle</span>
+                  <span>{scheduleFrequency === 'single' ? 'Historical single invoice - already raised and paid, do not send reminders' : 'Historical schedule - start reminders from next cycle'}</span>
                 </label>
-                {scheduleBackfill && <Field label="Next invoice/reminder date" name="next_invoice_generation_date" type="date" defaultValue={endOfCurrentMonth()} required />}
+                {scheduleBackfill && scheduleFrequency === 'single' && (
+                  <>
+                    <Field label="Paid date" name="historical_paid_date" type="date" defaultValue={today()} required />
+                    <Field label="Bank reference" name="historical_bank_reference" />
+                  </>
+                )}
+                {scheduleBackfill && scheduleFrequency !== 'single' && <Field label="Next invoice/reminder date" name="next_invoice_generation_date" type="date" defaultValue={endOfCurrentMonth()} required />}
                 <button className="secondary" disabled={!selectedProject || loading}>
                   <CalendarPlus size={18} />
                   <span>Add Schedule</span>

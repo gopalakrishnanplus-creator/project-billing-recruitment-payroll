@@ -939,6 +939,52 @@ def test_historical_client_invoice_schedule_starts_from_next_cycle():
         assert len(upcoming_response.json()) == 1
         assert upcoming_response.json()[0]["next_invoice_date"] == str(next_cycle_invoice)
 
+        historical_paid_invoice_date = date.today() - timedelta(days=30)
+        historical_paid_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Historical single paid client invoice",
+                "item_description": "Past client invoice already paid",
+                "amount": "1500.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(historical_paid_invoice_date),
+                "historical_backfill": True,
+                "historical_paid_date": str(date.today() - timedelta(days=20)),
+                "historical_bank_reference": "CLIENT-HIST-1",
+            },
+        )
+        assert historical_paid_response.status_code == 201, historical_paid_response.text
+        assert historical_paid_response.json()["next_invoice_generation_date"] is None
+
+        invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        assert invoices_response.status_code == 200, invoices_response.text
+        invoices = invoices_response.json()
+        assert len(invoices) == 1
+        assert invoices[0]["status"] == "paid"
+        assert invoices[0]["issue_date"] == str(historical_paid_invoice_date)
+        assert invoices[0]["paid_total"] == "1500.00"
+        assert invoices[0]["balance_due"] == "0.00"
+        assert invoices[0]["payments"][0]["bank_reference"] == "CLIENT-HIST-1"
+        with SessionLocal() as db:
+            assert db.query(EmailNotification).filter(EmailNotification.project_id == project["id"]).count() == 0
+
+        missing_paid_date_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Invalid historical single paid client invoice",
+                "amount": "1500.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(historical_paid_invoice_date),
+                "historical_backfill": True,
+            },
+        )
+        assert missing_paid_date_response.status_code == 400
+        assert "Paid date is required" in missing_paid_date_response.text
+
         past_next_cycle_response = client.post(
             f"/projects/{project['id']}/invoice-schedules",
             headers=OPS_HEADERS,

@@ -125,6 +125,7 @@ h2 {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
 .checkField {
@@ -185,6 +186,7 @@ input,
 select,
 textarea {
   width: 100%;
+  min-width: 0;
   min-height: 40px;
   border: 1px solid #c4ccd7;
   border-radius: 6px;
@@ -212,6 +214,15 @@ button,
 
 button {
   cursor: pointer;
+}
+
+button > span,
+.linkButton > span {
+  display: inline;
+  overflow-wrap: normal;
+  white-space: nowrap;
+  color: inherit;
+  font-size: inherit;
 }
 
 button:disabled {
@@ -459,6 +470,10 @@ dd {
   background: #ffffff;
 }
 
+.scheduleRow > div {
+  min-width: 0;
+}
+
 .scheduleRow strong,
 .scheduleRow span {
   display: block;
@@ -468,6 +483,14 @@ dd {
 .scheduleRow span {
   color: #526071;
   font-size: 0.9rem;
+}
+
+.scheduleRow button > span {
+  display: inline;
+  overflow-wrap: normal;
+  white-space: nowrap;
+  color: inherit;
+  font-size: inherit;
 }
 
 .editStack {
@@ -656,14 +679,20 @@ dd {
   }
 
   .invoiceGrid,
+  .facts,
   .toolbar {
     grid-template-columns: 1fr;
   }
 
   .roleGrid,
   .lineRow,
+  .scheduleRow,
   .userRow {
     grid-template-columns: 1fr;
+  }
+
+  .scheduleRow button {
+    justify-self: flex-start;
   }
 
   .rolePills {

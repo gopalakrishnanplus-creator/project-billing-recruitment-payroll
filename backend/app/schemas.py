@@ -428,6 +428,8 @@ class ClientInvoiceRead(BaseModel):
     amount: Decimal
     currency: str
     status: str
+    invoice_document_id: int | None = None
+    invoice_document_name: str | None = None
     sent_at: datetime | None
 
 

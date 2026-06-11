@@ -239,6 +239,8 @@ type ClientInvoice = {
   amount: string;
   currency: string;
   status: string;
+  invoice_document_id: number | null;
+  invoice_document_name: string | null;
   sent_at?: string | null;
   project_code?: string;
   project_title?: string;
@@ -1391,9 +1393,14 @@ function App() {
     payload.historical_backfill = scheduleBackfill || isHistoricalBackfillForm ? 'true' : 'false';
     if (isHistoricalBackfillForm) payload.frequency = 'single';
     await mutate(async () => {
+      const body = isHistoricalBackfillForm ? new FormData(formElement) : JSON.stringify(payload);
+      if (body instanceof FormData) {
+        body.set('historical_backfill', 'true');
+        body.set('frequency', 'single');
+      }
       await api<InvoiceSchedule>(`/projects/${selectedProject.id}/invoice-schedules`, {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body,
       });
       formElement.reset();
       setClientScheduleFormMode('standard');
@@ -3678,6 +3685,7 @@ function App() {
                 )}
                 {(isHistoricalClientInvoiceBackfillForm || (scheduleBackfill && scheduleFrequency === 'single')) && (
                   <>
+                    {isHistoricalClientInvoiceBackfillForm && <Field label="Invoice PDF upload" name="invoice_document" type="file" accept="application/pdf" required />}
                     <Field label="Paid date" name="historical_paid_date" type="date" defaultValue={today()} required />
                     <Field label="Bank reference" name="historical_bank_reference" />
                   </>
@@ -4280,6 +4288,7 @@ function InvoiceDetail({
           <div><dt>Amount</dt><dd>{selectedInvoice.currency} {selectedInvoice.amount}</dd></div>
           <div><dt>Status</dt><dd><Status value={selectedInvoice.status} /></dd></div>
           <div><dt>Paid</dt><dd>{selectedInvoice.currency} {selectedInvoice.paid_total ?? '0.00'}</dd></div>
+          {selectedInvoice.invoice_document_name && <div><dt>Uploaded invoice</dt><dd>{selectedInvoice.invoice_document_name}</dd></div>}
           {selectedInvoice.cancelled_amount && selectedInvoice.cancelled_amount !== '0.00' && (
             <div><dt>Cancelled</dt><dd>{selectedInvoice.currency} {selectedInvoice.cancelled_amount}</dd></div>
           )}

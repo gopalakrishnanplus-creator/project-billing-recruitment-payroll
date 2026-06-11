@@ -940,20 +940,22 @@ def test_historical_client_invoice_schedule_starts_from_next_cycle():
         assert upcoming_response.json()[0]["next_invoice_date"] == str(next_cycle_invoice)
 
         historical_paid_invoice_date = date.today() - timedelta(days=30)
+        historical_invoice_pdf = b"%PDF-1.4\nhistorical client invoice\n%%EOF"
         historical_paid_response = client.post(
             f"/projects/{project['id']}/invoice-schedules",
             headers=OPS_HEADERS,
-            json={
+            data={
                 "label": "Historical single paid client invoice",
                 "item_description": "Past client invoice already paid",
                 "amount": "1500.00",
                 "currency": "USD",
                 "frequency": "single",
                 "first_invoice_date": str(historical_paid_invoice_date),
-                "historical_backfill": True,
+                "historical_backfill": "true",
                 "historical_paid_date": str(date.today() - timedelta(days=20)),
                 "historical_bank_reference": "CLIENT-HIST-1",
             },
+            files={"invoice_document": ("historical-client.pdf", historical_invoice_pdf, "application/pdf")},
         )
         assert historical_paid_response.status_code == 201, historical_paid_response.text
         assert historical_paid_response.json()["next_invoice_generation_date"] is None
@@ -967,6 +969,11 @@ def test_historical_client_invoice_schedule_starts_from_next_cycle():
         assert invoices[0]["paid_total"] == "1500.00"
         assert invoices[0]["balance_due"] == "0.00"
         assert invoices[0]["payments"][0]["bank_reference"] == "CLIENT-HIST-1"
+        assert invoices[0]["invoice_document_name"] == "historical-client.pdf"
+        download_response = client.get(f"/client-invoices/{invoices[0]['id']}/download", headers=FINANCE_HEADERS)
+        assert download_response.status_code == 200, download_response.text
+        assert download_response.content == historical_invoice_pdf
+        assert "historical-client.pdf" in download_response.headers["content-disposition"]
         with SessionLocal() as db:
             assert db.query(EmailNotification).filter(EmailNotification.project_id == project["id"]).count() == 0
 

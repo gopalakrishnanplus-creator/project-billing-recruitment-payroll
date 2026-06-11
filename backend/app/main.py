@@ -225,6 +225,7 @@ def ensure_workflow_columns() -> None:
         if "client_invoices" in tables:
             existing = {column["name"] for column in inspector.get_columns("client_invoices")}
             add_column(conn, "client_invoices", existing, "item_description", "TEXT")
+            add_column(conn, "client_invoices", existing, "invoice_document_id", "INTEGER")
         if "uploaded_documents" in tables:
             existing = {column["name"] for column in inspector.get_columns("uploaded_documents")}
             add_column(conn, "uploaded_documents", existing, "stored_filename", "VARCHAR(255)")
@@ -745,7 +746,7 @@ def candidate_invoice_status_from_paid_total(invoice: CandidateVendorInvoice, pa
     return "paid" if paid_total >= invoice.amount else "partially_paid"
 
 
-def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
+def serialize_invoice(invoice: ClientInvoice, db: Session) -> InvoiceDetailRead:
     paid_total = sum((payment.amount_received for payment in active_client_payments(invoice.payments)), Decimal("0.00"))
     open_balance = max(invoice.amount - paid_total, Decimal("0.00"))
     cancelled_amount = open_balance if invoice.status in {InvoiceStatus.cancelled.value, InvoiceStatus.partially_paid_remainder_cancelled.value} else Decimal("0.00")
@@ -761,6 +762,8 @@ def serialize_invoice(invoice: ClientInvoice) -> InvoiceDetailRead:
         amount=invoice.amount,
         currency=invoice.currency,
         status=invoice.status,
+        invoice_document_id=invoice.invoice_document_id,
+        invoice_document_name=document_name(db, invoice.invoice_document_id),
         sent_at=invoice.sent_at,
         project_code=invoice.project.project_code,
         project_title=invoice.project.title,
@@ -848,7 +851,7 @@ def load_invoice_detail(invoice_id: int, db: Session, context: AuthContext | Non
         raise HTTPException(status_code=404, detail="Invoice not found")
     if context is not None:
         authorize_invoice_visibility(invoice, context)
-    return serialize_invoice(invoice)
+    return serialize_invoice(invoice, db)
 
 
 def next_date(current: date, frequency: str) -> date:
@@ -3462,11 +3465,13 @@ def validate_client_invoice_schedule_payload(payload: InvoiceScheduleCreate | In
 
 
 @app.post("/projects/{project_id}/invoice-schedules", response_model=InvoiceScheduleRead, status_code=201)
-def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
+async def add_invoice_schedule(project_id: int, request: Request, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> InvoiceScheduleRead:
     project = db.get(ProjectSOW, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_active(project)
+    data, files = await request_payload_and_files(request)
+    payload: InvoiceScheduleCreate = parse_model(InvoiceScheduleCreate, data)
     validate_client_invoice_schedule_payload(payload, require_historical_single_paid_date=True)
     schedule = ClientInvoiceSchedule(
         project_id=project_id,
@@ -3487,6 +3492,15 @@ def add_invoice_schedule(project_id: int, payload: InvoiceScheduleCreate, contex
             currency=schedule.currency,
             status=InvoiceStatus.paid.value,
         )
+        invoice_document = await save_uploaded_document(
+            db,
+            file=files.get("invoice_document") or files.get("invoice_pdf"),
+            project_id=project_id,
+            document_type="historical_client_invoice",
+            uploaded_by_name=context.user.full_name,
+        )
+        if invoice_document:
+            invoice.invoice_document_id = invoice_document.id
         db.add(invoice)
         db.flush()
         db.add(
@@ -4026,7 +4040,7 @@ def list_invoices(
             selectinload(ClientInvoice.payments),
         )
     ).all()
-    return [serialize_invoice(invoice) for invoice in invoices]
+    return [serialize_invoice(invoice, db) for invoice in invoices]
 
 
 @app.get("/upcoming-invoices", response_model=list[UpcomingInvoiceRead])
@@ -4111,7 +4125,7 @@ def get_client_account_approval_invoice(invoice_id: int, request: Request, db: S
         raise HTTPException(status_code=404, detail="Invoice not found")
     auth = approval_auth_from_request(request, db, kind="client_invoice", invoice_id=invoice_id)
     authorize_client_account_invoice_approval(invoice, auth.context)
-    return serialize_invoice(invoice)
+    return serialize_invoice(invoice, db)
 
 
 @app.get("/client-invoices/{invoice_id}/download")
@@ -4133,6 +4147,10 @@ def download_invoice(invoice_id: int, request: Request, db: Session = Depends(ge
         authorize_client_account_invoice_approval(invoice, auth.context)
     else:
         authorize_invoice_visibility(invoice, auth.context)
+    if invoice.invoice_document_id:
+        document = db.get(UploadedDocument, invoice.invoice_document_id)
+        if document is not None:
+            return document_download_response(document)
     filename = invoice.invoice_number.replace("/", "-")
     return Response(
         content=invoice_pdf_bytes(invoice),

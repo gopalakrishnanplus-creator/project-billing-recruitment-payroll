@@ -59,6 +59,7 @@ const PROJECT_DOCUMENT_TYPES = new Set(['msa', 'sow', 'sow_amendment']);
 const LIST_PAGE_SIZE = 20;
 
 type ActiveView = 'home' | 'workflow' | 'invoices' | 'recruitment' | 'schedules';
+type ClientScheduleFormMode = 'standard' | 'historical-backfill';
 type ScreenFocus =
   | 'admin-users'
   | 'admin-internal-cae'
@@ -603,6 +604,7 @@ function App() {
   const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
   const [selectedInterviewId, setSelectedInterviewId] = useState<number | null>(Number.isFinite(requestedInterviewId) && requestedInterviewId > 0 ? requestedInterviewId : null);
   const [editingProject, setEditingProject] = useState(false);
+  const [clientScheduleFormMode, setClientScheduleFormMode] = useState<ClientScheduleFormMode>('standard');
   const [scheduleFrequency, setScheduleFrequency] = useState('monthly');
   const [scheduleBackfill, setScheduleBackfill] = useState(false);
   const [editingScheduleFrequency, setEditingScheduleFrequency] = useState('monthly');
@@ -805,6 +807,7 @@ function App() {
   const showClientInvoiceRegister = !screenFocus || ['client-invoices', 'client-payment', 'finance-client-actions', 'cae-client-approval', 'test-invoices'].includes(screenFocus);
   const showCandidateInvoiceRegister = !screenFocus || ['candidate-invoices', 'candidate-payment', 'finance-candidate-actions', 'cae-candidate-approval'].includes(screenFocus);
   const showProjectRegister = !screenFocus || ['projects', 'project-documents', 'add-project', 'add-sow', 'project-need', 'client-schedule'].includes(screenFocus);
+  const isHistoricalClientInvoiceBackfillForm = clientScheduleFormMode === 'historical-backfill';
 
   async function refreshMe() {
     const current = await api<CurrentUser>('/auth/me');
@@ -1384,13 +1387,17 @@ function App() {
     if (!selectedProject) return;
     const formElement = event.currentTarget;
     const payload = formPayload(formElement);
-    payload.historical_backfill = scheduleBackfill ? 'true' : 'false';
+    const isHistoricalBackfillForm = clientScheduleFormMode === 'historical-backfill';
+    payload.historical_backfill = scheduleBackfill || isHistoricalBackfillForm ? 'true' : 'false';
+    if (isHistoricalBackfillForm) payload.frequency = 'single';
     await mutate(async () => {
       await api<InvoiceSchedule>(`/projects/${selectedProject.id}/invoice-schedules`, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
       formElement.reset();
+      setClientScheduleFormMode('standard');
+      setScheduleFrequency('monthly');
       setScheduleBackfill(false);
       return 'Invoice schedule added';
     });
@@ -1704,6 +1711,21 @@ function App() {
     }
   }
 
+  function openClientScheduleSetup(projectId?: number) {
+    if (projectId !== undefined) setSelectedProjectId(projectId);
+    setClientScheduleFormMode('standard');
+    setScheduleFrequency('monthly');
+    setScheduleBackfill(false);
+    openFocusedScreen('workflow', 'client-schedule', 'client-schedule');
+  }
+
+  function openHistoricalClientInvoiceBackfill() {
+    setClientScheduleFormMode('historical-backfill');
+    setScheduleFrequency('single');
+    setScheduleBackfill(true);
+    openFocusedScreen('workflow', 'client-schedule', 'client-schedule');
+  }
+
   function openClientInvoiceScreen(focus: ScreenFocus, statusFilter = '') {
     setInvoicePage(1);
     setInvoiceStatusFilter(statusFilter);
@@ -1754,9 +1776,9 @@ function App() {
                 {renderHomeAction('Recruitment Needs By SOW', <Users size={18} />, () => openFocusedScreen('recruitment', 'recruitment-positions'), openRecruitmentNeeds.length)}
                 {renderHomeAction('Add Recruitment Position', <FilePlus2 size={18} />, () => openFocusedScreen('recruitment', 'add-position', 'add-position'))}
                 {renderHomeAction('Candidate / Test Data Cleanup', <Trash2 size={18} />, () => openFocusedScreen('recruitment', 'candidate-cleanup'), candidatesForNeed.length)}
-                {renderHomeAction('Client Invoice Schedule Setup', <CalendarPlus size={18} />, () => openFocusedScreen('workflow', 'client-schedule', 'client-schedule'))}
+                {renderHomeAction('Client Invoice Schedule Setup', <CalendarPlus size={18} />, () => openClientScheduleSetup())}
                 {renderHomeAction('Active Client Invoicing Schedules', <CalendarPlus size={18} />, () => openFocusedScreen('schedules', 'active-schedules'), clientInvoiceSchedules.length)}
-                {renderHomeAction('Historical Client Invoice Backfill', <FileCheck2 size={18} />, () => openFocusedScreen('workflow', 'client-schedule', 'client-schedule'))}
+                {renderHomeAction('Historical Client Invoice Backfill', <FileCheck2 size={18} />, () => openHistoricalClientInvoiceBackfill())}
                 {renderHomeAction('All Client Invoices', <FileCheck2 size={18} />, () => openClientInvoiceScreen('client-invoices'), invoices.length)}
               </>
             )}
@@ -3307,7 +3329,7 @@ function App() {
                   <ClipboardList size={18} />
                   <span>Add Recruitment Need</span>
                 </button>
-                <button className="secondary" type="button" disabled={!selectedProject} onClick={() => setActiveForm('client-schedule')}>
+                <button className="secondary" type="button" disabled={!selectedProject} onClick={() => openClientScheduleSetup()}>
                   <CalendarPlus size={18} />
                   <span>Add Client Invoice Schedule</span>
                 </button>
@@ -3403,7 +3425,7 @@ function App() {
                             </button>
                             <button className="secondary" type="button" onClick={() => { setSelectedProjectId(project.id); setActiveForm('add-sow'); }}>Add SOW</button>
                             <button className="secondary" type="button" onClick={() => { setSelectedProjectId(project.id); setActiveForm('project-need'); }}>Need</button>
-                            <button className="secondary" type="button" onClick={() => { setSelectedProjectId(project.id); setActiveForm('client-schedule'); }}>Schedule</button>
+                            <button className="secondary" type="button" onClick={() => openClientScheduleSetup(project.id)}>Schedule</button>
                           </>
                         )}
                       </div>
@@ -3606,8 +3628,11 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              {activeForm === 'client-schedule' && (!screenFocus || screenFocus === 'client-schedule') && <form className="panel" onSubmit={(event) => void submitSchedule(event)}>
-                <PanelTitle icon={<CalendarPlus size={18} />} title="Client Invoice Schedule" />
+              {activeForm === 'client-schedule' && (!screenFocus || screenFocus === 'client-schedule') && <form className="panel" key={clientScheduleFormMode} onSubmit={(event) => void submitSchedule(event)}>
+                <PanelTitle icon={<CalendarPlus size={18} />} title={isHistoricalClientInvoiceBackfillForm ? 'Historical Client Invoice Backfill' : 'Client Invoice Schedule'} />
+                {isHistoricalClientInvoiceBackfillForm && (
+                  <p className="contextLine">Creates one already-raised, already-paid historical invoice. It does not create future schedules or send emails.</p>
+                )}
                 <label className="field">
                   <span>SOW</span>
                   <select value={selectedProject?.id ?? ''} onChange={(event) => setSelectedProjectId(Number(event.target.value))}>
@@ -3616,39 +3641,51 @@ function App() {
                     ))}
                   </select>
                 </label>
-                <Field label="Label" name="label" defaultValue="Monthly client billing" required />
+                <Field label="Label" name="label" defaultValue={isHistoricalClientInvoiceBackfillForm ? 'Historical client invoice' : 'Monthly client billing'} required />
                 <label className="field">
                   <span>Invoice item description</span>
                   <textarea name="item_description" rows={3} defaultValue="Monthly outcome pod member X 1" required />
                 </label>
                 <Field label="Amount" name="amount" type="number" step="0.01" defaultValue="4000" required />
                 <Field label="Currency" name="currency" defaultValue="USD" required />
-                <label className="field">
-                  <span>Frequency</span>
-                  <select name="frequency" value={scheduleFrequency} onChange={(event) => setScheduleFrequency(event.target.value)}>
-                    <option value="single">Single</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="twice_monthly">Every 15 days</option>
-                    <option value="monthly">Monthly</option>
-                    <option value="quarterly">Quarterly</option>
-                  </select>
-                </label>
-                <Field label={scheduleBackfill ? 'Original first invoice date' : scheduleFrequency === 'single' ? 'Invoice date' : 'First invoice date'} name="first_invoice_date" type="date" defaultValue={today()} required />
-                {scheduleFrequency !== 'single' && <Field label="Final invoice date" name="final_invoice_date" type="date" />}
-                <label className="checkField">
-                  <input name="historical_backfill" type="checkbox" checked={scheduleBackfill} onChange={(event) => setScheduleBackfill(event.currentTarget.checked)} />
-                  <span>{scheduleFrequency === 'single' ? 'Historical single invoice - already raised and paid, do not send emails' : 'Historical schedule - do not create or email past invoices; start future invoices from the next invoice date'}</span>
-                </label>
-                {scheduleBackfill && scheduleFrequency === 'single' && (
+                {isHistoricalClientInvoiceBackfillForm ? (
+                  <>
+                    <input name="frequency" type="hidden" value="single" />
+                    <label className="field">
+                      <span>Frequency</span>
+                      <input value="Single historical invoice" disabled readOnly />
+                    </label>
+                  </>
+                ) : (
+                  <label className="field">
+                    <span>Frequency</span>
+                    <select name="frequency" value={scheduleFrequency} onChange={(event) => setScheduleFrequency(event.target.value)}>
+                      <option value="single">Single</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="twice_monthly">Every 15 days</option>
+                      <option value="monthly">Monthly</option>
+                      <option value="quarterly">Quarterly</option>
+                    </select>
+                  </label>
+                )}
+                <Field label={isHistoricalClientInvoiceBackfillForm ? 'Invoice date' : scheduleBackfill ? 'Original first invoice date' : scheduleFrequency === 'single' ? 'Invoice date' : 'First invoice date'} name="first_invoice_date" type="date" defaultValue={today()} required />
+                {!isHistoricalClientInvoiceBackfillForm && scheduleFrequency !== 'single' && <Field label="Final invoice date" name="final_invoice_date" type="date" />}
+                {!isHistoricalClientInvoiceBackfillForm && (
+                  <label className="checkField">
+                    <input name="historical_backfill" type="checkbox" checked={scheduleBackfill} onChange={(event) => setScheduleBackfill(event.currentTarget.checked)} />
+                    <span>{scheduleFrequency === 'single' ? 'Historical single invoice - already raised and paid, do not send emails' : 'Historical schedule - do not create or email past invoices; start future invoices from the next invoice date'}</span>
+                  </label>
+                )}
+                {(isHistoricalClientInvoiceBackfillForm || (scheduleBackfill && scheduleFrequency === 'single')) && (
                   <>
                     <Field label="Paid date" name="historical_paid_date" type="date" defaultValue={today()} required />
                     <Field label="Bank reference" name="historical_bank_reference" />
                   </>
                 )}
-                {scheduleBackfill && scheduleFrequency !== 'single' && <Field label="Next invoice generation date" name="next_invoice_generation_date" type="date" defaultValue={endOfCurrentMonth()} required />}
+                {!isHistoricalClientInvoiceBackfillForm && scheduleBackfill && scheduleFrequency !== 'single' && <Field label="Next invoice generation date" name="next_invoice_generation_date" type="date" defaultValue={endOfCurrentMonth()} required />}
                 <button className="secondary" disabled={!selectedProject || loading}>
                   <CalendarPlus size={18} />
-                  <span>Add Schedule</span>
+                  <span>{isHistoricalClientInvoiceBackfillForm ? 'Add Historical Invoice' : 'Add Schedule'}</span>
                 </button>
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}

@@ -57,6 +57,43 @@ const CANDIDATE_INVOICE_TYPE_LABELS: Record<string, string> = {
 };
 const PROJECT_DOCUMENT_TYPES = new Set(['msa', 'sow', 'sow_amendment']);
 const LIST_PAGE_SIZE = 20;
+
+type ActiveView = 'home' | 'workflow' | 'invoices' | 'recruitment' | 'schedules';
+type ScreenFocus =
+  | 'admin-users'
+  | 'admin-internal-cae'
+  | 'admin-inactive-projects'
+  | 'projects'
+  | 'project-documents'
+  | 'add-project'
+  | 'add-sow'
+  | 'project-need'
+  | 'client-schedule'
+  | 'recruitment-positions'
+  | 'add-position'
+  | 'candidate-cleanup'
+  | 'historical-hire'
+  | 'recruitment-assets'
+  | 'candidate-status'
+  | 'add-candidate'
+  | 'assign-interview'
+  | 'hired-candidates'
+  | 'candidate-terms'
+  | 'candidate-invoice-items'
+  | 'historical-candidate-invoice'
+  | 'interviews'
+  | 'scorecard'
+  | 'active-schedules'
+  | 'client-invoices'
+  | 'candidate-invoices'
+  | 'client-payment'
+  | 'candidate-payment'
+  | 'finance-client-actions'
+  | 'finance-candidate-actions'
+  | 'cae-client-approval'
+  | 'cae-candidate-approval'
+  | 'test-invoices';
+
 const INTERNAL_PROJECT_PRESETS: Record<string, {
   label: string;
   client_company_name: string;
@@ -576,8 +613,11 @@ function App() {
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [candidateScheduleFrequency, setCandidateScheduleFrequency] = useState('monthly');
   const [historicalHireNoReminders, setHistoricalHireNoReminders] = useState(false);
-  const [activeView, setActiveView] = useState<'workflow' | 'invoices' | 'recruitment' | 'schedules'>(
-    requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : requestedView === 'schedules' ? 'schedules' : 'workflow',
+  const [activeView, setActiveView] = useState<ActiveView>(
+    requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : requestedView === 'schedules' ? 'schedules' : 'home',
+  );
+  const [screenFocus, setScreenFocus] = useState<ScreenFocus | null>(
+    requestedView === 'recruitment' && Number.isFinite(requestedInterviewId) && requestedInterviewId > 0 ? 'interviews' : null,
   );
   const [activeForm, setActiveForm] = useState<string | null>(null);
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState('');
@@ -717,6 +757,54 @@ function App() {
   const showingUpcomingInvoices = invoiceStatusFilter === UPCOMING_INVOICES_FILTER;
   const invoiceListCount = showingUpcomingInvoices ? upcomingInvoices.length : invoices.length;
   const invoicePageSize = 20;
+  const openRecruitmentNeeds = useMemo(
+    () => recruitmentNeeds.filter((need) => !['closed', 'deleted'].includes(need.status)),
+    [recruitmentNeeds],
+  );
+  const pendingInterviewScorecards = useMemo(
+    () => visibleInterviews.filter((interview) => ['active', 'pending'].includes(interview.status)),
+    [visibleInterviews],
+  );
+  const submittedInterviewScorecards = useMemo(
+    () => visibleInterviews.filter((interview) => interview.status === 'completed'),
+    [visibleInterviews],
+  );
+  const clientInvoicesPendingApproval = useMemo(
+    () => invoices.filter((invoice) => invoice.status === 'due_for_client_approval'),
+    [invoices],
+  );
+  const clientInvoicesReadyToSend = useMemo(
+    () => invoices.filter((invoice) => invoice.status === 'approved_for_sending'),
+    [invoices],
+  );
+  const clientInvoicesForCollection = useMemo(
+    () => invoices.filter((invoice) => ['sent_to_client', 'partially_paid'].includes(invoice.status)),
+    [invoices],
+  );
+  const candidateInvoicesPendingApproval = useMemo(
+    () => candidateInvoices.filter((invoice) => invoice.status === 'submitted'),
+    [candidateInvoices],
+  );
+  const candidateInvoicesForPayment = useMemo(
+    () => candidateInvoices.filter((invoice) => ['approved', 'partially_paid'].includes(invoice.status)),
+    [candidateInvoices],
+  );
+  const candidateInvoicesWithExceptions = useMemo(
+    () => candidateInvoices.filter((invoice) => ['on-hold', 'rejected', 'cancelled', 'partially_paid_remainder_cancelled'].includes(invoice.status)),
+    [candidateInvoices],
+  );
+  const clientInvoicesWithExceptions = useMemo(
+    () => invoices.filter((invoice) => ['cancelled', 'partially_paid_remainder_cancelled'].includes(invoice.status)),
+    [invoices],
+  );
+  const showRecruitmentPositions = !screenFocus || ['recruitment-positions', 'add-position', 'historical-hire', 'recruitment-assets'].includes(screenFocus);
+  const showCandidateStatus = !screenFocus || ['candidate-status', 'add-candidate', 'assign-interview', 'candidate-terms'].includes(screenFocus);
+  const showHiredCandidates = !screenFocus || ['hired-candidates', 'candidate-terms'].includes(screenFocus);
+  const showCandidateInvoiceItems = !screenFocus || ['candidate-invoice-items', 'historical-candidate-invoice'].includes(screenFocus);
+  const showInterviewEvaluations = !screenFocus || ['interviews', 'scorecard'].includes(screenFocus);
+  const showClientInvoiceRegister = !screenFocus || ['client-invoices', 'client-payment', 'finance-client-actions', 'cae-client-approval', 'test-invoices'].includes(screenFocus);
+  const showCandidateInvoiceRegister = !screenFocus || ['candidate-invoices', 'candidate-payment', 'finance-candidate-actions', 'cae-candidate-approval'].includes(screenFocus);
+  const showProjectRegister = !screenFocus || ['projects', 'project-documents', 'add-project', 'add-sow', 'project-need', 'client-schedule'].includes(screenFocus);
 
   async function refreshMe() {
     const current = await api<CurrentUser>('/auth/me');
@@ -891,12 +979,12 @@ function App() {
   }, [me?.active_role, invoicePage, clientSchedulePage]);
 
   useEffect(() => {
-    setEditingProject(false);
-  }, [selectedProjectId]);
+    if (me?.active_role && activeView === 'invoices') void refreshData(me, 1);
+  }, [invoiceStatusFilter]);
 
   useEffect(() => {
-    setActiveForm(null);
-  }, [activeView]);
+    setEditingProject(false);
+  }, [selectedProjectId]);
 
   useEffect(() => {
     setContractInvoiceFrequency(selectedCandidateContract?.invoice_frequency ?? 'monthly');
@@ -1604,6 +1692,135 @@ function App() {
     await refreshData(me, 1);
   }
 
+  function openFocusedScreen(view: ActiveView, focus: ScreenFocus | null = null, form: string | null = null) {
+    setActiveView(view);
+    setScreenFocus(focus);
+    setActiveForm(form);
+    setEditingProject(false);
+    if (view !== 'invoices') {
+      setInvoiceStatusFilter('');
+      setInvoiceDateFrom('');
+      setInvoiceDateTo('');
+    }
+  }
+
+  function openClientInvoiceScreen(focus: ScreenFocus, statusFilter = '') {
+    setInvoicePage(1);
+    setInvoiceStatusFilter(statusFilter);
+    setInvoiceDateFrom('');
+    setInvoiceDateTo('');
+    openFocusedScreen('invoices', focus);
+  }
+
+  function openCandidateInvoiceScreen(focus: ScreenFocus) {
+    setCandidateInvoicePage(1);
+    openFocusedScreen('invoices', focus);
+  }
+
+  function renderHomeAction(
+    label: string,
+    icon: React.ReactNode,
+    onClick: () => void,
+    count?: number | string,
+    meta?: string,
+    disabled = false,
+  ) {
+    return (
+      <button className="homeAction" type="button" onClick={onClick} disabled={disabled}>
+        <span className="homeActionIcon">{icon}</span>
+        <span className="homeActionBody">
+          <strong>{label}</strong>
+          {meta && <span>{meta}</span>}
+        </span>
+        {count !== undefined && <span className="homeActionCount">{count}</span>}
+      </button>
+    );
+  }
+
+  function renderRoleHome() {
+    if (!me?.active_role) return null;
+    const role = me.active_role;
+    return (
+      <section className="workspace homeWorkspace">
+        <section className="panel wide">
+          <PanelTitle icon={<ClipboardList size={18} />} title={`${roleLabel(role)} Home`} />
+          <div className="homeGrid">
+            {role === 'operations_manager' && (
+              <>
+                {renderHomeAction('Projects And SOWs', <ClipboardList size={18} />, () => openFocusedScreen('workflow', 'projects'), projects.length)}
+                {renderHomeAction('Add New Project / SOW', <FilePlus2 size={18} />, () => openFocusedScreen('workflow', 'add-project', 'create-project'))}
+                {renderHomeAction('Edit Active Projects', <Pencil size={18} />, () => openFocusedScreen('workflow', 'projects'), projects.length)}
+                {renderHomeAction('Project Documents', <FileText size={18} />, () => openFocusedScreen('workflow', 'project-documents'), projects.length)}
+                {renderHomeAction('Recruitment Needs By SOW', <Users size={18} />, () => openFocusedScreen('recruitment', 'recruitment-positions'), openRecruitmentNeeds.length)}
+                {renderHomeAction('Add Recruitment Position', <FilePlus2 size={18} />, () => openFocusedScreen('recruitment', 'add-position', 'add-position'))}
+                {renderHomeAction('Candidate / Test Data Cleanup', <Trash2 size={18} />, () => openFocusedScreen('recruitment', 'candidate-cleanup'), candidatesForNeed.length)}
+                {renderHomeAction('Client Invoice Schedule Setup', <CalendarPlus size={18} />, () => openFocusedScreen('workflow', 'client-schedule', 'client-schedule'))}
+                {renderHomeAction('Active Client Invoicing Schedules', <CalendarPlus size={18} />, () => openFocusedScreen('schedules', 'active-schedules'), clientInvoiceSchedules.length)}
+                {renderHomeAction('Historical Client Invoice Backfill', <FileCheck2 size={18} />, () => openFocusedScreen('workflow', 'client-schedule', 'client-schedule'))}
+                {renderHomeAction('All Client Invoices', <FileCheck2 size={18} />, () => openClientInvoiceScreen('client-invoices'), invoices.length)}
+              </>
+            )}
+            {role === 'hr_manager' && (
+              <>
+                {renderHomeAction('Projectwise Open Recruitment Needs', <ClipboardList size={18} />, () => openFocusedScreen('recruitment', 'recruitment-positions'), openRecruitmentNeeds.length)}
+                {renderHomeAction('Active Recruitment Pipeline', <Users size={18} />, () => openFocusedScreen('recruitment', 'candidate-status'), candidatesForNeed.length)}
+                {renderHomeAction('Add / Update Candidates', <UserCheck size={18} />, () => openFocusedScreen('recruitment', 'add-candidate', 'add-candidate'))}
+                {renderHomeAction('Schedule Interviews', <CalendarPlus size={18} />, () => openFocusedScreen('recruitment', 'assign-interview', 'assign-interview'))}
+                {renderHomeAction('Review Interview Scorecards', <FileCheck2 size={18} />, () => openFocusedScreen('recruitment', 'interviews'), pendingHrInterviewReviews.length)}
+                {renderHomeAction('Hired Candidates', <BadgeCheck size={18} />, () => openFocusedScreen('recruitment', 'hired-candidates'), hiredCandidates.length)}
+                {renderHomeAction('Edit Candidate Invoice Terms', <Pencil size={18} />, () => openFocusedScreen('recruitment', 'candidate-terms', 'candidate-terms'))}
+                {renderHomeAction('Upload Past Candidate Invoice', <Upload size={18} />, () => openFocusedScreen('recruitment', 'historical-candidate-invoice', 'historical-candidate-invoice'))}
+                {renderHomeAction('Add Historical Hire', <BadgeCheck size={18} />, () => openFocusedScreen('recruitment', 'historical-hire', 'historical-hire'))}
+                {renderHomeAction('Candidate Invoice Items / Reimbursements', <Banknote size={18} />, () => openFocusedScreen('recruitment', 'candidate-invoice-items'), candidateInvoiceEntryCandidates.length)}
+              </>
+            )}
+            {role === 'finance_manager' && (
+              <>
+                {renderHomeAction('Client Invoices Awaiting Approval', <FileCheck2 size={18} />, () => openClientInvoiceScreen('finance-client-actions', 'approved_by_client_account'), invoices.filter((invoice) => invoice.status === 'approved_by_client_account').length)}
+                {renderHomeAction('Approved Client Invoices To Send', <Send size={18} />, () => openClientInvoiceScreen('finance-client-actions', 'approved_for_sending'), clientInvoicesReadyToSend.length)}
+                {renderHomeAction('Record Client Payments', <Banknote size={18} />, () => openClientInvoiceScreen('client-payment', 'sent_to_client'), clientInvoicesForCollection.length)}
+                {renderHomeAction('Candidate Invoices Awaiting Payment', <Banknote size={18} />, () => openCandidateInvoiceScreen('finance-candidate-actions'), candidateInvoicesForPayment.length)}
+                {renderHomeAction('Record Candidate Invoice Payments', <Banknote size={18} />, () => openCandidateInvoiceScreen('candidate-payment'), candidateInvoicesForPayment.length)}
+                {renderHomeAction('All Client Invoices', <FileCheck2 size={18} />, () => openClientInvoiceScreen('client-invoices'), invoices.length)}
+                {renderHomeAction('All Candidate Invoices', <FileText size={18} />, () => openCandidateInvoiceScreen('candidate-invoices'), candidateInvoices.length)}
+                {renderHomeAction('Cancelled / Exception Items', <ClipboardList size={18} />, () => openFocusedScreen('invoices', 'finance-candidate-actions'), clientInvoicesWithExceptions.length + candidateInvoicesWithExceptions.length)}
+                {renderHomeAction('Delete Test Invoices', <Trash2 size={18} />, () => openClientInvoiceScreen('test-invoices'))}
+              </>
+            )}
+            {role === 'client_account_executive' && (
+              <>
+                {renderHomeAction('Client Invoices Pending My Approval', <FileCheck2 size={18} />, () => openClientInvoiceScreen('cae-client-approval', 'due_for_client_approval'), clientInvoicesPendingApproval.length)}
+                {renderHomeAction('Candidate Invoices Pending My Approval', <UserCheck size={18} />, () => openCandidateInvoiceScreen('cae-candidate-approval'), candidateInvoicesPendingApproval.length)}
+                {renderHomeAction('My Projects And SOWs', <ClipboardList size={18} />, () => openFocusedScreen('schedules', 'active-schedules'), clientInvoiceSchedules.length)}
+                {renderHomeAction('All Invoices For My Projects', <FileText size={18} />, () => openClientInvoiceScreen('client-invoices'), invoices.length)}
+                {renderHomeAction('Candidate Invoice History', <Banknote size={18} />, () => openCandidateInvoiceScreen('candidate-invoices'), candidateInvoices.length)}
+              </>
+            )}
+            {role === 'internal_interviewer' && (
+              <>
+                {renderHomeAction('Interviews Assigned To Me', <UserCheck size={18} />, () => openFocusedScreen('recruitment', 'interviews'), visibleInterviews.length)}
+                {renderHomeAction('Scorecards Pending Submission', <Upload size={18} />, () => openFocusedScreen('recruitment', 'scorecard', 'scorecard'), pendingInterviewScorecards.length)}
+                {renderHomeAction('Submitted Scorecards', <FileCheck2 size={18} />, () => openFocusedScreen('recruitment', 'interviews'), submittedInterviewScorecards.length)}
+                {renderHomeAction('Candidate / Position Context', <ClipboardList size={18} />, () => openFocusedScreen('recruitment', 'interviews'))}
+              </>
+            )}
+            {role === 'system_admin' && (
+              <>
+                {renderHomeAction('Manage Users', <UserCog size={18} />, () => openFocusedScreen('workflow', 'admin-users', 'add-user'), users.length)}
+                {renderHomeAction('Assign / Remove Roles', <ShieldCheck size={18} />, () => openFocusedScreen('workflow', 'admin-users'), users.length)}
+                {renderHomeAction('Assign CAE For Internal Projects', <UserCheck size={18} />, () => openFocusedScreen('workflow', 'admin-internal-cae'), internalProjects.length)}
+                {renderHomeAction('Inactive Projects', <ClipboardList size={18} />, () => {
+                  openFocusedScreen('workflow', 'admin-inactive-projects');
+                  void loadInactiveProjects();
+                }, inactiveProjects.length)}
+              </>
+            )}
+          </div>
+        </section>
+      </section>
+    );
+  }
+
   async function mutate(work: () => Promise<string>) {
     setLoading(true);
     setNotice(null);
@@ -1723,16 +1940,19 @@ function App() {
 
       {me.active_role && (
         <nav className="viewSwitch">
-          <button className={activeView === 'workflow' ? 'primary' : 'secondary'} onClick={() => setActiveView('workflow')}>Workflow</button>
-          {canRecruitment && <button className={activeView === 'recruitment' ? 'primary' : 'secondary'} onClick={() => setActiveView('recruitment')}>Recruitment</button>}
-          {canViewClientSchedules && <button className={activeView === 'schedules' ? 'primary' : 'secondary'} onClick={() => setActiveView('schedules')}>Schedules</button>}
-          <button className={activeView === 'invoices' ? 'primary' : 'secondary'} onClick={() => setActiveView('invoices')}>All Invoices</button>
+          <button className={activeView === 'home' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('home')}>Home</button>
+          <button className={activeView === 'workflow' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('workflow')}>Workflow</button>
+          {canRecruitment && <button className={activeView === 'recruitment' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('recruitment')}>Recruitment</button>}
+          {canViewClientSchedules && <button className={activeView === 'schedules' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('schedules')}>Schedules</button>}
+          <button className={activeView === 'invoices' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('invoices')}>All Invoices</button>
         </nav>
       )}
 
+      {activeView === 'home' && me.active_role && renderRoleHome()}
+
       {canAdmin && activeView === 'workflow' && (
         <section className="workspace adminWorkspace">
-          {activeForm === 'add-user' && <form className="panel" onSubmit={(event) => void submitUser(event)}>
+          {activeForm === 'add-user' && (!screenFocus || screenFocus === 'admin-users') && <form className="panel" onSubmit={(event) => void submitUser(event)}>
             <PanelTitle icon={<UserCog size={18} />} title="App Users" />
             <Field label="Full name" name="full_name" required />
             <Field label="Google email" name="email" type="email" required />
@@ -1755,7 +1975,7 @@ function App() {
             <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
           </form>}
 
-          <section className="panel wide">
+          {(!screenFocus || screenFocus === 'admin-internal-cae') && <section className="panel wide">
             <PanelTitle icon={<UserCheck size={18} />} title="Internal Project Client Account Executive" />
             {internalProjects.length > 0 ? (
               <div className="userList">
@@ -1783,9 +2003,9 @@ function App() {
             ) : (
               <p className="empty">No internal no-MSA project exists yet.</p>
             )}
-          </section>
+          </section>}
 
-          <section className="panel wide">
+          {(!screenFocus || screenFocus === 'admin-inactive-projects') && <section className="panel wide">
             <PanelTitle icon={<ClipboardList size={18} />} title="Inactivated Projects" />
             <div className="toolbar">
               <button className="secondary" type="button" onClick={() => void loadInactiveProjects()} disabled={loading}>
@@ -1815,9 +2035,9 @@ function App() {
             ) : (
               <p className="empty">Use this view to restore projects hidden by Operations Manager.</p>
             )}
-          </section>
+          </section>}
 
-          <section className="panel wide">
+          {(!screenFocus || screenFocus === 'admin-users') && <section className="panel wide">
             <PanelTitle icon={<ShieldCheck size={18} />} title="Provisioned Users" />
             <div className="horizontalActions">
               <button className="primary" type="button" onClick={() => setActiveForm('add-user')}>
@@ -1847,13 +2067,13 @@ function App() {
                 </div>
               ))}
             </div>
-          </section>
+          </section>}
         </section>
       )}
 
       {activeView === 'recruitment' && canRecruitment && (
         <section className="workspace recruitmentWorkspace">
-          {(canOperate || canHrManage || canInterview) && (
+          {(canOperate || canHrManage || canInterview) && !screenFocus && (
             <section className="panel wide">
               <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Actions" />
               <div className="horizontalActions">
@@ -1951,7 +2171,7 @@ function App() {
             </form>
           )}
 
-          <section className="panel wide">
+          {showRecruitmentPositions && <section className="panel wide">
             <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Positions" />
             {recruitmentNeeds.length > 0 && (
               <>
@@ -2013,7 +2233,7 @@ function App() {
             ) : (
               <p className="empty">No recruitment positions yet.</p>
             )}
-          </section>
+          </section>}
 
           {canOperate && selectedNeed && activeForm === 'edit-position' && (
             <form className="panel wide" key={selectedNeed.id} onSubmit={(event) => void submitNeedUpdate(event)}>
@@ -2082,7 +2302,7 @@ function App() {
             </form>
           )}
 
-          {canOperate && selectedNeed && (
+          {canOperate && selectedNeed && (!screenFocus || screenFocus === 'candidate-cleanup') && (
             <section className="panel wide">
               <PanelTitle icon={<Trash2 size={18} />} title="Candidate Cleanup" />
               {candidatesForNeed.length > 0 ? (
@@ -2177,7 +2397,7 @@ function App() {
 
           {canHrManage && (
             <>
-              {activeForm === 'assets' && <form className="panel" onSubmit={(event) => void submitRecruitmentAssets(event)}>
+              {activeForm === 'assets' && (!screenFocus || screenFocus === 'recruitment-assets') && <form className="panel" onSubmit={(event) => void submitRecruitmentAssets(event)}>
                 <PanelTitle icon={<Upload size={18} />} title="JD And Job Ad" />
                 <p className="contextLine">{selectedNeed ? `${selectedNeed.project_code} · ${selectedNeed.position_title}` : 'Select a position first'}</p>
                 <Field label="JD upload" name="jd_document" type="file" />
@@ -2190,7 +2410,7 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              {activeForm === 'add-candidate' && <form className="panel" onSubmit={(event) => void submitCandidate(event)}>
+              {activeForm === 'add-candidate' && (!screenFocus || ['add-candidate', 'candidate-status'].includes(screenFocus)) && <form className="panel" onSubmit={(event) => void submitCandidate(event)}>
                 <PanelTitle icon={<Users size={18} />} title="Evaluation Shortlist" />
                 <p className="contextLine">{selectedNeed ? selectedNeed.position_title : 'Select a position first'}</p>
                 <Field label="Candidate name" name="full_name" required />
@@ -2208,7 +2428,7 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              <section className="panel wide">
+              {showCandidateStatus && <section className="panel wide">
                 <PanelTitle icon={<Users size={18} />} title="Candidate Status" />
                 {candidatesForNeed.length > 0 && (
                   <>
@@ -2295,9 +2515,9 @@ function App() {
                 ) : (
                   <p className="empty">No candidates for the selected position.</p>
                 )}
-              </section>
+              </section>}
 
-              {activeForm === 'assign-interview' && <form className="panel" onSubmit={(event) => void submitInterview(event)}>
+              {activeForm === 'assign-interview' && (!screenFocus || ['assign-interview', 'candidate-status'].includes(screenFocus)) && <form className="panel" onSubmit={(event) => void submitInterview(event)}>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Interview Assignment" />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
                 <Field label="First interview - interviewer email" name="interviewer_email_1" type="email" list="internal-interviewer-emails" required />
@@ -2335,7 +2555,7 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              <section className="panel wide hiredCandidatesPanel">
+              {showHiredCandidates && <section className="panel wide hiredCandidatesPanel">
                 <PanelTitle icon={<BadgeCheck size={18} />} title="Hired Candidates" />
                 {hiredCandidates.length > 0 ? (
                   <>
@@ -2395,7 +2615,7 @@ function App() {
                 ) : (
                   <p className="empty">No hired candidates yet.</p>
                 )}
-              </section>
+              </section>}
 
               {activeForm === 'candidate-terms' && <form className="panel" key={`${selectedCandidate?.id ?? 'none'}-${selectedCandidateContract?.id ?? 'new'}`} onSubmit={(event) => void submitContract(event)}>
                 <PanelTitle icon={<FileCheck2 size={18} />} title={selectedCandidateContract ? 'Edit Candidate Invoice Terms' : 'Signed Contract And Invoice Terms'} />
@@ -2482,7 +2702,7 @@ function App() {
             </>
           )}
 
-          {(canHrManage || canOperate) && (
+          {(canHrManage || canOperate) && showCandidateInvoiceItems && (
             <section className="panel wide">
               <PanelTitle icon={<Banknote size={18} />} title="Candidate Invoice Items" />
               <label className="field">
@@ -2573,7 +2793,7 @@ function App() {
             </section>
           )}
 
-          {(canInterview || canHrManage) && (
+          {(canInterview || canHrManage) && showInterviewEvaluations && (
             <section className="panel wide">
               <PanelTitle icon={<UserCheck size={18} />} title={canInterview ? 'My Interview Evaluations' : 'Interview Evaluations'} />
               {canHrManage && pendingHrInterviewReviews.length > 0 && (
@@ -2644,7 +2864,7 @@ function App() {
             </section>
           )}
 
-          {canInterview && activeForm === 'scorecard' && (
+          {canInterview && activeForm === 'scorecard' && (!screenFocus || screenFocus === 'scorecard') && (
             <form className="panel" onSubmit={(event) => void submitScorecard(event)}>
               <PanelTitle icon={<Upload size={18} />} title="Upload Evaluation Checklist" />
               <p className="contextLine">
@@ -2795,7 +3015,7 @@ function App() {
 
       {activeView === 'invoices' && me.active_role && (
         <section className="workspace invoiceWorkspace">
-          <form className="panel wide" onSubmit={(event) => void submitInvoiceFilters(event)}>
+          {showClientInvoiceRegister && <form className="panel wide" onSubmit={(event) => void submitInvoiceFilters(event)}>
             <PanelTitle icon={<FileCheck2 size={18} />} title="All Invoices" />
             <div className="grid four">
               <label className="field">
@@ -2820,9 +3040,9 @@ function App() {
               <span className="status">Page {invoicePage}</span>
               <button className="secondary" type="button" disabled={invoiceListCount < invoicePageSize || loading} onClick={() => setInvoicePage((page) => page + 1)}>Next</button>
             </div>
-          </form>
+          </form>}
 
-          <section className="panel wide">
+          {showClientInvoiceRegister && <section className="panel wide">
             {showingUpcomingInvoices ? (
               <>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Upcoming Invoice Schedule" />
@@ -2881,7 +3101,7 @@ function App() {
                 />
               </>
             )}
-          </section>
+          </section>}
 
           {canFinance && selectedInvoice && activeForm === 'client-payment' && (
             <form
@@ -2910,7 +3130,7 @@ function App() {
             </form>
           )}
 
-          <section className="panel wide">
+          {showCandidateInvoiceRegister && <section className="panel wide">
             <PanelTitle icon={<Banknote size={18} />} title="Candidate Invoices" />
             {candidateInvoices.length > 0 ? (
               <>
@@ -3065,13 +3285,13 @@ function App() {
             ) : (
               <p className="empty">No candidate invoices have been submitted yet.</p>
             )}
-          </section>
+          </section>}
         </section>
       )}
 
       {activeView === 'workflow' && canViewWorkflow && (
         <section className="workspace">
-          {canOperate && (
+          {canOperate && !screenFocus && (
             <section className="panel wide">
               <PanelTitle icon={<ClipboardList size={18} />} title="Project Actions" />
               <div className="horizontalActions">
@@ -3096,7 +3316,7 @@ function App() {
           )}
 
           {canOperate && (
-            activeForm === 'create-project' && <form className="panel wide" key={internalRecruitmentProject ? `internal-project-${internalProjectType}` : 'client-project'} onSubmit={(event) => void submitProject(event)}>
+            activeForm === 'create-project' && (!screenFocus || screenFocus === 'add-project') && <form className="panel wide" key={internalRecruitmentProject ? `internal-project-${internalProjectType}` : 'client-project'} onSubmit={(event) => void submitProject(event)}>
               <PanelTitle icon={<FilePlus2 size={18} />} title="Project And Initial SOW Entry" />
               <label className="checkField">
                 <input
@@ -3162,7 +3382,7 @@ function App() {
             </form>
           )}
 
-          <section className="panel wide">
+          {showProjectRegister && <section className="panel wide">
             <PanelTitle icon={<ClipboardList size={18} />} title="Project And SOW Register" />
             {projects.length > 0 && !editingProject && (
               <>
@@ -3305,11 +3525,11 @@ function App() {
             ) : (
               <p className="empty">No projects yet.</p>
             )}
-          </section>
+          </section>}
 
           {canOperate && (
             <>
-              {activeForm === 'add-sow' && <form className="panel" onSubmit={(event) => void submitAdditionalSow(event)}>
+              {activeForm === 'add-sow' && (!screenFocus || screenFocus === 'add-sow') && <form className="panel" onSubmit={(event) => void submitAdditionalSow(event)}>
                 <PanelTitle icon={<FilePlus2 size={18} />} title="Add SOW To Selected MSA" />
                 <p className="contextLine">{selectedProject ? `${selectedProject.client_company_name} · ${selectedProject.msa_reference}` : 'Select an existing SOW first'}</p>
                 <Field label="SOW title" name="sow_title" required />
@@ -3331,7 +3551,7 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              {activeForm === 'project-need' && <form className="panel" onSubmit={(event) => void submitNeed(event)}>
+              {activeForm === 'project-need' && (!screenFocus || screenFocus === 'project-need') && <form className="panel" onSubmit={(event) => void submitNeed(event)}>
                 <PanelTitle icon={<ClipboardList size={18} />} title="Recruitment Need" />
                 <label className="field">
                   <span>SOW</span>
@@ -3386,7 +3606,7 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              {activeForm === 'client-schedule' && <form className="panel" onSubmit={(event) => void submitSchedule(event)}>
+              {activeForm === 'client-schedule' && (!screenFocus || screenFocus === 'client-schedule') && <form className="panel" onSubmit={(event) => void submitSchedule(event)}>
                 <PanelTitle icon={<CalendarPlus size={18} />} title="Client Invoice Schedule" />
                 <label className="field">
                   <span>SOW</span>
@@ -3435,7 +3655,7 @@ function App() {
             </>
           )}
 
-          {!canOperate && (
+          {!canOperate && (!screenFocus || screenFocus === 'client-invoices') && (
           <section className="panel wide">
             <PanelTitle icon={<FileCheck2 size={18} />} title="Client Invoices" />
             <div className="toolbar">

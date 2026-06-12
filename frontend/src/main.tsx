@@ -2241,6 +2241,7 @@ function App() {
                   <div><dt>Status</dt><dd><Status value={selectedNeed.status} /></dd></div>
                   <div><dt>Fee</dt><dd>{selectedNeed.currency ?? 'USD'} {selectedNeed.fee_amount ?? '0.00'}</dd></div>
                   <div><dt>Billing</dt><dd>{selectedNeed.position_billing_type ?? 'not set'} · {selectedNeed.billing_frequency ?? 'not set'}</dd></div>
+                  <div className="wideField"><dt>Position description</dt><dd>{selectedNeed.description}</dd></div>
                 </dl>
                 <div className="documentList">
                   {renderStoredDocument('Position detail upload', selectedNeed.detail_document_id, selectedNeed.detail_document_name)}

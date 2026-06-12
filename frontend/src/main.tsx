@@ -1201,6 +1201,31 @@ function App() {
     });
   }
 
+  async function replaceRecruitmentAsset(event: FormEvent<HTMLFormElement>, assetType: 'jd_document' | 'job_ad_document', label: string) {
+    event.preventDefault();
+    if (!selectedNeed) return;
+    const formElement = event.currentTarget;
+    const payload = new FormData(formElement);
+    if (!payload.get(assetType)) return;
+    await mutate(async () => {
+      await api<RecruitmentNeedDetail>(`/recruitment-needs/${selectedNeed.id}/assets`, {
+        method: 'POST',
+        body: payload,
+      });
+      formElement.reset();
+      return `${label} replaced`;
+    });
+  }
+
+  async function deleteRecruitmentAsset(assetType: 'jd_document' | 'job_ad_document', label: string, filename: string | null) {
+    if (!selectedNeed) return;
+    if (!window.confirm(`Remove ${label}${filename ? `?\n\n${filename}` : '?'}`)) return;
+    await mutate(async () => {
+      await api<RecruitmentNeedDetail>(`/recruitment-needs/${selectedNeed.id}/assets/${assetType}`, { method: 'DELETE' });
+      return `${label} removed`;
+    });
+  }
+
   async function submitCandidate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedNeed) return;
@@ -1700,6 +1725,44 @@ function App() {
     );
   }
 
+  function renderRecruitmentAssetManager(label: string, assetType: 'jd_document' | 'job_ad_document', documentId: number | null, filename: string | null): React.ReactNode {
+    return (
+      <div className="documentRow" key={`asset-${assetType}`}>
+        <div>
+          <strong>{label}</strong>
+          <span>{filename ?? 'Not uploaded yet'}</span>
+        </div>
+        <div className="horizontalActions">
+          {documentId && (
+            <>
+              <button className="secondary" type="button" onClick={() => viewDocument(documentId)}>
+                <FileText size={18} />
+                <span>View</span>
+              </button>
+              <button className="secondary" type="button" onClick={() => downloadDocument(documentId)}>
+                <Download size={18} />
+                <span>Download</span>
+              </button>
+            </>
+          )}
+          <form className="inlineUpload" onSubmit={(event) => void replaceRecruitmentAsset(event, assetType, label)}>
+            <input aria-label={`Replacement file for ${label}`} name={assetType} type="file" required />
+            <button className="secondary" disabled={loading}>
+              <Upload size={18} />
+              <span>{documentId ? 'Replace' : 'Upload'}</span>
+            </button>
+          </form>
+          {documentId && (
+            <button className="secondary danger" type="button" onClick={() => void deleteRecruitmentAsset(assetType, label, filename)} disabled={loading}>
+              <Trash2 size={18} />
+              <span>Remove</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   async function submitInvoiceFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setInvoicePage(1);
@@ -2119,7 +2182,7 @@ function App() {
                   </>
                 )}
                 {canHrManage && selectedNeed && (
-                  <button className="secondary" type="button" onClick={() => setActiveForm('assets')}>Upload JD/Ad</button>
+                  <button className="secondary" type="button" onClick={() => setActiveForm('assets')}>Manage JD/Ad</button>
                 )}
                 {canHrManage && selectedCandidate && (
                   <>
@@ -2427,18 +2490,32 @@ function App() {
 
           {canHrManage && (
             <>
-              {activeForm === 'assets' && (!screenFocus || screenFocus === 'recruitment-assets') && <form className="panel" onSubmit={(event) => void submitRecruitmentAssets(event)}>
-                <PanelTitle icon={<Upload size={18} />} title="JD And Job Ad" />
-                <p className="contextLine">{selectedNeed ? `${selectedNeed.project_code} · ${selectedNeed.position_title}` : 'Select a position first'}</p>
-                <Field label="JD upload" name="jd_document" type="file" />
-                <Field label="Job ad upload" name="job_ad_document" type="file" />
-                <Field label="LinkedIn ad URL" name="linkedin_ad_url" defaultValue={selectedNeed?.linkedin_ad_url ?? ''} />
-                <button className="secondary" disabled={!selectedNeed || loading}>
-                  <FileText size={18} />
-                  <span>Save Assets</span>
-                </button>
-                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
-              </form>}
+              {activeForm === 'assets' && (!screenFocus || screenFocus === 'recruitment-assets') && (
+                <>
+                  <section className="panel">
+                    <PanelTitle icon={<FileText size={18} />} title="Current JD And Job Ad" />
+                    <p className="contextLine">{selectedNeed ? `${selectedNeed.project_code} · ${selectedNeed.position_title}` : 'Select a position first'}</p>
+                    {selectedNeed && (
+                      <div className="documentList">
+                        {renderRecruitmentAssetManager('Job description', 'jd_document', selectedNeed.jd_document_id, selectedNeed.jd_document_name)}
+                        {renderRecruitmentAssetManager('Job ad', 'job_ad_document', selectedNeed.job_ad_document_id, selectedNeed.job_ad_document_name)}
+                      </div>
+                    )}
+                  </section>
+                  <form className="panel" onSubmit={(event) => void submitRecruitmentAssets(event)}>
+                    <PanelTitle icon={<Upload size={18} />} title="Upload Or Replace JD And Job Ad" />
+                    <p className="contextLine">{selectedNeed ? `${selectedNeed.project_code} · ${selectedNeed.position_title}` : 'Select a position first'}</p>
+                    <Field label="JD upload / replace" name="jd_document" type="file" />
+                    <Field label="Job ad upload / replace" name="job_ad_document" type="file" />
+                    <Field label="LinkedIn ad URL" name="linkedin_ad_url" defaultValue={selectedNeed?.linkedin_ad_url ?? ''} />
+                    <button className="secondary" disabled={!selectedNeed || loading}>
+                      <FileText size={18} />
+                      <span>Save Assets</span>
+                    </button>
+                    <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+                  </form>
+                </>
+              )}
 
               {activeForm === 'add-candidate' && (!screenFocus || ['add-candidate', 'candidate-status'].includes(screenFocus)) && <form className="panel" onSubmit={(event) => void submitCandidate(event)}>
                 <PanelTitle icon={<Users size={18} />} title="Evaluation Shortlist" />

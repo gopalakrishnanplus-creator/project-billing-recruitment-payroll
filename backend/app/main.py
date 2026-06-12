@@ -2940,8 +2940,20 @@ async def upload_recruitment_assets(need_id: int, request: Request, context: Aut
         raise HTTPException(status_code=404, detail="Recruitment need not found")
     data, files = await request_payload_and_files(request)
     payload: RecruitmentAssetCreate = parse_model(RecruitmentAssetCreate, data)
-    jd_document = await save_uploaded_document(db, file=files.get("jd_document"), project_id=need.project_id, document_type="job_description", uploaded_by_name=context.user.full_name)
-    job_ad_document = await save_uploaded_document(db, file=files.get("job_ad_document"), project_id=need.project_id, document_type="job_ad", uploaded_by_name=context.user.full_name)
+
+    async def save_or_replace_asset(field_name: str, document_type: str, current_document_id: int | None) -> UploadedDocument | None:
+        file = files.get(field_name)
+        if file is None:
+            return None
+        existing_document = db.get(UploadedDocument, current_document_id) if current_document_id else None
+        if existing_document and existing_document.document_type == document_type:
+            await replace_uploaded_document_contents(existing_document, file)
+            existing_document.uploaded_by_name = context.user.full_name
+            return existing_document
+        return await save_uploaded_document(db, file=file, project_id=need.project_id, document_type=document_type, uploaded_by_name=context.user.full_name)
+
+    jd_document = await save_or_replace_asset("jd_document", "job_description", need.jd_document_id)
+    job_ad_document = await save_or_replace_asset("job_ad_document", "job_ad", need.job_ad_document_id)
     if jd_document:
         need.jd_document_id = jd_document.id
         need.jd_uploaded_at = utcnow()
@@ -2952,6 +2964,38 @@ async def upload_recruitment_assets(need_id: int, request: Request, context: Aut
     if need.status == "open":
         need.status = "sourcing"
     log_event(db, project_id=need.project_id, actor_name=context.user.full_name, action="recruitment_assets_uploaded", details=need.position_title)
+    db.commit()
+    db.refresh(need)
+    return serialize_recruitment_need_detail(need, db)
+
+
+@app.delete("/recruitment-needs/{need_id}/assets/{asset_type}", response_model=RecruitmentNeedDetailRead)
+def delete_recruitment_asset(
+    need_id: int,
+    asset_type: str,
+    context: AuthContext = Depends(require_role(UserRole.hr_manager.value)),
+    db: Session = Depends(get_db),
+) -> RecruitmentNeedDetailRead:
+    need = db.get(RecruitmentNeed, need_id)
+    if need is None:
+        raise HTTPException(status_code=404, detail="Recruitment need not found")
+    if asset_type == "jd_document":
+        document_id = need.jd_document_id
+        need.jd_document_id = None
+        need.jd_uploaded_at = None
+        label = "job_description"
+    elif asset_type == "job_ad_document":
+        document_id = need.job_ad_document_id
+        need.job_ad_document_id = None
+        label = "job_ad"
+    else:
+        raise HTTPException(status_code=404, detail="Recruitment asset not found")
+    document = db.get(UploadedDocument, document_id) if document_id else None
+    details = f"{label}: {document.original_filename if document else 'no file'}"
+    if document:
+        remove_document_storage(document)
+        db.delete(document)
+    log_event(db, project_id=need.project_id, actor_name=context.user.full_name, action="recruitment_asset_removed", details=details)
     db.commit()
     db.refresh(need)
     return serialize_recruitment_need_detail(need, db)

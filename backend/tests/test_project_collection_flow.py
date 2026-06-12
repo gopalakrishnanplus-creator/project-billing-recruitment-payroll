@@ -1161,6 +1161,30 @@ def test_recruitment_flow_from_position_to_hired_candidate():
         assert assets_response.json()["jd_document_name"] == "jd.pdf"
         assert assets_response.json()["job_ad_document_name"] == "job-ad.pdf"
         assert assets_response.json()["linkedin_ad_url"] == "https://linkedin.com/jobs/view/123"
+        jd_document_id = assets_response.json()["jd_document_id"]
+        job_ad_document_id = assets_response.json()["job_ad_document_id"]
+
+        jd_download_response = client.get(f"/documents/{jd_document_id}/download", headers=HR_HEADERS)
+        assert jd_download_response.status_code == 200, jd_download_response.text
+        assert jd_download_response.content == b"jd"
+
+        jd_replace_response = client.post(
+            f"/recruitment-needs/{need['id']}/assets",
+            headers=HR_HEADERS,
+            files={"jd_document": ("jd-v2.pdf", b"jd v2", "application/pdf")},
+        )
+        assert jd_replace_response.status_code == 200, jd_replace_response.text
+        assert jd_replace_response.json()["jd_document_id"] == jd_document_id
+        assert jd_replace_response.json()["jd_document_name"] == "jd-v2.pdf"
+        jd_replaced_download_response = client.get(f"/documents/{jd_document_id}/download", headers=HR_HEADERS)
+        assert jd_replaced_download_response.status_code == 200, jd_replaced_download_response.text
+        assert jd_replaced_download_response.content == b"jd v2"
+
+        job_ad_delete_response = client.delete(f"/recruitment-needs/{need['id']}/assets/job_ad_document", headers=HR_HEADERS)
+        assert job_ad_delete_response.status_code == 200, job_ad_delete_response.text
+        assert job_ad_delete_response.json()["job_ad_document_id"] is None
+        deleted_job_ad_download_response = client.get(f"/documents/{job_ad_document_id}/download", headers=HR_HEADERS)
+        assert deleted_job_ad_download_response.status_code == 404
 
         candidate_response = client.post(
             f"/recruitment-needs/{need['id']}/candidates",

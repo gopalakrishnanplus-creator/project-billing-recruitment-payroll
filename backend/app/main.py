@@ -3569,6 +3569,7 @@ async def add_invoice_schedule(project_id: int, request: Request, context: AuthC
 def list_invoice_schedules(
     context: AuthContext = Depends(require_login),
     status: str = Query(default="active", pattern="^(active|inactive)$"),
+    bucket: str = Query(default="all", pattern="^(active|past|all)$"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -3594,10 +3595,15 @@ def list_invoice_schedules(
             selectinload(ClientInvoiceSchedule.project).selectinload(ProjectSOW.client_account_executive),
             selectinload(ClientInvoiceSchedule.invoices),
         )
-        .offset((page - 1) * page_size)
-        .limit(page_size)
     ).all()
-    return [serialize_invoice_schedule_detail(schedule) for schedule in schedules]
+    if bucket != "all":
+        schedules = [
+            schedule
+            for schedule in schedules
+            if (next_unraised_invoice_date(schedule) is None) == (bucket == "past")
+        ]
+    start = (page - 1) * page_size
+    return [serialize_invoice_schedule_detail(schedule) for schedule in schedules[start:start + page_size]]
 
 
 @app.put("/invoice-schedules/{schedule_id}", response_model=InvoiceScheduleDetailRead)

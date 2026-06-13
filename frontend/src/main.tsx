@@ -60,6 +60,7 @@ const LIST_PAGE_SIZE = 20;
 
 type ActiveView = 'home' | 'workflow' | 'invoices' | 'recruitment' | 'schedules';
 type ClientScheduleFormMode = 'standard' | 'historical-backfill';
+type ClientScheduleBucket = 'active' | 'past';
 type ScreenFocus =
   | 'admin-users'
   | 'admin-internal-cae'
@@ -629,6 +630,7 @@ function App() {
   const [invoiceDateTo, setInvoiceDateTo] = useState('');
   const [invoicePage, setInvoicePage] = useState(1);
   const [clientSchedulePage, setClientSchedulePage] = useState(1);
+  const [clientScheduleBucket, setClientScheduleBucket] = useState<ClientScheduleBucket>('active');
   const [projectPage, setProjectPage] = useState(1);
   const [recruitmentPage, setRecruitmentPage] = useState(1);
   const [candidatePage, setCandidatePage] = useState(1);
@@ -829,7 +831,7 @@ function App() {
         ? api<UpcomingInvoice[]>(`/upcoming-invoices?${invoiceParams.toString()}`)
         : api<ClientInvoice[]>(`/client-invoices?${invoiceParams.toString()}`);
       const currentCanViewClientSchedules = ['operations_manager', 'finance_manager', 'system_admin', 'client_account_executive'].includes(current.active_role);
-      const scheduleParams = new URLSearchParams({ status: 'active', page: String(clientSchedulePage), page_size: String(invoicePageSize) });
+      const scheduleParams = new URLSearchParams({ status: 'active', bucket: clientScheduleBucket, page: String(clientSchedulePage), page_size: String(invoicePageSize) });
       const scheduleRequest = currentCanViewClientSchedules ? api<InvoiceScheduleDetail[]>(`/invoice-schedules?${scheduleParams.toString()}`) : Promise.resolve([]);
       const [projectData, invoiceData, scheduleData] = await Promise.all([
         api<Project[]>('/projects'),
@@ -981,7 +983,7 @@ function App() {
   useEffect(() => {
     if (me?.active_role === 'system_admin') void refreshUsers();
     if (me?.active_role) void refreshData(me);
-  }, [me?.active_role, invoicePage, clientSchedulePage]);
+  }, [me?.active_role, invoicePage, clientSchedulePage, clientScheduleBucket]);
 
   useEffect(() => {
     if (me?.active_role && activeView === 'invoices') void refreshData(me, 1);
@@ -1796,6 +1798,19 @@ function App() {
     openFocusedScreen('workflow', 'client-schedule', 'client-schedule');
   }
 
+  function openClientSchedules(bucket: ClientScheduleBucket = 'active') {
+    setClientScheduleBucket(bucket);
+    setClientSchedulePage(1);
+    setSelectedClientScheduleId(null);
+    openFocusedScreen('schedules', 'active-schedules');
+  }
+
+  function selectClientScheduleBucket(bucket: ClientScheduleBucket) {
+    setClientScheduleBucket(bucket);
+    setClientSchedulePage(1);
+    setSelectedClientScheduleId(null);
+  }
+
   function openClientInvoiceScreen(focus: ScreenFocus, statusFilter = '') {
     setInvoicePage(1);
     setInvoiceStatusFilter(statusFilter);
@@ -1847,7 +1862,7 @@ function App() {
                 {renderHomeAction('Add Recruitment Position', <FilePlus2 size={18} />, () => openFocusedScreen('recruitment', 'add-position', 'add-position'))}
                 {renderHomeAction('Candidate / Test Data Cleanup', <Trash2 size={18} />, () => openFocusedScreen('recruitment', 'candidate-cleanup'), candidatesForNeed.length)}
                 {renderHomeAction('Client Invoice Schedule Setup', <CalendarPlus size={18} />, () => openClientScheduleSetup())}
-                {renderHomeAction('Active Client Invoicing Schedules', <CalendarPlus size={18} />, () => openFocusedScreen('schedules', 'active-schedules'), clientInvoiceSchedules.length)}
+                {renderHomeAction('Active Client Invoicing Schedules', <CalendarPlus size={18} />, () => openClientSchedules('active'), clientInvoiceSchedules.length)}
                 {renderHomeAction('Historical Client Invoice Backfill', <FileCheck2 size={18} />, () => openHistoricalClientInvoiceBackfill())}
                 {renderHomeAction('All Client Invoices', <FileCheck2 size={18} />, () => openClientInvoiceScreen('client-invoices'), invoices.length)}
               </>
@@ -1883,7 +1898,7 @@ function App() {
               <>
                 {renderHomeAction('Client Invoices Pending My Approval', <FileCheck2 size={18} />, () => openClientInvoiceScreen('cae-client-approval', 'due_for_client_approval'), clientInvoicesPendingApproval.length)}
                 {renderHomeAction('Candidate Invoices Pending My Approval', <UserCheck size={18} />, () => openCandidateInvoiceScreen('cae-candidate-approval'), candidateInvoicesPendingApproval.length)}
-                {renderHomeAction('My Projects And SOWs', <ClipboardList size={18} />, () => openFocusedScreen('schedules', 'active-schedules'), clientInvoiceSchedules.length)}
+                {renderHomeAction('My Projects And SOWs', <ClipboardList size={18} />, () => openClientSchedules('active'), clientInvoiceSchedules.length)}
                 {renderHomeAction('All Invoices For My Projects', <FileText size={18} />, () => openClientInvoiceScreen('client-invoices'), invoices.length)}
                 {renderHomeAction('Candidate Invoice History', <Banknote size={18} />, () => openCandidateInvoiceScreen('candidate-invoices'), candidateInvoices.length)}
               </>
@@ -2035,7 +2050,7 @@ function App() {
           <button className={activeView === 'home' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('home')}>Home</button>
           <button className={activeView === 'workflow' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('workflow')}>Workflow</button>
           {canRecruitment && <button className={activeView === 'recruitment' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('recruitment')}>Recruitment</button>}
-          {canViewClientSchedules && <button className={activeView === 'schedules' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('schedules')}>Schedules</button>}
+          {canViewClientSchedules && <button className={activeView === 'schedules' ? 'primary' : 'secondary'} onClick={() => openClientSchedules('active')}>Schedules</button>}
           <button className={activeView === 'invoices' ? 'primary' : 'secondary'} onClick={() => openFocusedScreen('invoices')}>All Invoices</button>
         </nav>
       )}
@@ -3010,7 +3025,11 @@ function App() {
       {activeView === 'schedules' && canViewClientSchedules && (
         <section className="workspace invoiceWorkspace">
           <section className="panel wide">
-            <PanelTitle icon={<CalendarPlus size={18} />} title="Active Invoicing Schedules" />
+            <PanelTitle icon={<CalendarPlus size={18} />} title={clientScheduleBucket === 'active' ? 'Active Client Invoices' : 'Past Client Invoices'} />
+            <div className="toolbar">
+              <button className={clientScheduleBucket === 'active' ? 'primary' : 'secondary'} type="button" onClick={() => selectClientScheduleBucket('active')} disabled={loading}>Active Client Invoices</button>
+              <button className={clientScheduleBucket === 'past' ? 'primary' : 'secondary'} type="button" onClick={() => selectClientScheduleBucket('past')} disabled={loading}>Past Client Invoices</button>
+            </div>
             <div className="toolbar">
               <button className="secondary" type="button" disabled={clientSchedulePage <= 1 || loading} onClick={() => setClientSchedulePage((page) => Math.max(1, page - 1))}>Previous</button>
               <span className="status">Page {clientSchedulePage}</span>
@@ -3024,7 +3043,12 @@ function App() {
                       <strong>{schedule.project_code} · {schedule.client_company_name}</strong>
                       <span>{schedule.project_title} · {schedule.currency} {schedule.amount} · {frequencyLabel(schedule.frequency)}</span>
                       <span>{schedule.item_description ?? schedule.label}</span>
-                      <span>First {schedule.first_invoice_date} · Next {schedule.next_invoice_date ?? 'None'}{schedule.final_invoice_date ? ` · Final ${schedule.final_invoice_date}` : ''} · Historical {schedule.historical_backfill ? 'Yes' : 'No'}</span>
+                      <span>
+                        {schedule.next_invoice_date
+                          ? `First ${schedule.first_invoice_date} · Next ${schedule.next_invoice_date}${schedule.final_invoice_date ? ` · Final ${schedule.final_invoice_date}` : ''}`
+                          : `Invoice date ${schedule.first_invoice_date} · No future invoices${schedule.final_invoice_date ? ` · Final ${schedule.final_invoice_date}` : ''}`}
+                        {' '}· Historical {schedule.historical_backfill ? 'Yes' : 'No'}
+                      </span>
                       <span>CAE: {schedule.client_account_executive_name ?? schedule.client_account_executive_email ?? 'Not assigned'}</span>
                     </div>
                     <div className="horizontalActions">
@@ -3047,7 +3071,7 @@ function App() {
                 ))}
               </div>
             ) : (
-              <p className="empty">No active invoicing schedules match this role.</p>
+              <p className="empty">{clientScheduleBucket === 'active' ? 'No active client invoices match this role.' : 'No past client invoices match this role.'}</p>
             )}
           </section>
 

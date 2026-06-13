@@ -974,6 +974,14 @@ def test_historical_client_invoice_schedule_starts_from_next_cycle():
         assert download_response.status_code == 200, download_response.text
         assert download_response.content == historical_invoice_pdf
         assert "historical-client.pdf" in download_response.headers["content-disposition"]
+        active_schedules_response = client.get("/invoice-schedules?bucket=active", headers=FINANCE_HEADERS)
+        assert active_schedules_response.status_code == 200, active_schedules_response.text
+        assert [item["id"] for item in active_schedules_response.json()] == [schedule["id"]]
+        assert active_schedules_response.json()[0]["next_invoice_date"] == str(next_cycle_invoice)
+        past_schedules_response = client.get("/invoice-schedules?bucket=past", headers=FINANCE_HEADERS)
+        assert past_schedules_response.status_code == 200, past_schedules_response.text
+        assert [item["id"] for item in past_schedules_response.json()] == [historical_paid_response.json()["id"]]
+        assert past_schedules_response.json()[0]["next_invoice_date"] is None
         with SessionLocal() as db:
             assert db.query(EmailNotification).filter(EmailNotification.project_id == project["id"]).count() == 0
 

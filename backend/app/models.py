@@ -342,6 +342,30 @@ class CandidateContract(Base):
     status: Mapped[str] = mapped_column(String(80), default="draft")
 
 
+class CandidateLeaveEntitlement(Base):
+    __tablename__ = "candidate_leave_entitlements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), unique=True, nullable=False)
+    annual_leave_days: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0.00"))
+    effective_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    updated_by_name: Mapped[str | None] = mapped_column(String(160))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CandidateLeaveTaken(Base):
+    __tablename__ = "candidate_leaves_taken"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), nullable=False)
+    days_taken: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    recorded_by_name: Mapped[str | None] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CandidateInvoiceSchedule(Base):
     __tablename__ = "candidate_invoice_schedules"
 
@@ -373,6 +397,9 @@ class CandidateVendorInvoice(Base):
     item_description: Mapped[str | None] = mapped_column(Text)
     invoice_type: Mapped[str] = mapped_column(String(40), default="invoice")
     invoice_due_date: Mapped[date | None] = mapped_column(Date)
+    gross_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    leave_deduction_days: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("0.00"))
+    leave_deduction_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"))
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(12), default="USD")
     status: Mapped[str] = mapped_column(String(80), default="submitted")

@@ -33,6 +33,8 @@ from .models import (
     AppUser,
     Candidate,
     CandidateContract,
+    CandidateLeaveEntitlement,
+    CandidateLeaveTaken,
     CandidateInvoiceDocument,
     CandidateInvoiceSchedule,
     CandidateEvaluation,
@@ -70,6 +72,11 @@ from .schemas import (
     CandidateInvoiceScheduleCreate,
     CandidateInvoiceScheduleRead,
     CandidateInvoiceScheduleUpdate,
+    CandidateLeaveEntitlementCreate,
+    CandidateLeaveEntitlementRead,
+    CandidateLeaveSummaryRead,
+    CandidateLeaveTakenCreate,
+    CandidateLeaveTakenRead,
     CandidateCreate,
     CandidateInvoiceApprovalCreate,
     CandidateInvoiceReminderResult,
@@ -139,6 +146,10 @@ CLIENT_INVOICE_DELETE_BLOCKED_STATUSES = {
     InvoiceStatus.partially_paid_remainder_cancelled.value,
     InvoiceStatus.paid.value,
 }
+STANDARD_MONTHLY_HOURS = Decimal("160")
+STANDARD_LEAVE_DAY_HOURS = Decimal("8")
+MONEY_QUANT = Decimal("0.01")
+LEAVE_QUANT = Decimal("0.01")
 
 
 @asynccontextmanager
@@ -183,6 +194,14 @@ class AuthContext:
 class ApprovalAuthResult:
     context: AuthContext
     via_token: bool
+
+
+@dataclass
+class CandidateLeaveInvoiceAdjustment:
+    gross_amount: Decimal
+    net_amount: Decimal
+    deduction_days: Decimal
+    deduction_amount: Decimal
 
 
 def normalize_email(email: str) -> str:
@@ -283,6 +302,9 @@ def ensure_workflow_columns() -> None:
                 "schedule_id": "INTEGER",
                 "project_id": "INTEGER",
                 "invoice_due_date": "DATE",
+                "gross_amount": "NUMERIC(12, 2)",
+                "leave_deduction_days": "NUMERIC(6, 2) DEFAULT 0",
+                "leave_deduction_amount": "NUMERIC(12, 2) DEFAULT 0",
                 "item_description": "TEXT",
                 "invoice_type": "VARCHAR(40) DEFAULT 'invoice'",
                 "cancelled_reason": "TEXT",
@@ -294,6 +316,9 @@ def ensure_workflow_columns() -> None:
                 add_column(conn, "candidate_vendor_invoices", existing, name, definition)
             conn.execute(text("UPDATE candidate_vendor_invoices SET invoice_type = 'invoice' WHERE invoice_type IS NULL"))
             conn.execute(text("UPDATE candidate_vendor_invoices SET item_description = 'Candidate services' WHERE item_description IS NULL"))
+            conn.execute(text("UPDATE candidate_vendor_invoices SET gross_amount = amount WHERE gross_amount IS NULL"))
+            conn.execute(text("UPDATE candidate_vendor_invoices SET leave_deduction_days = 0 WHERE leave_deduction_days IS NULL"))
+            conn.execute(text("UPDATE candidate_vendor_invoices SET leave_deduction_amount = 0 WHERE leave_deduction_amount IS NULL"))
         if "client_payments" in tables:
             existing = {column["name"] for column in inspector.get_columns("client_payments")}
             for name, definition in {
@@ -1051,6 +1076,143 @@ def default_candidate_invoice_description(candidate: Candidate | None = None) ->
     return f"Candidate services - {candidate.full_name}" if candidate else "Candidate services"
 
 
+def decimal_or_zero(value: Decimal | None) -> Decimal:
+    return Decimal(value or Decimal("0")).quantize(LEAVE_QUANT)
+
+
+def add_leave_year(start: date, years: int = 1) -> date:
+    try:
+        return start.replace(year=start.year + years)
+    except ValueError:
+        return start.replace(year=start.year + years, day=28)
+
+
+def month_bounds(value: date) -> tuple[date, date]:
+    month_start = value.replace(day=1)
+    if value.month == 12:
+        next_month = value.replace(year=value.year + 1, month=1, day=1)
+    else:
+        next_month = value.replace(month=value.month + 1, day=1)
+    return month_start, next_month - timedelta(days=1)
+
+
+def candidate_leave_entitlement(candidate_id: int, db: Session) -> CandidateLeaveEntitlement | None:
+    return db.scalar(select(CandidateLeaveEntitlement).where(CandidateLeaveEntitlement.candidate_id == candidate_id))
+
+
+def candidate_leave_year_bounds(entitlement: CandidateLeaveEntitlement, as_of: date) -> tuple[date, date]:
+    year_start = entitlement.effective_start_date
+    if as_of < year_start:
+        return year_start, add_leave_year(year_start) - timedelta(days=1)
+    while add_leave_year(year_start) <= as_of:
+        year_start = add_leave_year(year_start)
+    return year_start, add_leave_year(year_start) - timedelta(days=1)
+
+
+def candidate_leave_records(candidate_id: int, db: Session) -> list[CandidateLeaveTaken]:
+    return db.scalars(
+        select(CandidateLeaveTaken)
+        .where(CandidateLeaveTaken.candidate_id == candidate_id)
+        .order_by(CandidateLeaveTaken.start_date.desc(), CandidateLeaveTaken.id.desc())
+    ).all()
+
+
+def leave_days_between(candidate_id: int, db: Session, start_date: date, end_date: date) -> Decimal:
+    records = db.scalars(
+        select(CandidateLeaveTaken).where(
+            CandidateLeaveTaken.candidate_id == candidate_id,
+            CandidateLeaveTaken.start_date >= start_date,
+            CandidateLeaveTaken.start_date <= end_date,
+        )
+    ).all()
+    return sum((decimal_or_zero(record.days_taken) for record in records), Decimal("0.00")).quantize(LEAVE_QUANT)
+
+
+def candidate_leave_summary(candidate_id: int, db: Session, as_of: date) -> CandidateLeaveSummaryRead | None:
+    entitlement = candidate_leave_entitlement(candidate_id, db)
+    if entitlement is None:
+        return None
+    leave_year_start, leave_year_end = candidate_leave_year_bounds(entitlement, as_of)
+    taken_days = leave_days_between(candidate_id, db, leave_year_start, min(as_of, leave_year_end))
+    annual_days = decimal_or_zero(entitlement.annual_leave_days)
+    return CandidateLeaveSummaryRead(
+        annual_leave_days=annual_days,
+        effective_start_date=entitlement.effective_start_date,
+        leave_year_start=leave_year_start,
+        leave_year_end=leave_year_end,
+        taken_days=taken_days,
+        balance_days=(annual_days - taken_days).quantize(LEAVE_QUANT),
+    )
+
+
+def candidate_leave_summary_text(candidate_id: int, db: Session, as_of: date) -> str:
+    summary = candidate_leave_summary(candidate_id, db, as_of)
+    if summary is None:
+        return "Leave status: leave entitlement not configured."
+    return (
+        f"Leave status: total leave taken this year {summary.taken_days} day(s); "
+        f"annual eligibility {summary.annual_leave_days} day(s); "
+        f"balance available {summary.balance_days} day(s)."
+    )
+
+
+def candidate_leave_invoice_adjustment(
+    candidate: Candidate,
+    db: Session,
+    invoice_due_date: date | None,
+    gross_amount: Decimal,
+    invoice_type: str,
+) -> CandidateLeaveInvoiceAdjustment:
+    gross_amount = Decimal(gross_amount).quantize(MONEY_QUANT)
+    if invoice_due_date is None or invoice_type != "invoice":
+        return CandidateLeaveInvoiceAdjustment(gross_amount, gross_amount, Decimal("0.00"), Decimal("0.00"))
+    entitlement = candidate_leave_entitlement(candidate.id, db)
+    if entitlement is None:
+        return CandidateLeaveInvoiceAdjustment(gross_amount, gross_amount, Decimal("0.00"), Decimal("0.00"))
+
+    leave_year_start, leave_year_end = candidate_leave_year_bounds(entitlement, invoice_due_date)
+    if invoice_due_date < leave_year_start:
+        return CandidateLeaveInvoiceAdjustment(gross_amount, gross_amount, Decimal("0.00"), Decimal("0.00"))
+
+    invoice_month_start, invoice_month_end = month_bounds(invoice_due_date)
+    calculation_end = min(invoice_due_date, leave_year_end)
+    prior_end = min(invoice_month_start - timedelta(days=1), calculation_end)
+    prior_taken = leave_days_between(candidate.id, db, leave_year_start, prior_end) if prior_end >= leave_year_start else Decimal("0.00")
+    month_taken = leave_days_between(candidate.id, db, max(invoice_month_start, leave_year_start), calculation_end)
+    annual_days = decimal_or_zero(entitlement.annual_leave_days)
+    excess_before_month = max(prior_taken - annual_days, Decimal("0.00"))
+    excess_after_month = max(prior_taken + month_taken - annual_days, Decimal("0.00"))
+    month_excess_days = max(excess_after_month - excess_before_month, Decimal("0.00")).quantize(LEAVE_QUANT)
+
+    already_deducted_days = db.scalar(
+        select(func.coalesce(func.sum(CandidateVendorInvoice.leave_deduction_days), 0)).where(
+            CandidateVendorInvoice.candidate_id == candidate.id,
+            CandidateVendorInvoice.invoice_due_date >= invoice_month_start,
+            CandidateVendorInvoice.invoice_due_date <= invoice_month_end,
+        )
+    )
+    deduction_days = max(month_excess_days - decimal_or_zero(already_deducted_days), Decimal("0.00")).quantize(LEAVE_QUANT)
+    deduction_amount = Decimal("0.00")
+    if deduction_days > 0:
+        hourly_rate = gross_amount / STANDARD_MONTHLY_HOURS
+        deduction_amount = min(gross_amount, deduction_days * STANDARD_LEAVE_DAY_HOURS * hourly_rate).quantize(MONEY_QUANT)
+    net_amount = max(gross_amount - deduction_amount, Decimal("0.00")).quantize(MONEY_QUANT)
+    return CandidateLeaveInvoiceAdjustment(
+        gross_amount=gross_amount,
+        net_amount=net_amount,
+        deduction_days=deduction_days,
+        deduction_amount=deduction_amount,
+    )
+
+
+def serialize_candidate_leave_entitlement(entitlement: CandidateLeaveEntitlement | None) -> CandidateLeaveEntitlementRead | None:
+    return CandidateLeaveEntitlementRead.model_validate(entitlement) if entitlement else None
+
+
+def serialize_candidate_leave_taken(record: CandidateLeaveTaken) -> CandidateLeaveTakenRead:
+    return CandidateLeaveTakenRead.model_validate(record)
+
+
 def serialize_candidate_invoice_schedule(schedule: CandidateInvoiceSchedule) -> CandidateInvoiceScheduleRead:
     return CandidateInvoiceScheduleRead.model_validate(schedule)
 
@@ -1090,6 +1252,8 @@ def serialize_candidate(candidate: Candidate, db: Session) -> CandidateRead:
     need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
     interviews = db.scalars(select(Interview).where(Interview.candidate_id == candidate.id).order_by(Interview.id.desc())).all()
     contracts = db.scalars(select(CandidateContract).where(CandidateContract.candidate_id == candidate.id).order_by(CandidateContract.id.desc())).all()
+    entitlement = candidate_leave_entitlement(candidate.id, db)
+    leave_records = candidate_leave_records(candidate.id, db)
     return CandidateRead(
         id=candidate.id,
         project_id=candidate.project_id,
@@ -1108,6 +1272,9 @@ def serialize_candidate(candidate: Candidate, db: Session) -> CandidateRead:
         position_title=need.position_title if need else None,
         interviews=[serialize_interview(interview, db) for interview in interviews],
         contracts=[serialize_candidate_contract(contract, db) for contract in contracts],
+        leave_entitlement=serialize_candidate_leave_entitlement(entitlement),
+        leave_records=[serialize_candidate_leave_taken(record) for record in leave_records],
+        leave_summary=candidate_leave_summary(candidate.id, db, date.today()),
     )
 
 
@@ -1145,6 +1312,9 @@ def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) ->
         item_description=invoice.item_description or (contract.invoice_description if contract else None) or default_candidate_invoice_description(candidate),
         invoice_type=invoice.invoice_type or (contract.invoice_type if contract else None) or "invoice",
         invoice_due_date=invoice.invoice_due_date,
+        gross_amount=invoice.gross_amount or invoice.amount,
+        leave_deduction_days=invoice.leave_deduction_days or Decimal("0.00"),
+        leave_deduction_amount=invoice.leave_deduction_amount or Decimal("0.00"),
         amount=invoice.amount,
         currency=invoice.currency,
         billing_entity_name=billing_entity_name,
@@ -1558,13 +1728,22 @@ def validate_candidate_invoice_schedule_payload(payload: CandidateInvoiceSchedul
             raise HTTPException(status_code=422, detail="Invoice end date cannot be earlier than invoice start date")
 
 
-def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, contract: CandidateContract | None) -> tuple[str, str, str]:
+def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate: Candidate, project: ProjectSOW, need: RecruitmentNeed | None, contract: CandidateContract | None, db: Session) -> tuple[str, str, str]:
     upload_link = f"{FRONTEND_URL}/?{urlencode({'candidate_invoice_token': invoice.upload_token or ''})}"
     position = need.position_title if need else "Not set"
     billing_entity_name, billing_entity_address = billing_entity_for_contract(contract)
     billing_address_line = f"Invoice to address: {billing_entity_address}" if billing_entity_address else "Invoice to address: as instructed by FlexGCC"
     item_description = invoice.item_description or default_candidate_invoice_description(candidate)
     invoice_type = (invoice.invoice_type or "invoice").replace("_", " ")
+    leave_summary_line = candidate_leave_summary_text(candidate.id, db, invoice.invoice_due_date or date.today())
+    deduction_line = ""
+    if (invoice.leave_deduction_days or Decimal("0.00")) > 0:
+        gross_amount = invoice.gross_amount or invoice.amount
+        deduction_line = (
+            f"Leave deduction applied: {invoice.leave_deduction_days} excess leave day(s) x 8 hours "
+            f"based on 160 monthly hours = {invoice.currency} {invoice.leave_deduction_amount}. "
+            f"Gross amount {invoice.currency} {gross_amount}; adjusted invoice amount {invoice.currency} {invoice.amount}."
+        )
     subject = f"Reminder to upload {invoice_type} for {position}"
     text = "\n".join(
         [
@@ -1580,10 +1759,16 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
             f"Position: {position}",
             f"Invoice due date: {invoice.invoice_due_date or 'not set'}",
             f"Amount: {invoice.currency} {invoice.amount}",
+            leave_summary_line,
+            deduction_line,
             "",
             f"Single-use upload link: {upload_link}",
         ]
     )
+    text = "\n".join(line for line in text.splitlines() if line)
+    deduction_html = ""
+    if deduction_line:
+        deduction_html = f'<tr><td><strong>Leave deduction</strong></td><td>{escape(deduction_line)}</td></tr>'
     html = f"""
     <h2>Candidate invoice upload reminder</h2>
     <p>Dear {escape(candidate.full_name)},</p>
@@ -1597,6 +1782,8 @@ def candidate_invoice_upload_template(invoice: CandidateVendorInvoice, candidate
       <tr><td><strong>Position</strong></td><td>{escape(position)}</td></tr>
       <tr><td><strong>Invoice due date</strong></td><td>{escape(str(invoice.invoice_due_date or 'not set'))}</td></tr>
       <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+      <tr><td><strong>Leave status</strong></td><td>{escape(leave_summary_line)}</td></tr>
+      {deduction_html}
     </table>
     <p><a href="{escape(upload_link)}">Upload your invoice using this single-use link</a></p>
     """
@@ -1782,6 +1969,8 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
                 continue
             for due_date in candidate_invoice_due_dates(contract, db, reminder_cutoff, schedule):
                 invoice_type = candidate_invoice_source_type(contract, schedule)
+                gross_amount = Decimal(amount).quantize(MONEY_QUANT)
+                leave_adjustment = candidate_leave_invoice_adjustment(candidate, db, due_date, gross_amount, invoice_type)
                 invoice = CandidateVendorInvoice(
                     candidate_id=candidate.id,
                     contract_id=contract.id,
@@ -1790,7 +1979,10 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
                     item_description=candidate_invoice_source_description(contract, candidate, schedule),
                     invoice_type=invoice_type,
                     invoice_due_date=due_date,
-                    amount=amount,
+                    gross_amount=leave_adjustment.gross_amount,
+                    leave_deduction_days=leave_adjustment.deduction_days,
+                    leave_deduction_amount=leave_adjustment.deduction_amount,
+                    amount=leave_adjustment.net_amount,
                     currency=candidate_invoice_source_currency(contract, schedule),
                     status="submitted" if invoice_type == "auto_reimbursement" else "awaiting_upload",
                     upload_token=None if invoice_type == "auto_reimbursement" else uuid4().hex,
@@ -1802,7 +1994,7 @@ def send_due_candidate_invoice_reminders(db: Session, as_of: date) -> list[Candi
                     queue_candidate_invoice_approval_email(db, invoice)
                     log_event(db, project_id=candidate.project_id, actor_name="System", action="candidate_auto_reimbursement_created", details=str(invoice.id))
                 else:
-                    subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need, contract)
+                    subject, text_body, html = candidate_invoice_upload_template(invoice, candidate, project, need, contract, db)
                     status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=[], subject=subject, text=text_body, html=html)
                     db.add(
                         EmailNotification(
@@ -3096,6 +3288,59 @@ def list_candidates(_: AuthContext = Depends(require_role(UserRole.hr_manager.va
     return [serialize_candidate(candidate, db) for candidate in candidates]
 
 
+@app.put("/candidates/{candidate_id}/leave-entitlement", response_model=CandidateRead)
+def set_candidate_leave_entitlement(
+    candidate_id: int,
+    payload: CandidateLeaveEntitlementCreate,
+    context: AuthContext = Depends(require_role(UserRole.hr_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateRead:
+    candidate = load_candidate(candidate_id, db)
+    if candidate.status != "hired":
+        raise HTTPException(status_code=400, detail="Leave entitlement can be managed only for current hired employees")
+    entitlement = candidate_leave_entitlement(candidate.id, db)
+    if entitlement is None:
+        entitlement = CandidateLeaveEntitlement(candidate_id=candidate.id, annual_leave_days=payload.annual_leave_days, effective_start_date=payload.effective_start_date)
+        db.add(entitlement)
+    entitlement.annual_leave_days = payload.annual_leave_days
+    entitlement.effective_start_date = payload.effective_start_date
+    entitlement.updated_by_name = context.user.full_name
+    entitlement.updated_at = utcnow()
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_leave_entitlement_updated", details=f"{candidate.full_name}: {payload.annual_leave_days} days from {payload.effective_start_date}")
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
+@app.post("/candidates/{candidate_id}/leaves", response_model=CandidateRead, status_code=201)
+def add_candidate_leave_taken(
+    candidate_id: int,
+    payload: CandidateLeaveTakenCreate,
+    context: AuthContext = Depends(require_role(UserRole.hr_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateRead:
+    candidate = load_candidate(candidate_id, db)
+    if candidate.status != "hired":
+        raise HTTPException(status_code=400, detail="Leaves can be recorded only for current hired employees")
+    if candidate_leave_entitlement(candidate.id, db) is None:
+        raise HTTPException(status_code=400, detail="Specify leave entitlement before recording leaves taken")
+    if payload.end_date < payload.start_date:
+        raise HTTPException(status_code=422, detail="Leave end date cannot be earlier than leave start date")
+    leave = CandidateLeaveTaken(
+        candidate_id=candidate.id,
+        days_taken=payload.days_taken,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        notes=payload.notes,
+        recorded_by_name=context.user.full_name,
+    )
+    db.add(leave)
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_leave_recorded", details=f"{candidate.full_name}: {payload.days_taken} days from {payload.start_date} to {payload.end_date}")
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
 @app.delete("/candidates/{candidate_id}")
 def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> dict[str, str]:
     candidate = load_candidate(candidate_id, db)
@@ -3114,6 +3359,8 @@ def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_r
         db.execute(delete(Interview).where(Interview.id.in_(interview_ids)))
     db.execute(delete(CandidateScreeningForm).where(CandidateScreeningForm.candidate_id == candidate.id))
     db.execute(delete(CandidateEvaluation).where(CandidateEvaluation.candidate_id == candidate.id))
+    db.execute(delete(CandidateLeaveTaken).where(CandidateLeaveTaken.candidate_id == candidate.id))
+    db.execute(delete(CandidateLeaveEntitlement).where(CandidateLeaveEntitlement.candidate_id == candidate.id))
     db.execute(delete(CandidateInvoiceSchedule).where(CandidateInvoiceSchedule.candidate_id == candidate.id))
     db.execute(delete(CandidateContract).where(CandidateContract.candidate_id == candidate.id))
     db.delete(candidate)
@@ -3732,6 +3979,10 @@ def get_candidate_invoice_upload(token: str, db: Session = Depends(get_db)) -> C
         item_description=invoice.item_description or (contract.invoice_description if contract else None) or default_candidate_invoice_description(candidate),
         invoice_type=invoice.invoice_type or (contract.invoice_type if contract else None) or "invoice",
         invoice_due_date=invoice.invoice_due_date,
+        gross_amount=invoice.gross_amount or invoice.amount,
+        leave_deduction_days=invoice.leave_deduction_days or Decimal("0.00"),
+        leave_deduction_amount=invoice.leave_deduction_amount or Decimal("0.00"),
+        leave_summary_text=candidate_leave_summary_text(candidate.id, db, invoice.invoice_due_date or date.today()),
         amount=invoice.amount,
         currency=invoice.currency,
         billing_entity_name=billing_entity_name,

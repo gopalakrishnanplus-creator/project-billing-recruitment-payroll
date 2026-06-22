@@ -80,6 +80,7 @@ type ScreenFocus =
   | 'add-candidate'
   | 'assign-interview'
   | 'hired-candidates'
+  | 'employee-leaves'
   | 'candidate-terms'
   | 'candidate-invoice-items'
   | 'historical-candidate-invoice'
@@ -312,6 +313,35 @@ type CandidateInvoiceSchedule = {
   status: string;
 };
 
+type CandidateLeaveEntitlement = {
+  id: number;
+  candidate_id: number;
+  annual_leave_days: string;
+  effective_start_date: string;
+  updated_by_name: string | null;
+  updated_at: string;
+};
+
+type CandidateLeaveRecord = {
+  id: number;
+  candidate_id: number;
+  days_taken: string;
+  start_date: string;
+  end_date: string;
+  notes: string | null;
+  recorded_by_name: string | null;
+  created_at: string;
+};
+
+type CandidateLeaveSummary = {
+  annual_leave_days: string;
+  effective_start_date: string | null;
+  leave_year_start: string | null;
+  leave_year_end: string | null;
+  taken_days: string;
+  balance_days: string;
+};
+
 type CandidateContract = {
   id: number;
   candidate_id: number;
@@ -352,6 +382,9 @@ type Candidate = {
   position_title: string | null;
   interviews: Interview[];
   contracts: CandidateContract[];
+  leave_entitlement: CandidateLeaveEntitlement | null;
+  leave_records: CandidateLeaveRecord[];
+  leave_summary: CandidateLeaveSummary | null;
 };
 
 type CandidateInvoiceUpload = {
@@ -364,6 +397,10 @@ type CandidateInvoiceUpload = {
   item_description: string | null;
   invoice_type: string;
   invoice_due_date: string | null;
+  gross_amount: string | null;
+  leave_deduction_days: string;
+  leave_deduction_amount: string;
+  leave_summary_text: string | null;
   amount: string;
   currency: string;
   billing_entity_name: string;
@@ -403,6 +440,9 @@ type CandidateInvoice = {
   item_description: string | null;
   invoice_type: string;
   invoice_due_date: string | null;
+  gross_amount: string | null;
+  leave_deduction_days: string;
+  leave_deduction_amount: string;
   amount: string;
   currency: string;
   billing_entity_name: string;
@@ -553,6 +593,25 @@ function candidateInvoiceTypeLabel(value: string | undefined | null): string {
   return CANDIDATE_INVOICE_TYPE_LABELS[value ?? 'invoice'] ?? (value ?? 'invoice').replaceAll('_', ' ');
 }
 
+function leaveSummaryText(candidate: Candidate): string {
+  const summary = candidate.leave_summary;
+  if (!summary) return 'Leave entitlement not set';
+  return `${summary.taken_days} taken · ${summary.annual_leave_days} eligible · ${summary.balance_days} balance`;
+}
+
+function candidateMatchesKeyword(candidate: Candidate, keyword: string): boolean {
+  const value = keyword.trim().toLowerCase();
+  if (!value) return true;
+  return [
+    candidate.full_name,
+    candidate.email,
+    candidate.project_code,
+    candidate.project_title,
+    candidate.client_company_name,
+    candidate.position_title ?? '',
+  ].some((field) => field.toLowerCase().includes(value));
+}
+
 function frequencyLabel(value: string | undefined | null): string {
   if (!value) return 'not set';
   if (value === 'twice_monthly') return 'Every 15 days';
@@ -635,6 +694,8 @@ function App() {
   const [recruitmentPage, setRecruitmentPage] = useState(1);
   const [candidatePage, setCandidatePage] = useState(1);
   const [hiredCandidatePage, setHiredCandidatePage] = useState(1);
+  const [employeeLeavePage, setEmployeeLeavePage] = useState(1);
+  const [employeeLeaveKeyword, setEmployeeLeaveKeyword] = useState('');
   const [candidateInvoicePage, setCandidateInvoicePage] = useState(1);
   const [notice, setNotice] = useState<Notice>(null);
   const [loading, setLoading] = useState(false);
@@ -775,6 +836,11 @@ function App() {
     () => visibleInterviews.filter((interview) => interview.status === 'completed'),
     [visibleInterviews],
   );
+  const employeeLeaveCandidates = useMemo(
+    () => hiredCandidates.filter((candidate) => candidateMatchesKeyword(candidate, employeeLeaveKeyword)),
+    [employeeLeaveKeyword, hiredCandidates],
+  );
+  const employeeLeaveRows = useMemo(() => pagedItems(employeeLeaveCandidates, employeeLeavePage), [employeeLeaveCandidates, employeeLeavePage]);
   const clientInvoicesPendingApproval = useMemo(
     () => invoices.filter((invoice) => invoice.status === 'due_for_client_approval'),
     [invoices],
@@ -806,6 +872,7 @@ function App() {
   const showRecruitmentPositions = !screenFocus || ['recruitment-positions', 'add-position', 'historical-hire', 'recruitment-assets'].includes(screenFocus);
   const showCandidateStatus = !screenFocus || ['candidate-status', 'add-candidate', 'assign-interview', 'candidate-terms'].includes(screenFocus);
   const showHiredCandidates = !screenFocus || ['hired-candidates', 'candidate-terms'].includes(screenFocus);
+  const showEmployeeLeaves = screenFocus === 'employee-leaves';
   const showCandidateInvoiceItems = !screenFocus || ['candidate-invoice-items', 'historical-candidate-invoice'].includes(screenFocus);
   const showInterviewEvaluations = !screenFocus || ['interviews', 'scorecard'].includes(screenFocus);
   const showClientInvoiceRegister = !screenFocus || ['client-invoices', 'client-payment', 'finance-client-actions', 'cae-client-approval', 'test-invoices'].includes(screenFocus);
@@ -1395,6 +1462,39 @@ function App() {
     });
   }
 
+  async function submitLeaveEntitlement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedHiredCandidate) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/candidates/${selectedHiredCandidate.id}/leave-entitlement`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      setSelectedCandidateId(candidate.id);
+      setActiveForm(null);
+      return 'Leave entitlement saved';
+    });
+  }
+
+  async function submitLeaveTaken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedHiredCandidate) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/candidates/${selectedHiredCandidate.id}/leaves`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setSelectedCandidateId(candidate.id);
+      formElement.reset();
+      setActiveForm(null);
+      return 'Leave recorded';
+    });
+  }
+
   async function deleteSelectedCandidateInvoice() {
     if (!selectedCandidateInvoice) return;
     const confirmed = window.confirm(`Delete this unpaid candidate invoice?\n\n${selectedCandidateInvoice.candidate_name} · ${selectedCandidateInvoice.item_description ?? 'No description'}\n\nIf it was created from an invoice item, delete the invoice item in Recruitment to prevent future regeneration.`);
@@ -1875,6 +1975,7 @@ function App() {
                 {renderHomeAction('Schedule Interviews', <CalendarPlus size={18} />, () => openFocusedScreen('recruitment', 'assign-interview', 'assign-interview'))}
                 {renderHomeAction('Review Interview Scorecards', <FileCheck2 size={18} />, () => openFocusedScreen('recruitment', 'interviews'), pendingHrInterviewReviews.length)}
                 {renderHomeAction('Hired Candidates', <BadgeCheck size={18} />, () => openFocusedScreen('recruitment', 'hired-candidates'), hiredCandidates.length)}
+                {renderHomeAction('Manage Employee Leaves', <CalendarPlus size={18} />, () => openFocusedScreen('recruitment', 'employee-leaves'), hiredCandidates.length)}
                 {renderHomeAction('Edit Candidate Invoice Terms', <Pencil size={18} />, () => openFocusedScreen('recruitment', 'candidate-terms', 'candidate-terms'))}
                 {renderHomeAction('Upload Past Candidate Invoice', <Upload size={18} />, () => openFocusedScreen('recruitment', 'historical-candidate-invoice', 'historical-candidate-invoice'))}
                 {renderHomeAction('Add Historical Hire', <BadgeCheck size={18} />, () => openFocusedScreen('recruitment', 'historical-hire', 'historical-hire'))}
@@ -2739,6 +2840,100 @@ function App() {
                 )}
               </section>}
 
+              {showEmployeeLeaves && canHrManage && <section className="panel wide">
+                <PanelTitle icon={<CalendarPlus size={18} />} title="Manage Employee Leaves" />
+                <div className="toolbar">
+                  <Field
+                    label="Keyword search"
+                    name="employee_leave_keyword"
+                    value={employeeLeaveKeyword}
+                    onChange={(event) => {
+                      setEmployeeLeaveKeyword(event.currentTarget.value);
+                      setEmployeeLeavePage(1);
+                    }}
+                    placeholder="Search employee, project, client, position"
+                  />
+                </div>
+                {employeeLeaveCandidates.length > 0 ? (
+                  <>
+                    <div className="lineList">
+                      {employeeLeaveRows.map((candidate) => {
+                        const summary = candidate.leave_summary;
+                        const entitlement = candidate.leave_entitlement;
+                        return (
+                          <div className={`lineRow ${selectedHiredCandidate?.id === candidate.id ? 'selectedLine' : ''}`} key={candidate.id}>
+                            <div>
+                              <strong>{candidate.full_name}</strong>
+                              <span>{candidate.email} · {candidate.project_code} · {candidate.project_title}</span>
+                              <span>{candidate.position_title ?? 'No position'} · {leaveSummaryText(candidate)}</span>
+                              {summary?.leave_year_start && <span>Leave year {summary.leave_year_start} to {summary.leave_year_end ?? 'not set'}</span>}
+                              {entitlement && <span>Entitlement effective from {entitlement.effective_start_date}</span>}
+                            </div>
+                            <div className="horizontalActions">
+                              <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('leave-entitlement'); }}>
+                                <Pencil size={18} />
+                                <span>Specify Leave Entitlement</span>
+                              </button>
+                              <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('leave-taken'); }}>
+                                <CalendarPlus size={18} />
+                                <span>Add Leaves Taken</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <Pager page={employeeLeavePage} total={employeeLeaveCandidates.length} onPageChange={setEmployeeLeavePage} />
+                  </>
+                ) : (
+                  <p className="empty">No current employees match this search.</p>
+                )}
+              </section>}
+
+              {showEmployeeLeaves && canHrManage && activeForm === 'leave-entitlement' && selectedHiredCandidate && <form className="panel" onSubmit={(event) => void submitLeaveEntitlement(event)}>
+                <PanelTitle icon={<Pencil size={18} />} title="Specify Leave Entitlement" />
+                <p className="contextLine">{selectedHiredCandidate.full_name}</p>
+                <Field label="Annual eligible leave days" name="annual_leave_days" type="number" step="0.5" min="0" defaultValue={selectedHiredCandidate.leave_entitlement?.annual_leave_days ?? ''} required />
+                <Field label="Entitlement starting date" name="effective_start_date" type="date" defaultValue={selectedHiredCandidate.leave_entitlement?.effective_start_date ?? today()} required />
+                <button className="primary" disabled={loading}>
+                  <FileCheck2 size={18} />
+                  <span>Save Entitlement</span>
+                </button>
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+              </form>}
+
+              {showEmployeeLeaves && canHrManage && activeForm === 'leave-taken' && selectedHiredCandidate && <form className="panel" onSubmit={(event) => void submitLeaveTaken(event)}>
+                <PanelTitle icon={<CalendarPlus size={18} />} title="Add Leaves Taken" />
+                <p className="contextLine">{selectedHiredCandidate.full_name} · {leaveSummaryText(selectedHiredCandidate)}</p>
+                <Field label="Leave days utilised" name="days_taken" type="number" step="0.5" min="0.5" required />
+                <Field label="Leave start date" name="start_date" type="date" defaultValue={today()} required />
+                <Field label="Leave end date" name="end_date" type="date" defaultValue={today()} required />
+                <label className="field wideField">
+                  <span>Notes</span>
+                  <textarea name="notes" rows={3} />
+                </label>
+                <button className="primary" disabled={loading || !selectedHiredCandidate.leave_entitlement}>
+                  <FilePlus2 size={18} />
+                  <span>Add Leave</span>
+                </button>
+                {!selectedHiredCandidate.leave_entitlement && <p className="contextLine wideField">Specify leave entitlement before recording leave taken.</p>}
+                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+                {selectedHiredCandidate.leave_records.length > 0 && (
+                  <div className="scheduleList wideField">
+                    <h3>Recorded leaves</h3>
+                    {selectedHiredCandidate.leave_records.slice(0, 10).map((leave) => (
+                      <div className="scheduleRow" key={leave.id}>
+                        <div>
+                          <strong>{leave.days_taken} day(s)</strong>
+                          <span>{leave.start_date} to {leave.end_date}</span>
+                          {leave.notes && <span>{leave.notes}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </form>}
+
               {activeForm === 'candidate-terms' && <form className="panel" key={`${selectedCandidate?.id ?? 'none'}-${selectedCandidateContract?.id ?? 'new'}`} onSubmit={(event) => void submitContract(event)}>
                 <PanelTitle icon={<FileCheck2 size={18} />} title={selectedCandidateContract ? 'Edit Candidate Invoice Terms' : 'Signed Contract And Invoice Terms'} />
                 <p className="contextLine">{selectedCandidate ? selectedCandidate.full_name : 'Select a candidate first'}</p>
@@ -3292,6 +3487,12 @@ function App() {
                       <div><dt>Description</dt><dd>{selectedCandidateInvoice.item_description ?? 'Not set'}</dd></div>
                       <div><dt>Invoice to</dt><dd>{selectedCandidateInvoice.billing_entity_address ? `${selectedCandidateInvoice.billing_entity_name}, ${selectedCandidateInvoice.billing_entity_address}` : selectedCandidateInvoice.billing_entity_name}</dd></div>
                       <div><dt>Invoice due date</dt><dd>{selectedCandidateInvoice.invoice_due_date ?? 'Not set'}</dd></div>
+                      {selectedCandidateInvoice.leave_deduction_amount !== '0.00' && (
+                        <>
+                          <div><dt>Gross amount</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.gross_amount ?? selectedCandidateInvoice.amount}</dd></div>
+                          <div><dt>Leave deduction</dt><dd>{selectedCandidateInvoice.leave_deduction_days} day(s) · {selectedCandidateInvoice.currency} {selectedCandidateInvoice.leave_deduction_amount}</dd></div>
+                        </>
+                      )}
                       <div><dt>Amount</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.amount}</dd></div>
                       <div><dt>Status</dt><dd><Status value={selectedCandidateInvoice.status} /></dd></div>
                       <div><dt>Paid</dt><dd>{selectedCandidateInvoice.currency} {selectedCandidateInvoice.paid_total}</dd></div>
@@ -4066,6 +4267,13 @@ function CandidateInvoiceUploadShell({
               <div><dt>Description</dt><dd>{invoice.item_description ?? 'Not set'}</dd></div>
               <div><dt>Invoice to</dt><dd>{invoice.billing_entity_address ? `${invoice.billing_entity_name}, ${invoice.billing_entity_address}` : invoice.billing_entity_name}</dd></div>
               <div><dt>Invoice due date</dt><dd>{invoice.invoice_due_date ?? 'Not set'}</dd></div>
+              {invoice.leave_summary_text && <div><dt>Leave status</dt><dd>{invoice.leave_summary_text}</dd></div>}
+              {invoice.leave_deduction_amount !== '0.00' && (
+                <>
+                  <div><dt>Gross amount</dt><dd>{invoice.currency} {invoice.gross_amount ?? invoice.amount}</dd></div>
+                  <div><dt>Leave deduction</dt><dd>{invoice.leave_deduction_days} day(s) · {invoice.currency} {invoice.leave_deduction_amount}</dd></div>
+                </>
+              )}
               <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>
               <div><dt>Status</dt><dd><Status value={invoice.status} /></dd></div>
             </dl>

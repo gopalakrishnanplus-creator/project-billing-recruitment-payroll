@@ -1930,6 +1930,83 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         assert "recorded payments" in reversed_payment_delete_response.text
 
 
+def test_candidate_invoice_leave_deduction_uses_only_current_month_excess():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            data={
+                "position_title": "Leave Policy Consultant",
+                "number_of_positions": "1",
+                "employment_type": "Fractional Consultant",
+                "description": "Candidate leave policy workflow.",
+                "historical_completed": "on",
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        due_date = date.today() + timedelta(days=10)
+        previous_month_day = due_date.replace(day=1) - timedelta(days=1)
+        hire_response = client.post(
+            f"/recruitment-needs/{need_response.json()['id']}/historical-hires",
+            headers=HR_HEADERS,
+            data={
+                "full_name": "Leave Adjusted Candidate",
+                "email": "leave-adjusted@example.com",
+                "invoice_terms": "Monthly candidate invoice.",
+                "invoice_amount": "1600.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(due_date),
+                "invoice_end_date": str(due_date + timedelta(days=40)),
+            },
+        )
+        assert hire_response.status_code == 201, hire_response.text
+        candidate_id = hire_response.json()["id"]
+
+        entitlement_response = client.put(
+            f"/candidates/{candidate_id}/leave-entitlement",
+            headers=HR_HEADERS,
+            json={"annual_leave_days": "1.00", "effective_start_date": str(due_date - timedelta(days=90))},
+        )
+        assert entitlement_response.status_code == 200, entitlement_response.text
+        prior_leave_response = client.post(
+            f"/candidates/{candidate_id}/leaves",
+            headers=HR_HEADERS,
+            json={"days_taken": "3.00", "start_date": str(previous_month_day), "end_date": str(previous_month_day)},
+        )
+        assert prior_leave_response.status_code == 201, prior_leave_response.text
+        current_leave_response = client.post(
+            f"/candidates/{candidate_id}/leaves",
+            headers=HR_HEADERS,
+            json={"days_taken": "1.00", "start_date": str(due_date), "end_date": str(due_date)},
+        )
+        assert current_leave_response.status_code == 201, current_leave_response.text
+
+        reminder_response = client.post(f"/candidate-invoices/reminders?as_of={due_date - timedelta(days=2)}", headers=ADMIN_HEADERS)
+        assert reminder_response.status_code == 200, reminder_response.text
+        assert reminder_response.json()["reminder_count"] == 1
+        invoice = reminder_response.json()["invoices"][0]
+        assert invoice["gross_amount"] == "1600.00"
+        assert invoice["leave_deduction_days"] == "1.00"
+        assert invoice["leave_deduction_amount"] == "80.00"
+        assert invoice["amount"] == "1520.00"
+
+        with SessionLocal() as db:
+            reminder_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "leave-adjusted@example.com").one()
+            assert "total leave taken this year 4.00 day(s)" in reminder_email.body
+            assert "annual eligibility 1.00 day(s)" in reminder_email.body
+            assert "Leave deduction applied: 1.00 excess leave day(s)" in reminder_email.body
+
+
 def test_candidate_invoice_schedules_support_reimbursements_and_auto_reimbursements():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)

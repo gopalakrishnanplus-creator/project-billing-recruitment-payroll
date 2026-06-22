@@ -146,6 +146,18 @@ class CandidateContractUpdate(CandidateContractCreate):
     status: str | None = Field(default=None, pattern="^(draft|signed|terminated|inactive)$")
 
 
+class CandidateLeaveEntitlementCreate(BaseModel):
+    annual_leave_days: Decimal = Field(ge=0)
+    effective_start_date: date
+
+
+class CandidateLeaveTakenCreate(BaseModel):
+    days_taken: Decimal = Field(gt=0)
+    start_date: date
+    end_date: date
+    notes: str | None = None
+
+
 class CandidateInvoiceScheduleCreate(BaseModel):
     item_description: str = Field(min_length=2)
     invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
@@ -332,6 +344,39 @@ class CandidateContractRead(BaseModel):
     invoice_schedules: list["CandidateInvoiceScheduleRead"] = Field(default_factory=list)
 
 
+class CandidateLeaveEntitlementRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    candidate_id: int
+    annual_leave_days: Decimal
+    effective_start_date: date
+    updated_by_name: str | None
+    updated_at: datetime
+
+
+class CandidateLeaveTakenRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    candidate_id: int
+    days_taken: Decimal
+    start_date: date
+    end_date: date
+    notes: str | None
+    recorded_by_name: str | None
+    created_at: datetime
+
+
+class CandidateLeaveSummaryRead(BaseModel):
+    annual_leave_days: Decimal
+    effective_start_date: date | None = None
+    leave_year_start: date | None = None
+    leave_year_end: date | None = None
+    taken_days: Decimal
+    balance_days: Decimal
+
+
 class CandidateInvoiceScheduleRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -368,6 +413,9 @@ class CandidateRead(BaseModel):
     position_title: str | None = None
     interviews: list[InterviewRead] = Field(default_factory=list)
     contracts: list[CandidateContractRead] = Field(default_factory=list)
+    leave_entitlement: CandidateLeaveEntitlementRead | None = None
+    leave_records: list[CandidateLeaveTakenRead] = Field(default_factory=list)
+    leave_summary: CandidateLeaveSummaryRead | None = None
 
 
 class InvoiceScheduleRead(BaseModel):
@@ -516,6 +564,10 @@ class CandidateInvoiceUploadRead(BaseModel):
     item_description: str | None
     invoice_type: str
     invoice_due_date: date | None
+    gross_amount: Decimal | None = None
+    leave_deduction_days: Decimal = Decimal("0.00")
+    leave_deduction_amount: Decimal = Decimal("0.00")
+    leave_summary_text: str | None = None
     amount: Decimal
     currency: str
     billing_entity_name: str
@@ -557,6 +609,9 @@ class CandidateVendorInvoiceRead(BaseModel):
     item_description: str | None
     invoice_type: str
     invoice_due_date: date | None
+    gross_amount: Decimal | None = None
+    leave_deduction_days: Decimal = Decimal("0.00")
+    leave_deduction_amount: Decimal = Decimal("0.00")
     amount: Decimal
     currency: str
     billing_entity_name: str

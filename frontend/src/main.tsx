@@ -697,6 +697,7 @@ function App() {
   const [employeeLeavePage, setEmployeeLeavePage] = useState(1);
   const [employeeLeaveKeyword, setEmployeeLeaveKeyword] = useState('');
   const [candidateInvoicePage, setCandidateInvoicePage] = useState(1);
+  const [editingLeaveId, setEditingLeaveId] = useState<number | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [loading, setLoading] = useState(false);
 
@@ -747,6 +748,10 @@ function App() {
   const selectedHiredCandidateContract = useMemo(
     () => (selectedHiredCandidate ? latestContract(selectedHiredCandidate) : undefined),
     [selectedHiredCandidate],
+  );
+  const editingLeaveRecord = useMemo(
+    () => selectedHiredCandidate?.leave_records.find((leave) => leave.id === editingLeaveId) ?? null,
+    [editingLeaveId, selectedHiredCandidate],
   );
   const internalProjectPreset = INTERNAL_PROJECT_PRESETS[internalProjectType] ?? INTERNAL_PROJECT_PRESETS.flexgcc_sales_support;
   const internalProjects = useMemo(
@@ -1484,14 +1489,30 @@ function App() {
     const formElement = event.currentTarget;
     const payload = formPayload(formElement);
     await mutate(async () => {
-      const candidate = await api<Candidate>(`/candidates/${selectedHiredCandidate.id}/leaves`, {
-        method: 'POST',
+      const candidate = await api<Candidate>(editingLeaveRecord ? `/candidate-leaves/${editingLeaveRecord.id}` : `/candidates/${selectedHiredCandidate.id}/leaves`, {
+        method: editingLeaveRecord ? 'PUT' : 'POST',
         body: JSON.stringify(payload),
       });
       setSelectedCandidateId(candidate.id);
       formElement.reset();
+      setEditingLeaveId(null);
       setActiveForm(null);
-      return 'Leave recorded';
+      return editingLeaveRecord ? 'Leave updated' : 'Leave recorded';
+    });
+  }
+
+  async function deleteLeaveTaken(leave: CandidateLeaveRecord) {
+    if (!selectedHiredCandidate) return;
+    const confirmed = window.confirm(`Delete this leave record?\n\n${selectedHiredCandidate.full_name} · ${leave.days_taken} day(s) · ${leave.start_date} to ${leave.end_date}`);
+    if (!confirmed) return;
+    await mutate(async () => {
+      const candidate = await api<Candidate>(`/candidate-leaves/${leave.id}`, { method: 'DELETE' });
+      setSelectedCandidateId(candidate.id);
+      if (editingLeaveId === leave.id) {
+        setEditingLeaveId(null);
+        setActiveForm(null);
+      }
+      return 'Leave deleted';
     });
   }
 
@@ -2870,11 +2891,11 @@ function App() {
                               {entitlement && <span>Entitlement effective from {entitlement.effective_start_date}</span>}
                             </div>
                             <div className="horizontalActions">
-                              <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('leave-entitlement'); }}>
+                              <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setEditingLeaveId(null); setActiveForm('leave-entitlement'); }}>
                                 <Pencil size={18} />
-                                <span>Specify Leave Entitlement</span>
+                                <span>{entitlement ? 'Edit Leave Entitlement' : 'Specify Leave Entitlement'}</span>
                               </button>
-                              <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setActiveForm('leave-taken'); }}>
+                              <button className="secondary" type="button" onClick={() => { setSelectedCandidateId(candidate.id); setEditingLeaveId(null); setActiveForm('leave-taken'); }}>
                                 <CalendarPlus size={18} />
                                 <span>Add Leaves Taken</span>
                               </button>
@@ -2902,22 +2923,22 @@ function App() {
                 <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
               </form>}
 
-              {showEmployeeLeaves && canHrManage && activeForm === 'leave-taken' && selectedHiredCandidate && <form className="panel" onSubmit={(event) => void submitLeaveTaken(event)}>
-                <PanelTitle icon={<CalendarPlus size={18} />} title="Add Leaves Taken" />
+              {showEmployeeLeaves && canHrManage && activeForm === 'leave-taken' && selectedHiredCandidate && <form className="panel" key={`${selectedHiredCandidate.id}-${editingLeaveId ?? 'new'}`} onSubmit={(event) => void submitLeaveTaken(event)}>
+                <PanelTitle icon={<CalendarPlus size={18} />} title={editingLeaveRecord ? 'Edit Leave Taken' : 'Add Leaves Taken'} />
                 <p className="contextLine">{selectedHiredCandidate.full_name} · {leaveSummaryText(selectedHiredCandidate)}</p>
-                <Field label="Leave days utilised" name="days_taken" type="number" step="0.5" min="0.5" required />
-                <Field label="Leave start date" name="start_date" type="date" defaultValue={today()} required />
-                <Field label="Leave end date" name="end_date" type="date" defaultValue={today()} required />
+                <Field label="Leave days utilised" name="days_taken" type="number" step="0.5" min="0.5" defaultValue={editingLeaveRecord?.days_taken ?? ''} required />
+                <Field label="Leave start date" name="start_date" type="date" defaultValue={editingLeaveRecord?.start_date ?? today()} required />
+                <Field label="Leave end date" name="end_date" type="date" defaultValue={editingLeaveRecord?.end_date ?? today()} required />
                 <label className="field wideField">
                   <span>Notes</span>
-                  <textarea name="notes" rows={3} />
+                  <textarea name="notes" rows={3} defaultValue={editingLeaveRecord?.notes ?? ''} />
                 </label>
                 <button className="primary" disabled={loading || !selectedHiredCandidate.leave_entitlement}>
-                  <FilePlus2 size={18} />
-                  <span>Add Leave</span>
+                  {editingLeaveRecord ? <FileCheck2 size={18} /> : <FilePlus2 size={18} />}
+                  <span>{editingLeaveRecord ? 'Save Leave' : 'Add Leave'}</span>
                 </button>
                 {!selectedHiredCandidate.leave_entitlement && <p className="contextLine wideField">Specify leave entitlement before recording leave taken.</p>}
-                <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+                <button className="secondary" type="button" onClick={() => { setEditingLeaveId(null); setActiveForm(null); }} disabled={loading}>Close</button>
                 {selectedHiredCandidate.leave_records.length > 0 && (
                   <div className="scheduleList wideField">
                     <h3>Recorded leaves</h3>
@@ -2927,6 +2948,16 @@ function App() {
                           <strong>{leave.days_taken} day(s)</strong>
                           <span>{leave.start_date} to {leave.end_date}</span>
                           {leave.notes && <span>{leave.notes}</span>}
+                        </div>
+                        <div className="horizontalActions">
+                          <button className="secondary" type="button" onClick={() => { setEditingLeaveId(leave.id); setActiveForm('leave-taken'); }} disabled={loading}>
+                            <Pencil size={16} />
+                            <span>Edit</span>
+                          </button>
+                          <button className="secondary danger" type="button" onClick={() => void deleteLeaveTaken(leave)} disabled={loading}>
+                            <Trash2 size={16} />
+                            <span>Delete</span>
+                          </button>
                         </div>
                       </div>
                     ))}

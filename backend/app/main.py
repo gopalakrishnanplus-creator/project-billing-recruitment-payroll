@@ -3341,6 +3341,52 @@ def add_candidate_leave_taken(
     return serialize_candidate(candidate, db)
 
 
+@app.put("/candidate-leaves/{leave_id}", response_model=CandidateRead)
+def update_candidate_leave_taken(
+    leave_id: int,
+    payload: CandidateLeaveTakenCreate,
+    context: AuthContext = Depends(require_role(UserRole.hr_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateRead:
+    leave = db.get(CandidateLeaveTaken, leave_id)
+    if leave is None:
+        raise HTTPException(status_code=404, detail="Leave record not found")
+    candidate = load_candidate(leave.candidate_id, db)
+    if candidate.status != "hired":
+        raise HTTPException(status_code=400, detail="Leaves can be edited only for current hired employees")
+    if payload.end_date < payload.start_date:
+        raise HTTPException(status_code=422, detail="Leave end date cannot be earlier than leave start date")
+    leave.days_taken = payload.days_taken
+    leave.start_date = payload.start_date
+    leave.end_date = payload.end_date
+    leave.notes = payload.notes
+    leave.recorded_by_name = context.user.full_name
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_leave_updated", details=f"{candidate.full_name}: leave {leave.id} updated to {payload.days_taken} days from {payload.start_date} to {payload.end_date}")
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
+@app.delete("/candidate-leaves/{leave_id}", response_model=CandidateRead)
+def delete_candidate_leave_taken(
+    leave_id: int,
+    context: AuthContext = Depends(require_role(UserRole.hr_manager.value)),
+    db: Session = Depends(get_db),
+) -> CandidateRead:
+    leave = db.get(CandidateLeaveTaken, leave_id)
+    if leave is None:
+        raise HTTPException(status_code=404, detail="Leave record not found")
+    candidate = load_candidate(leave.candidate_id, db)
+    if candidate.status != "hired":
+        raise HTTPException(status_code=400, detail="Leaves can be deleted only for current hired employees")
+    details = f"{candidate.full_name}: {leave.days_taken} days from {leave.start_date} to {leave.end_date}"
+    db.delete(leave)
+    log_event(db, project_id=candidate.project_id, actor_name=context.user.full_name, action="candidate_leave_deleted", details=details)
+    db.commit()
+    db.refresh(candidate)
+    return serialize_candidate(candidate, db)
+
+
 @app.delete("/candidates/{candidate_id}")
 def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> dict[str, str]:
     candidate = load_candidate(candidate_id, db)

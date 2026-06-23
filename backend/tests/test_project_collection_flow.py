@@ -1990,21 +1990,39 @@ def test_candidate_invoice_leave_deduction_uses_only_current_month_excess():
             json={"days_taken": "1.00", "start_date": str(due_date), "end_date": str(due_date)},
         )
         assert current_leave_response.status_code == 201, current_leave_response.text
+        current_leave_id = current_leave_response.json()["leave_records"][0]["id"]
+        updated_leave_response = client.put(
+            f"/candidate-leaves/{current_leave_id}",
+            headers=HR_HEADERS,
+            json={"days_taken": "2.00", "start_date": str(due_date), "end_date": str(due_date), "notes": "Corrected current month leave"},
+        )
+        assert updated_leave_response.status_code == 200, updated_leave_response.text
+        assert updated_leave_response.json()["leave_records"][0]["days_taken"] == "2.00"
+        extra_leave_response = client.post(
+            f"/candidates/{candidate_id}/leaves",
+            headers=HR_HEADERS,
+            json={"days_taken": "0.50", "start_date": str(due_date + timedelta(days=1)), "end_date": str(due_date + timedelta(days=1))},
+        )
+        assert extra_leave_response.status_code == 201, extra_leave_response.text
+        extra_leave_id = extra_leave_response.json()["leave_records"][0]["id"]
+        delete_leave_response = client.delete(f"/candidate-leaves/{extra_leave_id}", headers=HR_HEADERS)
+        assert delete_leave_response.status_code == 200, delete_leave_response.text
+        assert all(record["id"] != extra_leave_id for record in delete_leave_response.json()["leave_records"])
 
         reminder_response = client.post(f"/candidate-invoices/reminders?as_of={due_date - timedelta(days=2)}", headers=ADMIN_HEADERS)
         assert reminder_response.status_code == 200, reminder_response.text
         assert reminder_response.json()["reminder_count"] == 1
         invoice = reminder_response.json()["invoices"][0]
         assert invoice["gross_amount"] == "1600.00"
-        assert invoice["leave_deduction_days"] == "1.00"
-        assert invoice["leave_deduction_amount"] == "80.00"
-        assert invoice["amount"] == "1520.00"
+        assert invoice["leave_deduction_days"] == "2.00"
+        assert invoice["leave_deduction_amount"] == "160.00"
+        assert invoice["amount"] == "1440.00"
 
         with SessionLocal() as db:
             reminder_email = db.query(EmailNotification).filter(EmailNotification.recipient_email == "leave-adjusted@example.com").one()
-            assert "total leave taken this year 4.00 day(s)" in reminder_email.body
+            assert "total leave taken this year 5.00 day(s)" in reminder_email.body
             assert "annual eligibility 1.00 day(s)" in reminder_email.body
-            assert "Leave deduction applied: 1.00 excess leave day(s)" in reminder_email.body
+            assert "Leave deduction applied: 2.00 excess leave day(s)" in reminder_email.body
 
 
 def test_candidate_invoice_schedules_support_reimbursements_and_auto_reimbursements():

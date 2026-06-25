@@ -158,6 +158,19 @@ class CandidateLeaveTakenCreate(BaseModel):
     notes: str | None = None
 
 
+class CandidateLeaveApplicationCreate(BaseModel):
+    candidate_id: int
+    days_requested: Decimal = Field(gt=0)
+    start_date: date
+    end_date: date
+    request_text: str = Field(min_length=2)
+
+
+class CandidateLeaveDecisionCreate(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected|clarification_requested)$")
+    message: str | None = None
+
+
 class CandidateInvoiceScheduleCreate(BaseModel):
     item_description: str = Field(min_length=2)
     invoice_type: str = Field(default="invoice", pattern="^(invoice|reimbursement|auto_reimbursement)$")
@@ -375,6 +388,39 @@ class CandidateLeaveSummaryRead(BaseModel):
     leave_year_end: date | None = None
     taken_days: Decimal
     balance_days: Decimal
+
+
+class CandidateLeaveOptionRead(BaseModel):
+    candidate_id: int
+    candidate_name: str
+    candidate_email: str
+    project_id: int
+    project_code: str
+    project_title: str
+    client_company_name: str
+    position_title: str | None = None
+
+
+class CandidateLeaveRequestRead(BaseModel):
+    id: int
+    candidate_id: int
+    project_id: int
+    candidate_name: str
+    candidate_email: str
+    project_code: str
+    project_title: str
+    client_company_name: str
+    position_title: str | None = None
+    request_text: str
+    days_requested: Decimal
+    start_date: date
+    end_date: date
+    status: str
+    decision_message: str | None = None
+    decided_by_name: str | None = None
+    decided_at: datetime | None = None
+    leave_taken_id: int | None = None
+    created_at: datetime
 
 
 class CandidateInvoiceScheduleRead(BaseModel):

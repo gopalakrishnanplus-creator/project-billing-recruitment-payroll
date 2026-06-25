@@ -6,7 +6,7 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 from app.database import Base, engine
 from app import main as app_main
 from app.main import app
-from app.models import Candidate, CandidateContract, CandidateInvoiceDocument, CandidateInvoiceSchedule, CandidateVendorInvoice, EmailNotification
+from app.models import Candidate, CandidateContract, CandidateInvoiceDocument, CandidateInvoiceSchedule, CandidateLeaveRequest, CandidateLeaveTaken, CandidateVendorInvoice, EmailNotification
 from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
@@ -2268,6 +2268,136 @@ def test_operations_can_upload_past_candidate_invoice_with_multiple_documents_an
 
         with SessionLocal() as db:
             assert db.query(EmailNotification).filter(EmailNotification.recipient_email.in_(["magicbox@example.com", "cae@example.com", "finance@example.com"])).count() == 0
+
+
+def test_candidate_leave_application_cae_decision_and_auto_leave_record():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    employee_headers = {"x-test-email": "employee-leave@example.com", "x-test-role": "job_candidate"}
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="HR Manager", email="hr@example.com", roles=["hr_manager"])
+        provision_user(client, full_name="Employee Candidate", email="employee-leave@example.com", roles=["job_candidate"])
+        project_response = client.post("/projects", headers=OPS_HEADERS, json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"]})
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+
+        need_response = client.post(
+            f"/projects/{project['id']}/recruitment-needs",
+            headers=OPS_HEADERS,
+            json={
+                "position_title": "Leave-Test Consultant",
+                "number_of_positions": 1,
+                "employment_type": "Fractional Consultant",
+                "description": "Candidate used to test direct employee leave requests.",
+                "historical_completed": True,
+            },
+        )
+        assert need_response.status_code == 201, need_response.text
+        need = need_response.json()
+
+        hire_response = client.post(
+            f"/recruitment-needs/{need['id']}/historical-hires",
+            headers=HR_HEADERS,
+            data={
+                "full_name": "Employee Candidate",
+                "email": "employee-leave@example.com",
+                "invoice_amount": "1600.00",
+                "currency": "USD",
+                "invoice_frequency": "monthly",
+                "invoice_start_date": str(date.today() + timedelta(days=30)),
+            },
+        )
+        assert hire_response.status_code == 201, hire_response.text
+        candidate = hire_response.json()
+        assert candidate["status"] == "hired"
+
+        options_response = client.get("/candidate/leave-options", headers=employee_headers)
+        assert options_response.status_code == 200, options_response.text
+        options = options_response.json()
+        assert [option["candidate_id"] for option in options] == [candidate["id"]]
+        assert options[0]["position_title"] == "Leave-Test Consultant"
+
+        request_response = client.post(
+            "/candidate/leave-requests",
+            headers=employee_headers,
+            json={
+                "candidate_id": candidate["id"],
+                "days_requested": "1.00",
+                "start_date": "2026-07-10",
+                "end_date": "2026-07-10",
+                "request_text": "Need one day of leave for a personal appointment.",
+            },
+        )
+        assert request_response.status_code == 201, request_response.text
+        leave_request = request_response.json()
+        assert leave_request["status"] == "submitted"
+
+        with SessionLocal() as db:
+            notification = db.query(EmailNotification).filter(EmailNotification.subject.like("Leave request approval required:%")).one()
+            assert notification.recipient_email == "cae@example.com"
+            assert notification.cc_email == "hr@example.com"
+            assert f"/auth/login?leave_request_id={leave_request['id']}" in notification.body
+
+        view_response = client.get(f"/leave-requests/{leave_request['id']}/client-account-approval-view", headers=CAE_HEADERS)
+        assert view_response.status_code == 200, view_response.text
+        assert view_response.json()["candidate_email"] == "employee-leave@example.com"
+
+        clarification_response = client.post(
+            f"/leave-requests/{leave_request['id']}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"decision": "clarification_requested", "message": "Please confirm project coverage for this date."},
+        )
+        assert clarification_response.status_code == 200, clarification_response.text
+        assert clarification_response.json()["status"] == "clarification_requested"
+
+        with SessionLocal() as db:
+            assert db.query(CandidateLeaveTaken).filter(CandidateLeaveTaken.candidate_id == candidate["id"]).count() == 0
+            candidate_notification = (
+                db.query(EmailNotification)
+                .filter(EmailNotification.recipient_email == "employee-leave@example.com", EmailNotification.subject.like("Leave request sent back for clarification:%"))
+                .one()
+            )
+            assert candidate_notification.cc_email == "hr@example.com"
+            assert "Please confirm project coverage for this date." in candidate_notification.body
+            assert "?leave_application=1" in candidate_notification.body
+
+        second_request_response = client.post(
+            "/candidate/leave-requests",
+            headers=employee_headers,
+            json={
+                "candidate_id": candidate["id"],
+                "days_requested": "2.00",
+                "start_date": "2026-07-20",
+                "end_date": "2026-07-21",
+                "request_text": "Updated request after coordinating project coverage.",
+            },
+        )
+        assert second_request_response.status_code == 201, second_request_response.text
+        second_request = second_request_response.json()
+
+        with SessionLocal() as db:
+            cae = db.query(app_main.AppUser).filter(app_main.AppUser.email == "cae@example.com").one()
+            approval_token = app_main.approval_token_for_user("leave_request", second_request["id"], cae)
+
+        approve_response = client.post(
+            f"/leave-requests/{second_request['id']}/client-account-approval?approval_token={approval_token}",
+            json={"decision": "approved", "message": "Approved. Coverage is arranged."},
+        )
+        assert approve_response.status_code == 200, approve_response.text
+        approved = approve_response.json()
+        assert approved["status"] == "approved"
+        assert approved["leave_taken_id"] is not None
+
+        with SessionLocal() as db:
+            leave_record = db.query(CandidateLeaveTaken).filter(CandidateLeaveTaken.candidate_id == candidate["id"]).one()
+            assert str(leave_record.days_taken) == "2.00"
+            assert leave_record.start_date == date(2026, 7, 20)
+            assert "Approved leave request" in (leave_record.notes or "")
+            approved_request = db.query(CandidateLeaveRequest).filter(CandidateLeaveRequest.id == second_request["id"]).one()
+            assert approved_request.leave_taken_id == leave_record.id
 
 
 def test_sendgrid_uses_ops_sender_reply_to_and_pdf_attachment(monkeypatch):

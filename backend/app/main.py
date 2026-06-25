@@ -34,6 +34,7 @@ from .models import (
     Candidate,
     CandidateContract,
     CandidateLeaveEntitlement,
+    CandidateLeaveRequest,
     CandidateLeaveTaken,
     CandidateInvoiceDocument,
     CandidateInvoiceSchedule,
@@ -72,8 +73,12 @@ from .schemas import (
     CandidateInvoiceScheduleCreate,
     CandidateInvoiceScheduleRead,
     CandidateInvoiceScheduleUpdate,
+    CandidateLeaveApplicationCreate,
+    CandidateLeaveDecisionCreate,
     CandidateLeaveEntitlementCreate,
     CandidateLeaveEntitlementRead,
+    CandidateLeaveOptionRead,
+    CandidateLeaveRequestRead,
     CandidateLeaveSummaryRead,
     CandidateLeaveTakenCreate,
     CandidateLeaveTakenRead,
@@ -383,6 +388,20 @@ def client_account_executive_matches_project(project: ProjectSOW, user: AppUser)
     return normalize_email(project.client_account_executive.email) == normalize_email(user.email)
 
 
+def hired_candidates_for_email(db: Session, email: str) -> list[Candidate]:
+    normalized = normalize_email(email)
+    return db.scalars(
+        select(Candidate)
+        .join(ProjectSOW, ProjectSOW.id == Candidate.project_id)
+        .where(
+            func.lower(Candidate.email) == normalized,
+            Candidate.status == "hired",
+            ProjectSOW.status == "active",
+        )
+        .order_by(Candidate.full_name, Candidate.id)
+    ).all()
+
+
 def approval_token_for_user(kind: str, invoice_id: int, user: AppUser) -> str:
     return approval_token_serializer.dumps(
         {
@@ -398,12 +417,21 @@ def google_redirect_uri() -> str:
     return getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
 
 
-def google_auth_state(approval_invoice_id: int | None, candidate_invoice_id: int | None) -> str:
-    payload: dict[str, str | int] = {"nonce": uuid4().hex}
+def google_auth_state(
+    approval_invoice_id: int | None,
+    candidate_invoice_id: int | None,
+    leave_request_id: int | None = None,
+    leave_application: bool = False,
+) -> str:
+    payload: dict[str, str | int | bool] = {"nonce": uuid4().hex}
     if approval_invoice_id is not None:
         payload["approval_invoice_id"] = approval_invoice_id
     if candidate_invoice_id is not None:
         payload["candidate_invoice_id"] = candidate_invoice_id
+    if leave_request_id is not None:
+        payload["leave_request_id"] = leave_request_id
+    if leave_application:
+        payload["leave_application"] = True
     return oauth_state_serializer.dumps(payload)
 
 
@@ -460,7 +488,7 @@ def auth_context_from_approval_token(token: str, kind: str, invoice_id: int, db:
         raise HTTPException(status_code=401, detail="Approval link is not valid. Please sign in again from the email link.") from exc
 
     if payload.get("kind") != kind or token_invoice_id != invoice_id:
-        raise HTTPException(status_code=404, detail="Approval link is not valid for this invoice")
+        raise HTTPException(status_code=404, detail="Approval link is not valid for this approval item")
 
     token_email = normalize_email(str(payload.get("email") or ""))
     user = db.scalar(select(AppUser).where(AppUser.id == user_id).options(selectinload(AppUser.role_assignments)))
@@ -1278,6 +1306,48 @@ def serialize_candidate(candidate: Candidate, db: Session) -> CandidateRead:
     )
 
 
+def serialize_candidate_leave_option(candidate: Candidate, db: Session) -> CandidateLeaveOptionRead:
+    project = load_project_for_read(candidate.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    return CandidateLeaveOptionRead(
+        candidate_id=candidate.id,
+        candidate_name=candidate.full_name,
+        candidate_email=candidate.email,
+        project_id=project.id,
+        project_code=project.project_code,
+        project_title=project.title,
+        client_company_name=project.company.name,
+        position_title=need.position_title if need else None,
+    )
+
+
+def serialize_candidate_leave_request(leave_request: CandidateLeaveRequest, db: Session) -> CandidateLeaveRequestRead:
+    candidate = load_candidate(leave_request.candidate_id, db)
+    project = load_project_for_read(leave_request.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    return CandidateLeaveRequestRead(
+        id=leave_request.id,
+        candidate_id=leave_request.candidate_id,
+        project_id=leave_request.project_id,
+        candidate_name=candidate.full_name,
+        candidate_email=candidate.email,
+        project_code=project.project_code,
+        project_title=project.title,
+        client_company_name=project.company.name,
+        position_title=need.position_title if need else None,
+        request_text=leave_request.request_text,
+        days_requested=leave_request.days_requested,
+        start_date=leave_request.start_date,
+        end_date=leave_request.end_date,
+        status=leave_request.status,
+        decision_message=leave_request.decision_message,
+        decided_by_name=leave_request.decided_by_name,
+        decided_at=leave_request.decided_at,
+        leave_taken_id=leave_request.leave_taken_id,
+        created_at=leave_request.created_at,
+    )
+
+
 def serialize_candidate_invoice(invoice: CandidateVendorInvoice, db: Session) -> CandidateVendorInvoiceRead:
     candidate = load_candidate(invoice.candidate_id, db)
     project = load_project_for_read(invoice.project_id or candidate.project_id, db)
@@ -1371,6 +1441,15 @@ def authorize_candidate_invoice_approval(invoice: CandidateVendorInvoice, contex
         raise HTTPException(status_code=404, detail="Candidate invoice not found")
 
 
+def authorize_candidate_leave_request_approval(leave_request: CandidateLeaveRequest, context: AuthContext, db: Session) -> None:
+    project = load_project_for_read(leave_request.project_id, db)
+    if (
+        UserRole.client_account_executive.value not in context.roles
+        or not client_account_executive_matches_project(project, context.user)
+    ):
+        raise HTTPException(status_code=404, detail="Leave request not found")
+
+
 def validate_internal_interviewer(db: Session, user_id: int) -> AppUser:
     user = db.scalar(select(AppUser).where(AppUser.id == user_id, AppUser.is_active.is_(True)).options(selectinload(AppUser.role_assignments)))
     if user is None or UserRole.internal_interviewer.value not in user_roles(user):
@@ -1394,6 +1473,136 @@ def finance_manager_emails(db: Session) -> list[str]:
     if FINANCE_MANAGER_EMAIL:
         emails.extend(email.strip() for email in FINANCE_MANAGER_EMAIL.split(",") if email.strip())
     return sorted(set(emails))
+
+
+def leave_request_approval_email_template(db: Session, leave_request: CandidateLeaveRequest) -> tuple[str, str, str, str]:
+    candidate = load_candidate(leave_request.candidate_id, db)
+    project = load_project_for_read(leave_request.project_id, db)
+    need = db.get(RecruitmentNeed, candidate.recruitment_need_id) if candidate.recruitment_need_id else None
+    approval_link = f"{API_BASE_URL}/auth/login?{urlencode({'leave_request_id': leave_request.id})}"
+    subject = f"Leave request approval required: {candidate.full_name}"
+    text = "\n".join(
+        [
+            "A candidate has submitted a leave request.",
+            "",
+            f"Candidate: {candidate.full_name}",
+            f"Candidate email: {candidate.email}",
+            f"Client: {project.company.name}",
+            f"SOW: {project.title} ({project.project_code})",
+            f"Position: {need.position_title if need else 'Not set'}",
+            f"Leave dates: {leave_request.start_date} to {leave_request.end_date}",
+            f"Days requested: {leave_request.days_requested}",
+            "",
+            "Request:",
+            leave_request.request_text,
+            "",
+            f"Log in to approve, reject, or request clarification: {approval_link}",
+        ]
+    )
+    html = f"""
+    <h2>Leave request approval required</h2>
+    <p>A candidate has submitted a leave request.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Candidate</strong></td><td>{escape(candidate.full_name)}</td></tr>
+      <tr><td><strong>Candidate email</strong></td><td>{escape(candidate.email)}</td></tr>
+      <tr><td><strong>Client</strong></td><td>{escape(project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(project.title)} ({escape(project.project_code)})</td></tr>
+      <tr><td><strong>Position</strong></td><td>{escape(need.position_title if need else 'Not set')}</td></tr>
+      <tr><td><strong>Leave dates</strong></td><td>{escape(str(leave_request.start_date))} to {escape(str(leave_request.end_date))}</td></tr>
+      <tr><td><strong>Days requested</strong></td><td>{leave_request.days_requested}</td></tr>
+    </table>
+    <p><strong>Request</strong></p>
+    <p>{escape(leave_request.request_text)}</p>
+    <p><a href="{escape(approval_link)}">Log in to approve, reject, or request clarification</a></p>
+    """
+    return subject, text, html, approval_link
+
+
+def queue_leave_request_approval_email(db: Session, leave_request: CandidateLeaveRequest) -> None:
+    project = load_project_for_read(leave_request.project_id, db)
+    subject, text, html, _ = leave_request_approval_email_template(db, leave_request)
+    cc_emails = hr_manager_emails(db)
+    if project.client_account_executive is None:
+        db.add(
+            EmailNotification(
+                project_id=project.id,
+                recipient_email="",
+                cc_email=",".join(cc_emails) or None,
+                subject=subject,
+                body="No Client Account Executive is assigned to this project.",
+                status="failed",
+            )
+        )
+        return
+    recipient = project.client_account_executive.email
+    filtered_cc = [email for email in cc_emails if email and normalize_email(email) != normalize_email(recipient)]
+    status, detail = send_sendgrid_email(to_email=recipient, cc_emails=filtered_cc, subject=subject, text=text, html=html)
+    db.add(
+        EmailNotification(
+            project_id=project.id,
+            recipient_email=recipient,
+            cc_email=",".join(filtered_cc) if filtered_cc else None,
+            subject=subject,
+            body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+            status=status,
+        )
+    )
+
+
+def queue_leave_request_candidate_decision_email(db: Session, leave_request: CandidateLeaveRequest) -> None:
+    candidate = load_candidate(leave_request.candidate_id, db)
+    decision_label = {
+        "approved": "approved",
+        "rejected": "rejected",
+        "clarification_requested": "sent back for clarification",
+    }.get(leave_request.status, leave_request.status.replace("_", " "))
+    reapply_link = f"{FRONTEND_URL}/?leave_application=1"
+    subject = f"Leave request {decision_label}: {candidate.full_name}"
+    message = leave_request.decision_message or "No message was added."
+    if leave_request.status == "approved":
+        action_text = "Your approved leave has been recorded in the system."
+        next_step = ""
+    else:
+        action_text = "Please speak with the Client Account Executive, resolve the issue, and reapply using the leave application link."
+        next_step = f"\n\nLeave application link: {reapply_link}"
+    text = "\n".join(
+        [
+            f"Dear {candidate.full_name},",
+            "",
+            f"Your leave request has been {decision_label}.",
+            f"Leave dates: {leave_request.start_date} to {leave_request.end_date}",
+            f"Days requested: {leave_request.days_requested}",
+            "",
+            f"Client Account Executive message: {message}",
+            "",
+            action_text,
+            next_step.strip(),
+        ]
+    ).strip()
+    html = f"""
+    <h2>Leave request {escape(decision_label)}</h2>
+    <p>Dear {escape(candidate.full_name)},</p>
+    <p>Your leave request has been {escape(decision_label)}.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Leave dates</strong></td><td>{escape(str(leave_request.start_date))} to {escape(str(leave_request.end_date))}</td></tr>
+      <tr><td><strong>Days requested</strong></td><td>{leave_request.days_requested}</td></tr>
+      <tr><td><strong>Client Account Executive message</strong></td><td>{escape(message)}</td></tr>
+    </table>
+    <p>{escape(action_text)}</p>
+    {f'<p><a href="{escape(reapply_link)}">Reapply for leave</a></p>' if leave_request.status != 'approved' else ''}
+    """
+    cc_emails = [email for email in hr_manager_emails(db) if normalize_email(email) != normalize_email(candidate.email)]
+    status, detail = send_sendgrid_email(to_email=candidate.email, cc_emails=cc_emails, subject=subject, text=text, html=html)
+    db.add(
+        EmailNotification(
+            project_id=leave_request.project_id,
+            recipient_email=candidate.email,
+            cc_email=",".join(cc_emails) if cc_emails else None,
+            subject=subject,
+            body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+            status=status,
+        )
+    )
 
 
 def recruitment_need_email_template(project: ProjectSOW, need: RecruitmentNeed) -> tuple[str, str, str]:
@@ -2492,12 +2701,15 @@ async def auth_login(
     request: Request,
     approval_invoice_id: int | None = Query(default=None),
     candidate_invoice_id: int | None = Query(default=None),
+    leave_request_id: int | None = Query(default=None),
+    leave_application: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     if not GOOGLE_CONFIGURED:
         raise HTTPException(status_code=503, detail="Google OAuth is not configured")
     pending_approval_invoice_id = None
     pending_candidate_invoice_id = None
+    pending_leave_request_id = None
     if approval_invoice_id is not None:
         invoice = db.get(ClientInvoice, approval_invoice_id)
         if invoice is None:
@@ -2508,8 +2720,13 @@ async def auth_login(
         if invoice is None:
             return RedirectResponse(f"{FRONTEND_URL}/?auth_error=candidate_invoice_not_found")
         pending_candidate_invoice_id = candidate_invoice_id
+    if leave_request_id is not None:
+        leave_request = db.get(CandidateLeaveRequest, leave_request_id)
+        if leave_request is None:
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=leave_request_not_found")
+        pending_leave_request_id = leave_request_id
     request.session.clear()
-    state = google_auth_state(pending_approval_invoice_id, pending_candidate_invoice_id)
+    state = google_auth_state(pending_approval_invoice_id, pending_candidate_invoice_id, pending_leave_request_id, leave_application)
     return RedirectResponse(google_auth_url(state, prompt_select_account=True))
 
 
@@ -2538,9 +2755,29 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
     email = normalize_email(profile.get("email", ""))
     if not email:
         raise HTTPException(status_code=400, detail="Google account did not return an email address")
+    leave_application_requested = bool(state_payload.get("leave_application"))
+    leave_candidate_matches = hired_candidates_for_email(db, email) if leave_application_requested else []
     user = db.scalar(select(AppUser).where(func.lower(AppUser.email) == email).options(selectinload(AppUser.role_assignments)))
-    if user is None or not user.is_active:
+    if user is None:
+        if leave_application_requested and leave_candidate_matches:
+            user = AppUser(
+                full_name=profile.get("name") or leave_candidate_matches[0].full_name,
+                email=email,
+                role=UserRole.job_candidate.value,
+                is_active=True,
+            )
+            db.add(user)
+            db.flush()
+            ensure_role_assignment(db, user, UserRole.job_candidate.value, "System")
+            db.flush()
+        else:
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=not_provisioned")
+    if not user.is_active:
         return RedirectResponse(f"{FRONTEND_URL}/?auth_error=not_provisioned")
+    if leave_application_requested and leave_candidate_matches:
+        ensure_role_assignment(db, user, UserRole.job_candidate.value, "System")
+        db.flush()
+        user = db.scalar(select(AppUser).where(AppUser.id == user.id).options(selectinload(AppUser.role_assignments))) or user
     roles = user_roles(user)
     if not roles:
         return RedirectResponse(f"{FRONTEND_URL}/?auth_error=no_roles")
@@ -2590,6 +2827,29 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         request.session["active_role"] = UserRole.client_account_executive.value
         token = approval_token_for_user("candidate_invoice", pending_candidate_invoice_id, user)
         return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'candidate_invoice_id': pending_candidate_invoice_id, 'approval_token': token})}")
+    pending_leave_request_id = state_payload.get("leave_request_id")
+    if pending_leave_request_id is not None:
+        try:
+            pending_leave_request_id = int(pending_leave_request_id)
+        except (TypeError, ValueError):
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=login_failed")
+        leave_request = db.get(CandidateLeaveRequest, pending_leave_request_id)
+        project = db.get(ProjectSOW, leave_request.project_id) if leave_request else None
+        if (
+            leave_request is None
+            or project is None
+            or UserRole.client_account_executive.value not in roles
+            or not client_account_executive_matches_project(project, user)
+        ):
+            return RedirectResponse(f"{FRONTEND_URL}/?leave_request_id={pending_leave_request_id}&leave_request_error=not_authorized")
+        request.session["active_role"] = UserRole.client_account_executive.value
+        token = approval_token_for_user("leave_request", pending_leave_request_id, user)
+        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'leave_request_id': pending_leave_request_id, 'approval_token': token})}")
+    if leave_application_requested:
+        if UserRole.job_candidate.value not in roles:
+            return RedirectResponse(f"{FRONTEND_URL}/?auth_error=not_provisioned")
+        request.session["active_role"] = UserRole.job_candidate.value
+        return RedirectResponse(f"{FRONTEND_URL}/?leave_application=1")
     if len(roles) == 1:
         request.session["active_role"] = roles[0]
     return RedirectResponse(FRONTEND_URL)
@@ -3387,6 +3647,107 @@ def delete_candidate_leave_taken(
     return serialize_candidate(candidate, db)
 
 
+@app.get("/candidate/leave-options", response_model=list[CandidateLeaveOptionRead])
+def list_candidate_leave_options(
+    context: AuthContext = Depends(require_role(UserRole.job_candidate.value)),
+    db: Session = Depends(get_db),
+) -> list[CandidateLeaveOptionRead]:
+    candidates = hired_candidates_for_email(db, context.user.email)
+    return [serialize_candidate_leave_option(candidate, db) for candidate in candidates]
+
+
+@app.post("/candidate/leave-requests", response_model=CandidateLeaveRequestRead, status_code=201)
+def create_candidate_leave_request(
+    payload: CandidateLeaveApplicationCreate,
+    context: AuthContext = Depends(require_role(UserRole.job_candidate.value)),
+    db: Session = Depends(get_db),
+) -> CandidateLeaveRequestRead:
+    candidate = load_candidate(payload.candidate_id, db)
+    if normalize_email(candidate.email) != normalize_email(context.user.email) or candidate.status != "hired":
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    project = load_project_for_read(candidate.project_id, db)
+    ensure_project_active(project)
+    if project.client_account_executive is None:
+        raise HTTPException(status_code=400, detail="This project does not have a Client Account Executive assigned")
+    if payload.end_date < payload.start_date:
+        raise HTTPException(status_code=422, detail="Leave end date cannot be earlier than leave start date")
+    leave_request = CandidateLeaveRequest(
+        candidate_id=candidate.id,
+        project_id=project.id,
+        request_text=payload.request_text,
+        days_requested=payload.days_requested,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        status="submitted",
+    )
+    db.add(leave_request)
+    db.flush()
+    queue_leave_request_approval_email(db, leave_request)
+    log_event(db, project_id=project.id, actor_name=candidate.full_name, action="candidate_leave_request_submitted", details=f"{payload.days_requested} days from {payload.start_date} to {payload.end_date}")
+    db.commit()
+    db.refresh(leave_request)
+    return serialize_candidate_leave_request(leave_request, db)
+
+
+@app.get("/leave-requests/{leave_request_id}/client-account-approval-view", response_model=CandidateLeaveRequestRead)
+def get_leave_request_approval_view(
+    leave_request_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> CandidateLeaveRequestRead:
+    leave_request = db.get(CandidateLeaveRequest, leave_request_id)
+    if leave_request is None:
+        raise HTTPException(status_code=404, detail="Leave request not found")
+    auth_result = approval_auth_from_request(request, db, kind="leave_request", invoice_id=leave_request_id)
+    authorize_candidate_leave_request_approval(leave_request, auth_result.context, db)
+    return serialize_candidate_leave_request(leave_request, db)
+
+
+@app.post("/leave-requests/{leave_request_id}/client-account-approval", response_model=CandidateLeaveRequestRead)
+def decide_leave_request(
+    leave_request_id: int,
+    payload: CandidateLeaveDecisionCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> CandidateLeaveRequestRead:
+    leave_request = db.get(CandidateLeaveRequest, leave_request_id)
+    if leave_request is None:
+        raise HTTPException(status_code=404, detail="Leave request not found")
+    auth_result = approval_auth_from_request(request, db, kind="leave_request", invoice_id=leave_request_id)
+    context = auth_result.context
+    authorize_candidate_leave_request_approval(leave_request, context, db)
+    if leave_request.status != "submitted":
+        raise HTTPException(status_code=400, detail="This leave request has already been decided")
+
+    candidate = load_candidate(leave_request.candidate_id, db)
+    leave_request.status = payload.decision
+    leave_request.decision_message = payload.message
+    leave_request.decided_by_name = context.user.full_name
+    leave_request.decided_at = utcnow()
+    if payload.decision == "approved":
+        leave = CandidateLeaveTaken(
+            candidate_id=candidate.id,
+            days_taken=leave_request.days_requested,
+            start_date=leave_request.start_date,
+            end_date=leave_request.end_date,
+            notes=f"Approved leave request #{leave_request.id}: {leave_request.request_text}",
+            recorded_by_name=context.user.full_name,
+        )
+        db.add(leave)
+        db.flush()
+        leave_request.leave_taken_id = leave.id
+        action = "candidate_leave_request_approved"
+    elif payload.decision == "rejected":
+        action = "candidate_leave_request_rejected"
+    else:
+        action = "candidate_leave_request_clarification_requested"
+    queue_leave_request_candidate_decision_email(db, leave_request)
+    log_event(db, project_id=leave_request.project_id, actor_name=context.user.full_name, action=action, details=f"{candidate.full_name}: {leave_request.days_requested} days from {leave_request.start_date} to {leave_request.end_date}")
+    db.commit()
+    db.refresh(leave_request)
+    return serialize_candidate_leave_request(leave_request, db)
+
+
 @app.delete("/candidates/{candidate_id}")
 def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_role(UserRole.operations_manager.value)), db: Session = Depends(get_db)) -> dict[str, str]:
     candidate = load_candidate(candidate_id, db)
@@ -3405,6 +3766,7 @@ def delete_candidate(candidate_id: int, context: AuthContext = Depends(require_r
         db.execute(delete(Interview).where(Interview.id.in_(interview_ids)))
     db.execute(delete(CandidateScreeningForm).where(CandidateScreeningForm.candidate_id == candidate.id))
     db.execute(delete(CandidateEvaluation).where(CandidateEvaluation.candidate_id == candidate.id))
+    db.execute(delete(CandidateLeaveRequest).where(CandidateLeaveRequest.candidate_id == candidate.id))
     db.execute(delete(CandidateLeaveTaken).where(CandidateLeaveTaken.candidate_id == candidate.id))
     db.execute(delete(CandidateLeaveEntitlement).where(CandidateLeaveEntitlement.candidate_id == candidate.id))
     db.execute(delete(CandidateInvoiceSchedule).where(CandidateInvoiceSchedule.candidate_id == candidate.id))

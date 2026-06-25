@@ -366,6 +366,24 @@ class CandidateLeaveTaken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CandidateLeaveRequest(Base):
+    __tablename__ = "candidate_leave_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id"), nullable=False)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project_sows.id"), nullable=False)
+    request_text: Mapped[str] = mapped_column(Text, nullable=False)
+    days_requested: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(80), default="submitted")
+    decision_message: Mapped[str | None] = mapped_column(Text)
+    decided_by_name: Mapped[str | None] = mapped_column(String(160))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    leave_taken_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_leaves_taken.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CandidateInvoiceSchedule(Base):
     __tablename__ = "candidate_invoice_schedules"
 

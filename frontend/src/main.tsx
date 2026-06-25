@@ -342,6 +342,39 @@ type CandidateLeaveSummary = {
   balance_days: string;
 };
 
+type CandidateLeaveOption = {
+  candidate_id: number;
+  candidate_name: string;
+  candidate_email: string;
+  project_id: number;
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  position_title: string | null;
+};
+
+type CandidateLeaveRequest = {
+  id: number;
+  candidate_id: number;
+  project_id: number;
+  candidate_name: string;
+  candidate_email: string;
+  project_code: string;
+  project_title: string;
+  client_company_name: string;
+  position_title: string | null;
+  request_text: string;
+  days_requested: string;
+  start_date: string;
+  end_date: string;
+  status: string;
+  decision_message: string | null;
+  decided_by_name: string | null;
+  decided_at: string | null;
+  leave_taken_id: number | null;
+  created_at: string;
+};
+
 type CandidateContract = {
   id: number;
   candidate_id: number;
@@ -638,6 +671,9 @@ function App() {
   const candidateInvoiceToken = urlParams.get('candidate_invoice_token');
   const candidateInvoiceId = urlParams.get('candidate_invoice_id');
   const candidateInvoiceError = urlParams.get('candidate_invoice_error');
+  const leaveApplicationMode = urlParams.get('leave_application') === '1';
+  const leaveRequestId = urlParams.get('leave_request_id');
+  const leaveRequestError = urlParams.get('leave_request_error');
   const requestedView = urlParams.get('view');
   const requestedNeedId = Number(urlParams.get('need_id') ?? '');
   const requestedInterviewId = Number(urlParams.get('interview_id') ?? '');
@@ -655,6 +691,8 @@ function App() {
   const [candidateInvoices, setCandidateInvoices] = useState<CandidateInvoice[]>([]);
   const [candidateInvoiceUpload, setCandidateInvoiceUpload] = useState<CandidateInvoiceUpload | null>(null);
   const [candidateApprovalInvoice, setCandidateApprovalInvoice] = useState<CandidateInvoice | null>(null);
+  const [candidateLeaveOptions, setCandidateLeaveOptions] = useState<CandidateLeaveOption[]>([]);
+  const [leaveRequestApproval, setLeaveRequestApproval] = useState<CandidateLeaveRequest | null>(null);
   const [recruitmentNeeds, setRecruitmentNeeds] = useState<RecruitmentNeedDetail[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [interviews, setInterviews] = useState<Interview[]>([]);
@@ -893,6 +931,7 @@ function App() {
 
   async function refreshData(current = me, pageOverride = invoicePage) {
     if (!current?.authenticated || !current.active_role) return;
+    if (current.active_role === 'job_candidate') return;
     setLoading(true);
     try {
       const invoiceParams = new URLSearchParams({ page: String(pageOverride), page_size: String(invoicePageSize) });
@@ -1023,19 +1062,50 @@ function App() {
     }
   }
 
+  async function loadCandidateLeaveOptions() {
+    setLoading(true);
+    try {
+      const options = await api<CandidateLeaveOption[]>('/candidate/leave-options');
+      setCandidateLeaveOptions(options);
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Unable to load leave application options.' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadLeaveRequestApproval() {
+    if (!leaveRequestId) return;
+    setLoading(true);
+    try {
+      const leaveRequest = await api<CandidateLeaveRequest>(`/leave-requests/${leaveRequestId}/client-account-approval-view`, {
+        headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
+      });
+      setLeaveRequestApproval(leaveRequest);
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'This leave approval link is not available for this account.' });
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     const error = new URLSearchParams(window.location.search).get('auth_error');
     if (error) {
       const authErrorMessages: Record<string, string> = {
         invoice_not_found: 'This invoice approval link is no longer available.',
         candidate_invoice_not_found: 'This candidate invoice approval link is no longer available.',
+        leave_request_not_found: 'This leave request approval link is no longer available.',
         login_expired: 'The Google login session expired. Please try signing in again.',
         login_failed: 'Google login could not be completed. Please try signing in again.',
         no_roles: 'No roles are assigned to this account.',
         not_provisioned: 'This Google account has not been added by the system admin.',
       };
       setNotice({ tone: 'error', message: authErrorMessages[error] ?? 'Google login could not be completed. Please try signing in again.' });
-      window.history.replaceState({}, '', window.location.pathname);
+      const cleanedParams = new URLSearchParams(window.location.search);
+      cleanedParams.delete('auth_error');
+      const cleanedQuery = cleanedParams.toString();
+      window.history.replaceState({}, '', `${window.location.pathname}${cleanedQuery ? `?${cleanedQuery}` : ''}`);
     }
     if (candidateInvoiceToken) {
       void loadCandidateInvoiceUpload();
@@ -1051,6 +1121,14 @@ function App() {
   useEffect(() => {
     if (candidateInvoiceId && (me?.authenticated || approvalToken)) void loadCandidateApprovalInvoice();
   }, [candidateInvoiceId, approvalToken, me?.authenticated]);
+
+  useEffect(() => {
+    if (leaveApplicationMode && me?.authenticated && me.active_role === 'job_candidate') void loadCandidateLeaveOptions();
+  }, [leaveApplicationMode, me?.authenticated, me?.active_role]);
+
+  useEffect(() => {
+    if (leaveRequestId && (me?.authenticated || approvalToken)) void loadLeaveRequestApproval();
+  }, [leaveRequestId, approvalToken, me?.authenticated]);
 
   useEffect(() => {
     if (me?.active_role === 'system_admin') void refreshUsers();
@@ -1747,6 +1825,37 @@ function App() {
     });
   }
 
+  async function submitCandidateLeaveRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    await mutate(async () => {
+      const leaveRequest = await api<CandidateLeaveRequest>('/candidate/leave-requests', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setLeaveRequestApproval(null);
+      formElement.reset();
+      return `Leave request submitted for ${leaveRequest.start_date} to ${leaveRequest.end_date}`;
+    });
+    await loadCandidateLeaveOptions();
+  }
+
+  async function leaveRequestApprovalAction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!leaveRequestApproval) return;
+    const payload = formPayload(event.currentTarget);
+    await mutate(async () => {
+      const leaveRequest = await api<CandidateLeaveRequest>(`/leave-requests/${leaveRequestApproval.id}/client-account-approval`, {
+        method: 'POST',
+        headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
+        body: JSON.stringify(payload),
+      });
+      setLeaveRequestApproval(leaveRequest);
+      return `Leave request ${leaveRequest.status.replaceAll('_', ' ')}`;
+    });
+  }
+
   async function candidateInvoicePaymentAction(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedCandidateInvoice) return;
@@ -2033,6 +2142,11 @@ function App() {
                 {renderHomeAction('Candidate / Position Context', <ClipboardList size={18} />, () => openFocusedScreen('recruitment', 'interviews'))}
               </>
             )}
+            {role === 'job_candidate' && (
+              <>
+                {renderHomeAction('Apply For Leave', <CalendarPlus size={18} />, () => { window.location.href = '/?leave_application=1'; })}
+              </>
+            )}
             {role === 'system_admin' && (
               <>
                 {renderHomeAction('Manage Users', <UserCog size={18} />, () => openFocusedScreen('workflow', 'admin-users', 'add-user'), users.length)}
@@ -2079,6 +2193,8 @@ function App() {
   if (me === null) {
     if (approvalInvoiceId) return <ApprovalShell loading={loading} notice={notice} approvalToken={approvalToken} />;
     if (candidateInvoiceId) return <CandidateApprovalShell loading={loading} notice={notice} approvalToken={approvalToken} />;
+    if (leaveRequestId) return <LeaveRequestApprovalShell loading={loading} notice={notice} approvalToken={approvalToken} />;
+    if (leaveApplicationMode) return <CandidateLeaveApplicationShell loading={loading} notice={notice} options={[]} />;
     return (
       <main>
         <ShellHeader loading={loading} onRefresh={() => void refreshAll()} />
@@ -2121,6 +2237,33 @@ function App() {
         onSubmit={(event) => void candidateApprovalInvoiceAction(event)}
         onDownload={() => downloadCandidateInvoice(candidateApprovalInvoice?.id, approvalToken)}
         onDownloadDocument={(documentId) => downloadCandidateInvoiceDocument(candidateApprovalInvoice?.id, documentId, approvalToken)}
+      />
+    );
+  }
+
+  if (leaveRequestId) {
+    return (
+      <LeaveRequestApprovalShell
+        loading={loading}
+        notice={notice}
+        me={me}
+        leaveRequestId={leaveRequestId}
+        approvalToken={approvalToken}
+        leaveRequestError={leaveRequestError}
+        leaveRequest={leaveRequestApproval}
+        onSubmit={(event) => void leaveRequestApprovalAction(event)}
+      />
+    );
+  }
+
+  if (leaveApplicationMode) {
+    return (
+      <CandidateLeaveApplicationShell
+        loading={loading}
+        notice={notice}
+        me={me}
+        options={candidateLeaveOptions}
+        onSubmit={(event) => void submitCandidateLeaveRequest(event)}
       />
     );
   }
@@ -4445,6 +4588,207 @@ function CandidateApprovalShell({
               <BadgeCheck size={18} />
               <span>Submit Decision</span>
             </button>
+          </form>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function CandidateLeaveApplicationShell({
+  loading,
+  notice,
+  me,
+  options,
+  onSubmit,
+}: {
+  loading: boolean;
+  notice: Notice;
+  me?: CurrentUser | null;
+  options: CandidateLeaveOption[];
+  onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  if (!me) {
+    return (
+      <main className="approvalOnly">
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Employee Leave Application</h2>
+          <p>Checking login.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!me.authenticated) {
+    return (
+      <main className="approvalOnly">
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <CalendarPlus size={42} />
+          <h2>Employee Leave Application</h2>
+          <p>Sign in with the Google account used for your FlexGCC work.</p>
+          <a className="primary linkButton" href={`${API_BASE}/auth/login?leave_application=true`}>Continue with Google</a>
+        </section>
+      </main>
+    );
+  }
+
+  if (me.active_role !== 'job_candidate') {
+    return (
+      <main className="approvalOnly">
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Leave Application Not Available</h2>
+          <p>This page is available only for hired candidates submitting leave.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="approvalOnly">
+      {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+      <section className="authGate approvalPanel">
+        <CalendarPlus size={42} />
+        <h2>Employee Leave Application</h2>
+        {options.length === 0 ? (
+          <p>{loading ? 'Loading employee record...' : 'No current hired employee record was found for this Google account.'}</p>
+        ) : (
+          <form className="stackedForm" onSubmit={onSubmit}>
+            <label className="field">
+              <span>Employee / project</span>
+              <select name="candidate_id" required>
+                {options.map((option) => (
+                  <option key={option.candidate_id} value={option.candidate_id}>
+                    {option.candidate_name} · {option.project_code} · {option.position_title ?? option.project_title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="grid three">
+              <Field label="Days requested" name="days_requested" type="number" min="0.25" step="0.25" required />
+              <Field label="Start date" name="start_date" type="date" required />
+              <Field label="End date" name="end_date" type="date" required />
+            </div>
+            <label className="field">
+              <span>Leave requirement</span>
+              <textarea name="request_text" rows={6} required />
+            </label>
+            <button className="primary" disabled={loading}>
+              <Send size={18} />
+              <span>Submit Leave Request</span>
+            </button>
+          </form>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function LeaveRequestApprovalShell({
+  loading,
+  notice,
+  me,
+  leaveRequestId,
+  approvalToken,
+  leaveRequestError,
+  leaveRequest,
+  onSubmit,
+}: {
+  loading: boolean;
+  notice: Notice;
+  me?: CurrentUser | null;
+  leaveRequestId?: string;
+  approvalToken?: string | null;
+  leaveRequestError?: string | null;
+  leaveRequest?: CandidateLeaveRequest | null;
+  onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  if (leaveRequestError === 'not_authorized') {
+    return (
+      <main className="approvalOnly">
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Leave Request Not Available</h2>
+          <p>This leave request is only available to the Client Account Executive assigned to the project.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!me) {
+    return (
+      <main className="approvalOnly">
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Leave Approval Login</h2>
+          <p>Sign in with the Google account assigned as Client Account Executive for this project.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!me.authenticated && !approvalToken) {
+    return (
+      <main className="approvalOnly">
+        {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+        <section className="authGate">
+          <ShieldCheck size={42} />
+          <h2>Leave Approval Login</h2>
+          <p>Sign in with the Google account assigned as Client Account Executive for this project.</p>
+          <a className="primary linkButton" href={`${API_BASE}/auth/login?leave_request_id=${encodeURIComponent(leaveRequestId ?? '')}`}>Continue with Google</a>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="approvalOnly">
+      {notice && <div className={`notice ${notice.tone}`}>{notice.message}</div>}
+      <section className="authGate approvalPanel">
+        <FileCheck2 size={42} />
+        <h2>Leave Request Approval</h2>
+        {!leaveRequest && <p>{loading ? 'Loading leave request...' : 'This leave request approval link is not available for this account.'}</p>}
+        {leaveRequest && (
+          <form className="stackedForm" onSubmit={onSubmit}>
+            <dl className="facts">
+              <div><dt>Candidate</dt><dd>{leaveRequest.candidate_name}</dd></div>
+              <div><dt>Email</dt><dd>{leaveRequest.candidate_email}</dd></div>
+              <div><dt>Project</dt><dd>{leaveRequest.project_code}</dd></div>
+              <div><dt>SOW</dt><dd>{leaveRequest.project_title}</dd></div>
+              <div><dt>Client</dt><dd>{leaveRequest.client_company_name}</dd></div>
+              <div><dt>Position</dt><dd>{leaveRequest.position_title ?? 'Not set'}</dd></div>
+              <div><dt>Leave dates</dt><dd>{leaveRequest.start_date} to {leaveRequest.end_date}</dd></div>
+              <div><dt>Days requested</dt><dd>{leaveRequest.days_requested}</dd></div>
+              <div><dt>Status</dt><dd><Status value={leaveRequest.status} /></dd></div>
+              <div><dt>Request</dt><dd>{leaveRequest.request_text}</dd></div>
+            </dl>
+            {leaveRequest.status === 'submitted' ? (
+              <>
+                <label className="field">
+                  <span>Decision</span>
+                  <select name="decision" defaultValue="approved">
+                    <option value="approved">Approve</option>
+                    <option value="rejected">Reject</option>
+                    <option value="clarification_requested">Request Clarification</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Message</span>
+                  <textarea name="message" rows={4} />
+                </label>
+                <button className="primary" disabled={loading}>
+                  <BadgeCheck size={18} />
+                  <span>Submit Decision</span>
+                </button>
+              </>
+            ) : (
+              <p className="empty">This leave request has already been decided.</p>
+            )}
           </form>
         )}
       </section>

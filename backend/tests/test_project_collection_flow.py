@@ -7,7 +7,7 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 from app.database import Base, engine
 from app import main as app_main
 from app.main import app
-from app.models import Candidate, CandidateContract, CandidateInvoiceDocument, CandidateInvoiceSchedule, CandidateLeaveRequest, CandidateLeaveTaken, CandidateVendorInvoice, EmailNotification
+from app.models import Candidate, CandidateContract, CandidateInvoiceApproval, CandidateInvoiceDocument, CandidateInvoiceSchedule, CandidateLeaveRequest, CandidateLeaveTaken, CandidateVendorInvoice, EmailNotification
 from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
@@ -2095,8 +2095,17 @@ def test_candidate_invoice_reminder_upload_approval_and_payment_flow():
         )
         assert approved_response.status_code == 200, approved_response.text
         assert approved_response.json()["status"] == "approved"
+        repeat_approved_response = client.post(
+            f"/candidate-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"decision": "approved", "comments": "Repeated click."},
+        )
+        assert repeat_approved_response.status_code == 200, repeat_approved_response.text
+        assert repeat_approved_response.json()["status"] == "approved"
 
         with SessionLocal() as db:
+            approvals = db.query(CandidateInvoiceApproval).filter(CandidateInvoiceApproval.vendor_invoice_id == invoice_id).all()
+            assert [approval.decision for approval in approvals] == ["on-hold", "approved"]
             finance_email = (
                 db.query(EmailNotification)
                 .filter(EmailNotification.recipient_email == "finance@example.com", EmailNotification.subject.like("%approved%"))

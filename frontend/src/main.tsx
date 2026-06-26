@@ -696,6 +696,7 @@ function App() {
   const [candidateInvoices, setCandidateInvoices] = useState<CandidateInvoice[]>([]);
   const [candidateInvoiceUpload, setCandidateInvoiceUpload] = useState<CandidateInvoiceUpload | null>(null);
   const [candidateApprovalInvoice, setCandidateApprovalInvoice] = useState<CandidateInvoice | null>(null);
+  const [candidateApprovalSubmitted, setCandidateApprovalSubmitted] = useState(false);
   const [candidateLeaveOptions, setCandidateLeaveOptions] = useState<CandidateLeaveOption[]>([]);
   const [leaveRequestApproval, setLeaveRequestApproval] = useState<CandidateLeaveRequest | null>(null);
   const [recruitmentNeeds, setRecruitmentNeeds] = useState<RecruitmentNeedDetail[]>([]);
@@ -1056,6 +1057,7 @@ function App() {
   async function loadCandidateApprovalInvoice() {
     if (!candidateInvoiceId) return;
     setLoading(true);
+    setCandidateApprovalSubmitted(false);
     try {
       const invoice = await api<CandidateInvoice>(`/candidate-invoices/${candidateInvoiceId}/client-account-approval-view`, {
         headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
@@ -1862,7 +1864,8 @@ function App() {
   async function candidateApprovalInvoiceAction(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!candidateApprovalInvoice) return;
-    const payload = formPayload(event.currentTarget);
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
     await mutate(async () => {
       const invoice = await api<CandidateInvoice>(`/candidate-invoices/${candidateApprovalInvoice.id}/client-account-approval`, {
         method: 'POST',
@@ -1870,7 +1873,9 @@ function App() {
         body: JSON.stringify(payload),
       });
       setCandidateApprovalInvoice(invoice);
-      return `Candidate invoice marked ${invoice.status}`;
+      setCandidateApprovalSubmitted(true);
+      formElement.reset();
+      return `Your response has been submitted. Candidate invoice marked ${invoice.status}.`;
     });
   }
 
@@ -2307,6 +2312,7 @@ function App() {
         approvalToken={approvalToken}
         candidateInvoiceError={candidateInvoiceError}
         invoice={candidateApprovalInvoice}
+        submitted={candidateApprovalSubmitted}
         onSubmit={(event) => void candidateApprovalInvoiceAction(event)}
         onDownload={() => downloadCandidateInvoice(candidateApprovalInvoice?.id, approvalToken)}
         onDownloadDocument={(documentId) => downloadCandidateInvoiceDocument(candidateApprovalInvoice?.id, documentId, approvalToken)}
@@ -4656,6 +4662,7 @@ function CandidateApprovalShell({
   approvalToken,
   candidateInvoiceError,
   invoice,
+  submitted = false,
   onSubmit,
   onDownload,
   onDownloadDocument,
@@ -4667,6 +4674,7 @@ function CandidateApprovalShell({
   approvalToken?: string | null;
   candidateInvoiceError?: string | null;
   invoice?: CandidateInvoice | null;
+  submitted?: boolean;
   onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
   onDownload?: () => void;
   onDownloadDocument?: (documentId: number) => void;
@@ -4731,10 +4739,6 @@ function CandidateApprovalShell({
               <div><dt>Amount</dt><dd>{invoice.currency} {invoice.amount}</dd></div>
               <div><dt>Status</dt><dd><Status value={invoice.status} /></dd></div>
             </dl>
-            <button className="secondary" type="button" onClick={onDownload} disabled={!invoice.invoice_document_id}>
-              <Download size={18} />
-              <span>Download Invoice</span>
-            </button>
             {invoice.documents.length > 0 && (
               <div className="documentList">
                 {invoice.documents.map((document) => (
@@ -4750,22 +4754,35 @@ function CandidateApprovalShell({
                 ))}
               </div>
             )}
-            <label className="field">
-              <span>Comments</span>
-              <textarea name="comments" rows={4} defaultValue={invoice.approval_comments ?? ''} />
-            </label>
-            <label className="field">
-              <span>Decision</span>
-              <select name="decision" defaultValue="approved">
-                <option value="approved">Invoice approved</option>
-                <option value="rejected">Rejected</option>
-                <option value="on-hold">On-hold</option>
-              </select>
-            </label>
-            <button className="primary" disabled={loading || ['paid', 'partially_paid'].includes(invoice.status)}>
-              <BadgeCheck size={18} />
-              <span>Submit Decision</span>
-            </button>
+            {(submitted || invoice.status !== 'submitted') ? (
+              <div className="confirmationPanel">
+                <BadgeCheck size={24} />
+                <div>
+                  <strong>{submitted ? 'Yes, your response has been submitted.' : 'A response has already been submitted for this invoice.'}</strong>
+                  <span>The current invoice status is {invoice.status.replaceAll('_', ' ')}.</span>
+                </div>
+              </div>
+            ) : (
+              <>
+                <label className="field">
+                  <span>Comments</span>
+                  <textarea name="comments" rows={4} defaultValue={invoice.approval_comments ?? ''} />
+                </label>
+                <label className="field">
+                  <span>Decision</span>
+                  <select name="decision" defaultValue="" required>
+                    <option value="" disabled>Select decision</option>
+                    <option value="approved">Invoice approved</option>
+                    <option value="rejected">Rejected</option>
+                    <option value="on-hold">On-hold</option>
+                  </select>
+                </label>
+                <button className="primary" disabled={loading}>
+                  <BadgeCheck size={18} />
+                  <span>Submit Decision</span>
+                </button>
+              </>
+            )}
           </form>
         )}
       </section>

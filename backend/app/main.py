@@ -5059,6 +5059,12 @@ def decide_candidate_invoice(invoice_id: int, payload: CandidateInvoiceApprovalC
         raise HTTPException(status_code=400, detail=f"Candidate invoice cannot be changed after payment status: {invoice.status}")
     if invoice.status == "awaiting_upload":
         raise HTTPException(status_code=400, detail="Candidate invoice has not been uploaded yet")
+    if invoice.status in {"approved", "rejected"}:
+        if invoice.status == payload.decision:
+            return serialize_candidate_invoice(invoice, db)
+        raise HTTPException(status_code=400, detail=f"Candidate invoice decision has already been submitted: {invoice.status}")
+    if invoice.status == "on-hold" and payload.decision == "on-hold":
+        return serialize_candidate_invoice(invoice, db)
     invoice.status = payload.decision
     db.add(CandidateInvoiceApproval(vendor_invoice_id=invoice.id, approver_name=context.user.full_name, decision=payload.decision, notes=payload.comments))
     if payload.decision == "approved":

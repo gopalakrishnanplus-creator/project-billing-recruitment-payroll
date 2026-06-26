@@ -574,12 +574,20 @@ dd {
   font-size: inherit;
 }
 
+.scheduleActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .hiredCandidatesPanel .lineRow,
 .hiredCandidatesPanel .scheduleRow {
   grid-template-columns: 1fr;
 }
 
 .hiredCandidatesPanel .horizontalActions,
+.hiredCandidatesPanel .scheduleActions,
 .hiredCandidatesPanel .scheduleRow button {
   justify-content: flex-start;
   justify-self: flex-start;

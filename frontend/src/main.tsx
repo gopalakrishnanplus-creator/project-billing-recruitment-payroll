@@ -84,6 +84,7 @@ type ScreenFocus =
   | 'employee-leaves'
   | 'candidate-terms'
   | 'candidate-invoice-items'
+  | 'edit-candidate-invoice-item'
   | 'historical-candidate-invoice'
   | 'interviews'
   | 'scorecard'
@@ -718,6 +719,7 @@ function App() {
   const [internalProjectType, setInternalProjectType] = useState('flexgcc_sales_support');
   const [contractInvoiceFrequency, setContractInvoiceFrequency] = useState('monthly');
   const [candidateScheduleFrequency, setCandidateScheduleFrequency] = useState('monthly');
+  const [editingCandidateInvoiceSchedule, setEditingCandidateInvoiceSchedule] = useState<CandidateInvoiceSchedule | null>(null);
   const [historicalHireNoReminders, setHistoricalHireNoReminders] = useState(false);
   const [activeView, setActiveView] = useState<ActiveView>(
     requestedView === 'recruitment' ? 'recruitment' : requestedView === 'invoices' ? 'invoices' : requestedView === 'schedules' ? 'schedules' : 'home',
@@ -920,7 +922,7 @@ function App() {
   const showCandidateStatus = !screenFocus || ['candidate-status', 'add-candidate', 'assign-interview', 'candidate-terms'].includes(screenFocus);
   const showHiredCandidates = !screenFocus || ['hired-candidates', 'candidate-terms'].includes(screenFocus);
   const showEmployeeLeaves = screenFocus === 'employee-leaves';
-  const showCandidateInvoiceItems = !screenFocus || ['candidate-invoice-items', 'historical-candidate-invoice'].includes(screenFocus);
+  const showCandidateInvoiceItems = !screenFocus || ['candidate-invoice-items', 'edit-candidate-invoice-item', 'historical-candidate-invoice'].includes(screenFocus);
   const showInterviewEvaluations = !screenFocus || ['interviews', 'scorecard'].includes(screenFocus);
   const showClientInvoiceRegister = !screenFocus || ['client-invoices', 'client-payment', 'finance-client-actions', 'cae-client-approval', 'test-invoices'].includes(screenFocus);
   const showCandidateInvoiceRegister = !screenFocus || ['candidate-invoices', 'candidate-payment', 'finance-candidate-actions', 'cae-candidate-approval'].includes(screenFocus);
@@ -1521,8 +1523,36 @@ function App() {
         body: JSON.stringify(payload),
       });
       formElement.reset();
+      setEditingCandidateInvoiceSchedule(null);
       setCandidateScheduleFrequency('monthly');
       return 'Candidate invoice item added';
+    });
+  }
+
+  function startEditingCandidateInvoiceSchedule(schedule: CandidateInvoiceSchedule) {
+    setSelectedCandidateId(schedule.candidate_id);
+    setEditingCandidateInvoiceSchedule(schedule);
+    setCandidateScheduleFrequency(schedule.frequency);
+    setActiveView('recruitment');
+    setScreenFocus('edit-candidate-invoice-item');
+    setActiveForm('edit-candidate-invoice-item');
+  }
+
+  async function submitCandidateInvoiceScheduleUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingCandidateInvoiceSchedule) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
+    await mutate(async () => {
+      await api<CandidateInvoiceSchedule>(`/candidate-invoice-schedules/${editingCandidateInvoiceSchedule.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      formElement.reset();
+      setEditingCandidateInvoiceSchedule(null);
+      setActiveForm(null);
+      setCandidateScheduleFrequency('monthly');
+      return 'Candidate invoice item updated';
     });
   }
 
@@ -1531,6 +1561,10 @@ function App() {
     if (!confirmed) return;
     await mutate(async () => {
       await api(`/candidate-invoice-schedules/${schedule.id}`, { method: 'DELETE' });
+      if (editingCandidateInvoiceSchedule?.id === schedule.id) {
+        setEditingCandidateInvoiceSchedule(null);
+        setActiveForm(null);
+      }
       return 'Candidate invoice item deleted';
     });
   }
@@ -2998,8 +3032,10 @@ function App() {
                             <CandidateInvoiceScheduleList
                               schedules={contract.invoice_schedules}
                               title="Additional invoice items"
+                              canEdit={canManageCandidateInvoiceItems}
                               canDelete={canManageCandidateInvoiceItems}
                               loading={loading}
+                              onEdit={startEditingCandidateInvoiceSchedule}
                               onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
                             />
                           )}
@@ -3021,7 +3057,7 @@ function App() {
                             <Pencil size={18} />
                             <span>Terms</span>
                           </button>
-                          <button className="secondary" type="button" onClick={() => { editCandidateInvoiceTerms(candidate); setActiveForm('additional-invoice-item'); }}>
+                          <button className="secondary" type="button" onClick={() => { editCandidateInvoiceTerms(candidate); setEditingCandidateInvoiceSchedule(null); setCandidateScheduleFrequency('monthly'); setActiveForm('additional-invoice-item'); }}>
                             <Banknote size={18} />
                             <span>Add Item</span>
                           </button>
@@ -3215,8 +3251,10 @@ function App() {
                   <CandidateInvoiceScheduleList
                     schedules={selectedCandidateContract.invoice_schedules}
                     emptyMessage="No additional invoice items yet."
+                    canEdit={canManageCandidateInvoiceItems}
                     canDelete={canManageCandidateInvoiceItems}
                     loading={loading}
+                    onEdit={startEditingCandidateInvoiceSchedule}
                     onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
                   />
                   <CandidateInvoiceItemForm
@@ -3258,13 +3296,15 @@ function App() {
 	                  <CandidateInvoiceScheduleList
 	                    schedules={selectedHiredCandidateContract.invoice_schedules}
                     emptyMessage="No additional invoice items yet."
+                    canEdit={canManageCandidateInvoiceItems}
                     canDelete={canManageCandidateInvoiceItems}
                     loading={loading}
+                    onEdit={startEditingCandidateInvoiceSchedule}
 	                    onDelete={(schedule) => void deleteCandidateInvoiceSchedule(schedule)}
                   />
                   <div className="horizontalActions">
                     {selectedHiredCandidate?.status === 'hired' && (
-                      <button className="secondary" type="button" onClick={() => setActiveForm('candidate-invoice-item')}>
+                      <button className="secondary" type="button" onClick={() => { setEditingCandidateInvoiceSchedule(null); setCandidateScheduleFrequency('monthly'); setActiveForm('candidate-invoice-item'); }}>
                         <Banknote size={18} />
                         <span>Add Invoice Item</span>
                       </button>
@@ -3288,6 +3328,22 @@ function App() {
 	                    <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
                     </>
 	                  )}
+                  {activeForm === 'edit-candidate-invoice-item' && editingCandidateInvoiceSchedule && editingCandidateInvoiceSchedule.contract_id === selectedHiredCandidateContract.id && (
+                    <>
+                      <PanelTitle icon={<Pencil size={18} />} title="Edit Candidate Invoice Item" />
+                      <p className="contextLine">{selectedHiredCandidate?.full_name} · {editingCandidateInvoiceSchedule.item_description}</p>
+                      <CandidateInvoiceItemForm
+                        defaultCurrency={selectedHiredCandidateContract.currency ?? 'USD'}
+                        frequency={candidateScheduleFrequency}
+                        initialSchedule={editingCandidateInvoiceSchedule}
+                        loading={loading}
+                        onFrequencyChange={setCandidateScheduleFrequency}
+                        onSubmit={(event) => void submitCandidateInvoiceScheduleUpdate(event)}
+                        submitLabel="Update Invoice Item"
+                      />
+                      <button className="secondary" type="button" onClick={() => { setEditingCandidateInvoiceSchedule(null); setActiveForm(null); }} disabled={loading}>Close</button>
+                    </>
+                  )}
 	                  {(canOperate || canHrManage) && activeForm === 'historical-candidate-invoice' && (
 	                    <form className="grid four" onSubmit={(event) => void submitHistoricalCandidateInvoice(event)}>
                       <Field label="Past invoice description" name="item_description" required />
@@ -4950,30 +5006,34 @@ function Pager({
 function CandidateInvoiceItemForm({
   defaultCurrency,
   frequency,
+  initialSchedule,
   loading,
   onFrequencyChange,
   onSubmit,
+  submitLabel = 'Add Invoice Item',
 }: {
   defaultCurrency: string;
   frequency: string;
+  initialSchedule?: CandidateInvoiceSchedule | null;
   loading: boolean;
   onFrequencyChange: (frequency: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  submitLabel?: string;
 }) {
   return (
-    <form className="grid four" onSubmit={onSubmit}>
+    <form className="grid four" key={initialSchedule?.id ?? 'new-candidate-invoice-item'} onSubmit={onSubmit}>
       <p className="contextLine wideField">Invoice: candidate gets a single-use upload reminder. Reimbursement: same approval and payment flow as an invoice. Auto-reimbursement: no candidate upload reminder; the system creates the fixed reimbursement and sends it for CAE approval.</p>
-      <Field label="Description" name="item_description" required />
+      <Field label="Description" name="item_description" defaultValue={initialSchedule?.item_description ?? ''} required />
       <label className="field">
         <span>Invoice type</span>
-        <select name="invoice_type" defaultValue="invoice">
+        <select name="invoice_type" defaultValue={initialSchedule?.invoice_type ?? 'invoice'}>
           <option value="invoice">Invoice</option>
           <option value="reimbursement">Reimbursement</option>
           <option value="auto_reimbursement">Auto-reimbursement</option>
         </select>
       </label>
-      <Field label="Amount" name="amount" type="number" step="0.01" required />
-      <Field label="Currency" name="currency" defaultValue={defaultCurrency} required />
+      <Field label="Amount" name="amount" type="number" step="0.01" defaultValue={initialSchedule?.amount ?? ''} required />
+      <Field label="Currency" name="currency" defaultValue={initialSchedule?.currency ?? defaultCurrency} required />
       <label className="field">
         <span>Frequency</span>
         <select name="frequency" value={frequency} onChange={(event) => onFrequencyChange(event.target.value)}>
@@ -4985,17 +5045,17 @@ function CandidateInvoiceItemForm({
         </select>
       </label>
       {frequency === 'single' ? (
-        <Field label="Invoice date" name="invoice_date" type="date" defaultValue={endOfCurrentMonth()} required />
+        <Field label="Invoice date" name="invoice_date" type="date" defaultValue={initialSchedule?.invoice_date ?? endOfCurrentMonth()} required />
       ) : (
         <>
-          <Field label="Invoice start" name="invoice_start_date" type="date" defaultValue={endOfCurrentMonth()} required />
-          <Field label="Invoice end" name="invoice_end_date" type="date" />
+          <Field label="Invoice start" name="invoice_start_date" type="date" defaultValue={initialSchedule?.invoice_start_date ?? endOfCurrentMonth()} required />
+          <Field label="Invoice end" name="invoice_end_date" type="date" defaultValue={initialSchedule?.invoice_end_date ?? ''} />
         </>
       )}
-      <input type="hidden" name="status" value="active" />
+      <input type="hidden" name="status" value={initialSchedule?.status ?? 'active'} />
       <button className="primary" disabled={loading}>
-        <FilePlus2 size={18} />
-        <span>Add Invoice Item</span>
+        {initialSchedule ? <Pencil size={18} /> : <FilePlus2 size={18} />}
+        <span>{submitLabel}</span>
       </button>
     </form>
   );
@@ -5005,15 +5065,19 @@ function CandidateInvoiceScheduleList({
   schedules,
   title,
   emptyMessage,
+  canEdit = false,
   canDelete = false,
   loading = false,
+  onEdit,
   onDelete,
 }: {
   schedules: CandidateInvoiceSchedule[];
   title?: string;
   emptyMessage?: string;
+  canEdit?: boolean;
   canDelete?: boolean;
   loading?: boolean;
+  onEdit?: (schedule: CandidateInvoiceSchedule) => void;
   onDelete?: (schedule: CandidateInvoiceSchedule) => void;
 }) {
   if (schedules.length === 0) {
@@ -5029,12 +5093,20 @@ function CandidateInvoiceScheduleList({
             <strong>{schedule.item_description}</strong>
             <span>{candidateInvoiceScheduleSummary(schedule)}</span>
           </div>
-          {canDelete && onDelete && (
-            <button className="secondary danger" type="button" onClick={() => onDelete(schedule)} disabled={loading}>
-              <Trash2 size={16} />
-              <span>Delete</span>
-            </button>
-          )}
+          <div className="scheduleActions">
+            {canEdit && onEdit && (
+              <button className="secondary" type="button" onClick={() => onEdit(schedule)} disabled={loading}>
+                <Pencil size={16} />
+                <span>Edit</span>
+              </button>
+            )}
+            {canDelete && onDelete && (
+              <button className="secondary danger" type="button" onClick={() => onDelete(schedule)} disabled={loading}>
+                <Trash2 size={16} />
+                <span>Delete</span>
+              </button>
+            )}
+          </div>
         </div>
       ))}
     </div>

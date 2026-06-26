@@ -527,6 +527,20 @@ class ClientInvoiceRead(BaseModel):
     sent_at: datetime | None
 
 
+class ClientInvoiceLineItemRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    invoice_id: int
+    schedule_id: int
+    project_id: int
+    project_code: str | None = None
+    project_title: str | None = None
+    description: str
+    amount: Decimal
+    currency: str
+
+
 class ProjectRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -579,6 +593,7 @@ class InvoiceDetailRead(ClientInvoiceRead):
     client_contact_email: str
     client_account_executive_email: str | None
     payments: list[PaymentRead] = Field(default_factory=list)
+    line_items: list[ClientInvoiceLineItemRead] = Field(default_factory=list)
     paid_total: Decimal
     cancelled_amount: Decimal
     balance_due: Decimal

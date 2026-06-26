@@ -1,3 +1,4 @@
+import base64
 from datetime import date, timedelta
 import os
 
@@ -270,6 +271,67 @@ def test_role_separated_permissions_and_admin_user_provisioning():
         )
         assert admin_user_response.status_code == 200, admin_user_response.text
         assert admin_user_response.json()["roles"] == ["finance_manager", "operations_manager"]
+
+
+def test_finance_send_attaches_client_invoice_pdf_with_standard_filename(monkeypatch):
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    captured_emails = []
+
+    def fake_sendgrid(**kwargs):
+        captured_emails.append(kwargs)
+        return "sent", "message-123"
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        payload = {
+            **PROJECT_PAYLOAD,
+            "client_account_executive_id": cae_user["id"],
+            "client_company_name": "Acme Consolidated",
+            "start_date": str(date.today()),
+        }
+        project_response = client.post("/projects", headers=OPS_HEADERS, json=payload)
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Monthly billing",
+                "item_description": "Monthly service fee",
+                "amount": "5000.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(date.today()),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+        invoice_id = client.get("/client-invoices", headers=FINANCE_HEADERS).json()[0]["id"]
+        assert client.post(
+            f"/client-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"approver_name": "Client Account Executive"},
+        ).status_code == 200
+        assert client.post(
+            f"/client-invoices/{invoice_id}/finance-approval",
+            headers=FINANCE_HEADERS,
+            json={"approver_name": "Finance Manager"},
+        ).status_code == 200
+
+        monkeypatch.setattr(app_main, "send_sendgrid_email", fake_sendgrid)
+        send_response = client.post(
+            f"/client-invoices/{invoice_id}/send",
+            headers=FINANCE_HEADERS,
+            json={"sender_name": "Finance Manager", "recipient_email": "anita@example.com"},
+        )
+        assert send_response.status_code == 200, send_response.text
+
+        assert len(captured_emails) == 1
+        attachment = captured_emails[0]["attachments"][0]
+        assert attachment["filename"] == f"FlexGCC Invoice -- Acme Consolidated {date.today().isoformat()}.pdf"
+        assert attachment["type"] == "application/pdf"
+        assert base64.b64decode(attachment["content"]).startswith(b"%PDF")
 
 
 def test_operations_can_inactivate_projects_and_admin_can_reactivate_them():
@@ -723,6 +785,77 @@ def test_due_or_past_invoice_schedule_generates_approval_email_immediately():
             assert notification.cc_email == "finance@example.com"
 
 
+def test_due_client_schedules_consolidate_by_client_and_attach_internal_word_invoice(monkeypatch):
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    captured_emails = []
+
+    def fake_sendgrid(**kwargs):
+        captured_emails.append(kwargs)
+        return "sent", "message-123"
+
+    monkeypatch.setattr(app_main, "send_sendgrid_email", fake_sendgrid)
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        invoice_date = date.today() + timedelta(days=15)
+        common_payload = {
+            **PROJECT_PAYLOAD,
+            "client_account_executive_id": cae_user["id"],
+            "client_company_name": "Acme Consolidated",
+            "client_contact_email": "billing@example.com",
+            "start_date": str(date.today()),
+        }
+        first_project_response = client.post("/projects", headers=OPS_HEADERS, json={**common_payload, "sow_title": "First SOW"})
+        second_project_response = client.post("/projects", headers=OPS_HEADERS, json={**common_payload, "sow_title": "Second SOW"})
+        assert first_project_response.status_code == 201, first_project_response.text
+        assert second_project_response.status_code == 201, second_project_response.text
+        first_project = first_project_response.json()
+        second_project = second_project_response.json()
+
+        for project, description, amount in (
+            (first_project, "First monthly service", "5000.00"),
+            (second_project, "Second monthly service", "3700.00"),
+        ):
+            schedule_response = client.post(
+                f"/projects/{project['id']}/invoice-schedules",
+                headers=OPS_HEADERS,
+                json={
+                    "label": "Monthly billing",
+                    "item_description": description,
+                    "amount": amount,
+                    "currency": "USD",
+                    "frequency": "single",
+                    "first_invoice_date": str(invoice_date),
+                },
+            )
+            assert schedule_response.status_code == 201, schedule_response.text
+
+        assert client.get("/client-invoices", headers=FINANCE_HEADERS).json() == []
+
+        with SessionLocal() as db:
+            generated = app_main.create_due_invoices(db, app_main.client_invoice_approval_trigger_date(invoice_date))
+            assert len(generated) == 1
+            db.commit()
+
+        invoices_response = client.get("/client-invoices", headers=FINANCE_HEADERS)
+        assert invoices_response.status_code == 200, invoices_response.text
+        invoices = invoices_response.json()
+        assert len(invoices) == 1
+        invoice = invoices[0]
+        assert invoice["amount"] == "8700.00"
+        assert invoice["item_description"] == "Consolidated client invoice"
+        assert [item["description"] for item in invoice["line_items"]] == ["First monthly service", "Second monthly service"]
+        assert [item["amount"] for item in invoice["line_items"]] == ["5000.00", "3700.00"]
+
+        assert len(captured_emails) == 1
+        attachment = captured_emails[0]["attachments"][0]
+        assert attachment["filename"] == f"FlexGCC Invoice -- Acme Consolidated {invoice_date}.docx"
+        assert attachment["type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        assert base64.b64decode(attachment["content"]).startswith(b"PK")
+
+
 def test_invoice_visibility_filters_sorting_and_pagination_by_role():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
@@ -733,8 +866,8 @@ def test_invoice_visibility_filters_sorting_and_pagination_by_role():
         provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
         yesterday = date.today() - timedelta(days=1)
         today_value = date.today()
-        future_one = today_value + timedelta(days=10)
-        future_two = today_value + timedelta(days=20)
+        future_one = today_value + timedelta(days=15)
+        future_two = today_value + timedelta(days=25)
 
         payload_one = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_one["id"], "client_company_name": "Acme One", "start_date": str(yesterday)}
         payload_two = {**PROJECT_PAYLOAD, "client_account_executive_id": cae_two["id"], "client_company_name": "Acme Two", "start_date": str(today_value)}

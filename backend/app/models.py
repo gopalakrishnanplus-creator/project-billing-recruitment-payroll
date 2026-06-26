@@ -198,6 +198,7 @@ class ClientInvoiceSchedule(Base):
 
     project: Mapped[ProjectSOW] = relationship(back_populates="invoice_schedules")
     invoices: Mapped[list["ClientInvoice"]] = relationship(back_populates="schedule")
+    line_items: Mapped[list["ClientInvoiceLineItem"]] = relationship(back_populates="schedule")
 
 
 class ClientInvoice(Base):
@@ -221,8 +222,26 @@ class ClientInvoice(Base):
 
     project: Mapped[ProjectSOW] = relationship(back_populates="client_invoices")
     schedule: Mapped[ClientInvoiceSchedule] = relationship(back_populates="invoices")
+    line_items: Mapped[list["ClientInvoiceLineItem"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
     approvals: Mapped[list["ClientInvoiceApproval"]] = relationship(back_populates="invoice")
     payments: Mapped[list["ClientPayment"]] = relationship(back_populates="invoice")
+
+
+class ClientInvoiceLineItem(Base):
+    __tablename__ = "client_invoice_line_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("client_invoices.id"), nullable=False)
+    schedule_id: Mapped[int] = mapped_column(ForeignKey("client_invoice_schedules.id"), nullable=False)
+    project_id: Mapped[int] = mapped_column(ForeignKey("project_sows.id"), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(12), default="USD")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    invoice: Mapped[ClientInvoice] = relationship(back_populates="line_items")
+    schedule: Mapped[ClientInvoiceSchedule] = relationship(back_populates="line_items")
+    project: Mapped[ProjectSOW] = relationship()
 
 
 class ClientInvoiceApproval(Base):

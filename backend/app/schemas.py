@@ -207,6 +207,7 @@ class InvoiceScheduleUpdate(InvoiceScheduleCreate):
 
 class ApprovalCreate(BaseModel):
     approver_name: str = Field(min_length=2, max_length=160)
+    decision: str = Field(default="approved", pattern="^(approved|clarification_requested|resubmitted)$")
     notes: str | None = None
 
 
@@ -524,6 +525,8 @@ class ClientInvoiceRead(BaseModel):
     status: str
     invoice_document_id: int | None = None
     invoice_document_name: str | None = None
+    internal_invoice_document_id: int | None = None
+    internal_invoice_document_name: str | None = None
     sent_at: datetime | None
 
 

@@ -428,6 +428,11 @@ dd {
   background: #fff0c2;
 }
 
+.status.clarification_requested {
+  color: #7a271a;
+  background: #fde7df;
+}
+
 .status.paid {
   background: #dff6ea;
   color: #124838;

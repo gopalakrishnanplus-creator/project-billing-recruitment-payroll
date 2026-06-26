@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import base64
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from html import escape
 from io import BytesIO
 from os import getenv
@@ -256,6 +256,7 @@ def ensure_workflow_columns() -> None:
             existing = {column["name"] for column in inspector.get_columns("client_invoices")}
             add_column(conn, "client_invoices", existing, "item_description", "TEXT")
             add_column(conn, "client_invoices", existing, "invoice_document_id", "INTEGER")
+            add_column(conn, "client_invoices", existing, "internal_invoice_document_id", "INTEGER")
         if "client_invoice_line_items" not in tables and "client_invoices" in tables:
             id_definition = "SERIAL PRIMARY KEY" if engine.dialect.name == "postgresql" else "INTEGER PRIMARY KEY"
             conn.execute(
@@ -662,6 +663,27 @@ def parse_model(model_class, data: dict[str, object]):
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
 
+def parse_optional_iso_date(value: object, field_name: str) -> date | None:
+    if value in (None, ""):
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{field_name} must be a valid YYYY-MM-DD date") from exc
+
+
+def parse_optional_money(value: object, field_name: str) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        amount = Decimal(str(value)).quantize(MONEY_QUANT)
+    except InvalidOperation as exc:
+        raise HTTPException(status_code=422, detail=f"{field_name} must be a valid amount") from exc
+    if amount <= 0:
+        raise HTTPException(status_code=422, detail=f"{field_name} must be greater than zero")
+    return amount
+
+
 async def request_payload_and_files(request: Request) -> tuple[dict[str, object], dict[str, UploadFile]]:
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
@@ -890,6 +912,8 @@ def serialize_invoice(invoice: ClientInvoice, db: Session) -> InvoiceDetailRead:
         status=invoice.status,
         invoice_document_id=invoice.invoice_document_id,
         invoice_document_name=document_name(db, invoice.invoice_document_id),
+        internal_invoice_document_id=invoice.internal_invoice_document_id,
+        internal_invoice_document_name=document_name(db, invoice.internal_invoice_document_id),
         sent_at=invoice.sent_at,
         project_code=invoice.project.project_code,
         project_title=invoice.project.title,
@@ -1057,11 +1081,7 @@ def document_name(db: Session, document_id: int | None) -> str | None:
 
 
 def document_download_response(document: UploadedDocument, *, inline: bool = False) -> Response:
-    content = document.content_bytes
-    if content is None and document.storage_uri:
-        path = Path(document.storage_uri)
-        if path.exists():
-            content = path.read_bytes()
+    content = document_content(document)
     if content is None:
         raise HTTPException(status_code=404, detail="Document content not found")
     filename = quote(document.original_filename)
@@ -1070,6 +1090,20 @@ def document_download_response(document: UploadedDocument, *, inline: bool = Fal
         media_type=document.content_type or "application/octet-stream",
         headers={"Content-Disposition": f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{filename}"},
     )
+
+
+def document_content(document: UploadedDocument) -> bytes | None:
+    content = document.content_bytes
+    if content is None and document.storage_uri:
+        path = Path(document.storage_uri)
+        if path.exists():
+            content = path.read_bytes()
+    return content
+
+
+def is_pdf_document(document: UploadedDocument) -> bool:
+    filename = document.original_filename.lower()
+    return (document.content_type or "").lower() == "application/pdf" or filename.endswith(".pdf")
 
 
 def ensure_project_file_document(document: UploadedDocument, db: Session) -> ProjectSOW:
@@ -2330,7 +2364,7 @@ def reconcile_pending_candidate_invoice_reminders(db: Session, contract: Candida
 
 def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
     approval_link = f"{API_BASE_URL}/auth/login?{urlencode({'approval_invoice_id': invoice.id})}"
-    subject = f"Invoice {invoice.invoice_number} ready for approval"
+    subject = f"Approval needed: {invoice_attachment_basename(invoice)}"
     line_summary = "; ".join(f"{item['description']}: {format_invoice_money(str(item['currency']), Decimal(item['amount']))}" for item in invoice_document_line_items(invoice))
     text = "\n".join(
         [
@@ -2343,7 +2377,7 @@ def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
             f"Issue date: {invoice.issue_date}",
             f"Due date: {invoice.due_date}",
             "",
-            f"Log in to review and approve: {approval_link}",
+            f"Log in to review and approve or send back for clarifications/changes: {approval_link}",
         ]
     )
     html = f"""
@@ -2356,7 +2390,7 @@ def invoice_template(invoice: ClientInvoice) -> tuple[str, str, str]:
       <tr><td><strong>Issue date</strong></td><td>{escape(str(invoice.issue_date))}</td></tr>
       <tr><td><strong>Due date</strong></td><td>{escape(str(invoice.due_date))}</td></tr>
     </table>
-    <p><a href="{escape(approval_link)}">Log in to review and approve this invoice</a></p>
+    <p><a href="{escape(approval_link)}">Log in to review and approve or send back for clarifications/changes</a></p>
     """
     return subject, text, html
 
@@ -2635,6 +2669,50 @@ def invoice_docx_bytes(invoice: ClientInvoice) -> bytes:
     return buffer.getvalue()
 
 
+def document_sendgrid_attachment(document: UploadedDocument) -> dict[str, str]:
+    content = document_content(document)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Document content not found")
+    return {
+        "content": base64.b64encode(content).decode("ascii"),
+        "filename": document.original_filename,
+        "type": document.content_type or "application/octet-stream",
+        "disposition": "attachment",
+    }
+
+
+def client_invoice_internal_attachment(db: Session, invoice: ClientInvoice) -> dict[str, str]:
+    if invoice.internal_invoice_document_id:
+        document = db.get(UploadedDocument, invoice.internal_invoice_document_id)
+        if document is not None:
+            return document_sendgrid_attachment(document)
+    docx = invoice_docx_bytes(invoice)
+    attachment_name = invoice_attachment_basename(invoice)
+    return {
+        "content": base64.b64encode(docx).decode("ascii"),
+        "filename": f"{attachment_name}.docx",
+        "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "disposition": "attachment",
+    }
+
+
+def client_invoice_pdf_attachment(db: Session, invoice: ClientInvoice) -> dict[str, str]:
+    for document_id in (invoice.invoice_document_id, invoice.internal_invoice_document_id):
+        if not document_id:
+            continue
+        document = db.get(UploadedDocument, document_id)
+        if document is not None and is_pdf_document(document):
+            return document_sendgrid_attachment(document)
+    pdf = invoice_pdf_bytes(invoice)
+    filename = invoice_attachment_basename(invoice)
+    return {
+        "content": base64.b64encode(pdf).decode("ascii"),
+        "filename": f"{filename}.pdf",
+        "type": "application/pdf",
+        "disposition": "attachment",
+    }
+
+
 def invoice_pdf_bytes(invoice: ClientInvoice) -> bytes:
     net_due = net_due_amount(invoice)
     buffer = BytesIO()
@@ -2814,7 +2892,7 @@ def queue_invoice_approval_email(db: Session, invoice: ClientInvoice) -> None:
                 project_id=invoice.project_id,
                 invoice_id=invoice.id,
                 recipient_email="",
-                subject=f"Invoice {invoice.invoice_number} ready for approval",
+                subject=f"Approval needed: {invoice_attachment_basename(invoice)}",
                 body="No Client Account Executive is assigned to this SOW.",
                 status="failed",
             )
@@ -2822,22 +2900,13 @@ def queue_invoice_approval_email(db: Session, invoice: ClientInvoice) -> None:
         return
     cc_emails = finance_manager_emails(db)
     subject, text, html = invoice_template(invoice)
-    docx = invoice_docx_bytes(invoice)
-    attachment_name = invoice_attachment_basename(invoice)
     status, detail = send_sendgrid_email(
         to_email=recipient,
         cc_emails=cc_emails,
         subject=subject,
         text=text,
         html=html,
-        attachments=[
-            {
-                "content": base64.b64encode(docx).decode("ascii"),
-                "filename": f"{attachment_name}.docx",
-                "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "disposition": "attachment",
-            }
-        ],
+        attachments=[client_invoice_internal_attachment(db, invoice)],
     )
     body = html if detail is None else f"{html}\n\nSendGrid detail: {detail}"
     db.add(
@@ -2854,7 +2923,7 @@ def queue_invoice_approval_email(db: Session, invoice: ClientInvoice) -> None:
 
 
 def client_invoice_finance_review_template(invoice: ClientInvoice, approver_name: str, notes: str | None) -> tuple[str, str, str]:
-    review_link = f"{FRONTEND_URL}/?view=invoices"
+    review_link = f"{FRONTEND_URL}/?{urlencode({'view': 'invoices', 'invoice_id': invoice.id})}"
     subject = f"Client invoice {invoice.invoice_number} approved by CAE"
     text = "\n".join(
         [
@@ -2907,22 +2976,90 @@ def queue_client_invoice_finance_review_email(db: Session, invoice: ClientInvoic
         return
     for recipient in recipients:
         filtered_cc = [email for email in cc_emails if email and email != recipient]
-        docx = invoice_docx_bytes(invoice)
-        attachment_name = invoice_attachment_basename(invoice)
         status, detail = send_sendgrid_email(
             to_email=recipient,
             cc_emails=filtered_cc,
             subject=subject,
             text=text_body,
             html=html,
-            attachments=[
-                {
-                    "content": base64.b64encode(docx).decode("ascii"),
-                    "filename": f"{attachment_name}.docx",
-                    "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    "disposition": "attachment",
-                }
-            ],
+            attachments=[client_invoice_internal_attachment(db, invoice)],
+        )
+        db.add(
+            EmailNotification(
+                project_id=invoice.project_id,
+                invoice_id=invoice.id,
+                recipient_email=recipient,
+                cc_email=",".join(filtered_cc) if filtered_cc else None,
+                subject=subject,
+                body=html if detail is None else f"{html}\n\nSendGrid detail: {detail}",
+                status=status,
+            )
+        )
+
+
+def client_invoice_change_request_template(invoice: ClientInvoice, approver_name: str, notes: str) -> tuple[str, str, str]:
+    review_link = f"{FRONTEND_URL}/?{urlencode({'view': 'invoices', 'invoice_id': invoice.id})}"
+    subject = f"Changes requested: {invoice_attachment_basename(invoice)}"
+    text = "\n".join(
+        [
+            f"The Client Account Executive has requested clarifications/changes for invoice {invoice.invoice_number}.",
+            "",
+            f"Client: {invoice.project.company.name}",
+            f"SOW: {invoice.project.title} ({invoice.project.project_code})",
+            f"Amount: {invoice.currency} {invoice.amount}",
+            f"Invoice date: {invoice.issue_date}",
+            f"Due date: {invoice.due_date}",
+            f"Requested by: {approver_name}",
+            "",
+            "Comments / instructions:",
+            notes,
+            "",
+            f"Log in to update the invoice record, replace the invoice file, and send back for approval: {review_link}",
+        ]
+    )
+    html = f"""
+    <h2>Client invoice changes requested</h2>
+    <p>The Client Account Executive has requested clarifications/changes for invoice {escape(invoice.invoice_number)}.</p>
+    <table cellpadding="6" cellspacing="0" border="0">
+      <tr><td><strong>Client</strong></td><td>{escape(invoice.project.company.name)}</td></tr>
+      <tr><td><strong>SOW</strong></td><td>{escape(invoice.project.title)} ({escape(invoice.project.project_code)})</td></tr>
+      <tr><td><strong>Amount</strong></td><td>{escape(invoice.currency)} {escape(str(invoice.amount))}</td></tr>
+      <tr><td><strong>Invoice date</strong></td><td>{escape(str(invoice.issue_date))}</td></tr>
+      <tr><td><strong>Due date</strong></td><td>{escape(str(invoice.due_date))}</td></tr>
+      <tr><td><strong>Requested by</strong></td><td>{escape(approver_name)}</td></tr>
+      <tr><td><strong>Comments / instructions</strong></td><td>{escape(notes)}</td></tr>
+    </table>
+    <p><a href="{escape(review_link)}">Log in to update the invoice and send it back for approval</a></p>
+    """
+    return subject, text, html
+
+
+def queue_client_invoice_change_request_email(db: Session, invoice: ClientInvoice, approver_name: str, notes: str) -> None:
+    recipients = finance_manager_emails(db)
+    cc_emails = [invoice.project.client_account_executive.email] if invoice.project.client_account_executive else []
+    subject, text_body, html = client_invoice_change_request_template(invoice, approver_name, notes)
+    if not recipients:
+        db.add(
+            EmailNotification(
+                project_id=invoice.project_id,
+                invoice_id=invoice.id,
+                recipient_email="",
+                cc_email=",".join(cc_emails) or None,
+                subject=subject,
+                body="No active Finance Manager user is assigned in the system.",
+                status="failed",
+            )
+        )
+        return
+    for recipient in recipients:
+        filtered_cc = [email for email in cc_emails if email and email != recipient]
+        status, detail = send_sendgrid_email(
+            to_email=recipient,
+            cc_emails=filtered_cc,
+            subject=subject,
+            text=text_body,
+            html=html,
+            attachments=[client_invoice_internal_attachment(db, invoice)],
         )
         db.add(
             EmailNotification(
@@ -5197,6 +5334,124 @@ def download_invoice(invoice_id: int, request: Request, db: Session = Depends(ge
     )
 
 
+@app.get("/client-invoices/{invoice_id}/download-internal")
+def download_internal_invoice(invoice_id: int, _: AuthContext = Depends(require_role(UserRole.finance_manager.value)), db: Session = Depends(get_db)) -> Response:
+    invoice = db.scalar(
+        select(ClientInvoice)
+        .where(ClientInvoice.id == invoice_id)
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoice.schedule),
+            selectinload(ClientInvoice.payments),
+            selectinload(ClientInvoice.line_items),
+        )
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.internal_invoice_document_id:
+        document = db.get(UploadedDocument, invoice.internal_invoice_document_id)
+        if document is not None:
+            return document_download_response(document)
+    filename = invoice_attachment_basename(invoice)
+    return Response(
+        content=invoice_docx_bytes(invoice),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.docx"'},
+    )
+
+
+@app.post("/client-invoices/{invoice_id}/replacement", response_model=InvoiceDetailRead)
+async def replace_client_invoice(
+    invoice_id: int,
+    request: Request,
+    context: AuthContext = Depends(require_role(UserRole.finance_manager.value)),
+    db: Session = Depends(get_db),
+) -> InvoiceDetailRead:
+    invoice = db.scalar(
+        select(ClientInvoice)
+        .where(ClientInvoice.id == invoice_id)
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoice.schedule),
+            selectinload(ClientInvoice.payments),
+            selectinload(ClientInvoice.line_items),
+        )
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.status in {
+        InvoiceStatus.sent_to_client.value,
+        InvoiceStatus.partially_paid.value,
+        InvoiceStatus.partially_paid_remainder_cancelled.value,
+        InvoiceStatus.paid.value,
+        InvoiceStatus.cancelled.value,
+    }:
+        raise HTTPException(status_code=400, detail=f"Invoice cannot be replaced after it has been sent, paid, or cancelled: {invoice.status}")
+    data, files = await request_payload_and_files(request)
+    amount = parse_optional_money(data.get("amount"), "Amount")
+    issue_date = parse_optional_iso_date(data.get("issue_date"), "Invoice date")
+    due_date = parse_optional_iso_date(data.get("due_date"), "Due date")
+    notes = str(data.get("notes") or "").strip() or None
+    internal_file = files.get("invoice_file") or files.get("internal_invoice_document")
+    pdf_file = files.get("client_invoice_pdf") or files.get("invoice_pdf")
+    if amount is None and issue_date is None and due_date is None and internal_file is None and pdf_file is None and notes is None:
+        raise HTTPException(status_code=400, detail="Upload a replacement file or enter an invoice amount/date change")
+
+    change_details: list[str] = []
+    if amount is not None and amount != invoice.amount:
+        change_details.append(f"amount {invoice.amount} -> {amount}")
+        invoice.amount = amount
+        if len(invoice.line_items) == 1:
+            invoice.line_items[0].amount = amount
+    if issue_date is not None and issue_date != invoice.issue_date:
+        change_details.append(f"invoice date {invoice.issue_date} -> {issue_date}")
+        invoice.issue_date = issue_date
+        if due_date is None:
+            due_date = issue_date + timedelta(days=7)
+    if due_date is not None and due_date != invoice.due_date:
+        change_details.append(f"due date {invoice.due_date} -> {due_date}")
+        invoice.due_date = due_date
+
+    internal_document = await save_uploaded_document(
+        db,
+        file=internal_file,
+        project_id=invoice.project_id,
+        document_type="client_invoice_internal_replacement",
+        uploaded_by_name=context.user.full_name,
+    )
+    if internal_document is not None:
+        invoice.internal_invoice_document_id = internal_document.id
+        change_details.append(f"internal invoice file replaced with {internal_document.original_filename}")
+        if is_pdf_document(internal_document):
+            invoice.invoice_document_id = internal_document.id
+            change_details.append("client PDF attachment updated from replacement PDF")
+    pdf_document = await save_uploaded_document(
+        db,
+        file=pdf_file,
+        project_id=invoice.project_id,
+        document_type="client_invoice_pdf_replacement",
+        uploaded_by_name=context.user.full_name,
+    )
+    if pdf_document is not None:
+        if not is_pdf_document(pdf_document):
+            raise HTTPException(status_code=400, detail="Client PDF replacement must be a PDF file")
+        invoice.invoice_document_id = pdf_document.id
+        change_details.append(f"client PDF attachment replaced with {pdf_document.original_filename}")
+
+    if invoice.status in {InvoiceStatus.approved_by_client_account.value, InvoiceStatus.approved_for_sending.value}:
+        invoice.status = InvoiceStatus.clarification_requested.value
+        change_details.append("status reset for CAE re-approval")
+
+    db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="finance_manager", approver_name=context.user.full_name, decision="revised", notes=notes or "; ".join(change_details)))
+    log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=context.user.full_name, action="client_invoice_replaced", details="; ".join(change_details) or notes)
+    db.commit()
+    return load_invoice_detail(invoice_id, db)
+
+
 @app.post("/client-invoices/{invoice_id}/client-account-approval", response_model=InvoiceDetailRead)
 def approve_client_account(invoice_id: int, payload: ApprovalCreate, request: Request, db: Session = Depends(get_db)) -> InvoiceDetailRead:
     invoice = db.scalar(
@@ -5215,10 +5470,50 @@ def approve_client_account(invoice_id: int, payload: ApprovalCreate, request: Re
     authorize_client_account_invoice_approval(invoice, context)
     if invoice.status not in {InvoiceStatus.due_for_client_approval.value, InvoiceStatus.draft.value}:
         raise HTTPException(status_code=400, detail=f"Invoice is not ready for client account approval: {invoice.status}")
-    invoice.status = InvoiceStatus.approved_by_client_account.value
-    db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="client_account_executive", approver_name=payload.approver_name, decision="approved", notes=payload.notes))
-    queue_client_invoice_finance_review_email(db, invoice, payload.approver_name, payload.notes)
-    log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.approver_name, action="client_account_approved_invoice")
+    if payload.decision == "clarification_requested":
+        notes = (payload.notes or "").strip()
+        if not notes:
+            raise HTTPException(status_code=400, detail="Comments/instructions are required when sending an invoice back for clarifications or changes")
+        invoice.status = InvoiceStatus.clarification_requested.value
+        db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="client_account_executive", approver_name=payload.approver_name, decision=payload.decision, notes=notes))
+        queue_client_invoice_change_request_email(db, invoice, payload.approver_name, notes)
+        log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.approver_name, action="client_account_requested_invoice_changes", details=notes)
+    else:
+        invoice.status = InvoiceStatus.approved_by_client_account.value
+        db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="client_account_executive", approver_name=payload.approver_name, decision="approved", notes=payload.notes))
+        queue_client_invoice_finance_review_email(db, invoice, payload.approver_name, payload.notes)
+        log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=payload.approver_name, action="client_account_approved_invoice")
+    db.commit()
+    return load_invoice_detail(invoice_id, db)
+
+
+@app.post("/client-invoices/{invoice_id}/resubmit-client-approval", response_model=InvoiceDetailRead)
+def resubmit_client_invoice_for_approval(
+    invoice_id: int,
+    payload: ApprovalCreate,
+    context: AuthContext = Depends(require_role(UserRole.finance_manager.value)),
+    db: Session = Depends(get_db),
+) -> InvoiceDetailRead:
+    invoice = db.scalar(
+        select(ClientInvoice)
+        .where(ClientInvoice.id == invoice_id)
+        .options(
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.company),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_contact),
+            selectinload(ClientInvoice.project).selectinload(ProjectSOW.client_account_executive),
+            selectinload(ClientInvoice.schedule),
+            selectinload(ClientInvoice.payments),
+            selectinload(ClientInvoice.line_items),
+        )
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.status != InvoiceStatus.clarification_requested.value:
+        raise HTTPException(status_code=400, detail=f"Invoice can be sent back for CAE approval only after clarifications/changes were requested: {invoice.status}")
+    invoice.status = InvoiceStatus.due_for_client_approval.value
+    db.add(ClientInvoiceApproval(invoice_id=invoice_id, approval_type="finance_manager", approver_name=payload.approver_name or context.user.full_name, decision="resubmitted", notes=payload.notes))
+    queue_invoice_approval_email(db, invoice)
+    log_event(db, project_id=invoice.project_id, invoice_id=invoice.id, actor_name=context.user.full_name, action="client_invoice_resubmitted_for_approval", details=payload.notes)
     db.commit()
     return load_invoice_detail(invoice_id, db)
 
@@ -5262,22 +5557,13 @@ def send_invoice(invoice_id: int, payload: SendInvoiceCreate, _: AuthContext = D
         cc_emails.append(str(payload.cc_email))
     cc_emails = sorted(set(email for email in cc_emails if email and email != recipient))
     subject, text, html = client_invoice_email_template(invoice)
-    pdf = invoice_pdf_bytes(invoice)
-    filename = invoice_attachment_basename(invoice)
     status, detail = send_sendgrid_email(
         to_email=recipient,
         cc_emails=cc_emails,
         subject=subject,
         text=text,
         html=html,
-        attachments=[
-            {
-                "content": base64.b64encode(pdf).decode("ascii"),
-                "filename": f"{filename}.pdf",
-                "type": "application/pdf",
-                "disposition": "attachment",
-            }
-        ],
+        attachments=[client_invoice_pdf_attachment(db, invoice)],
     )
     invoice.status = InvoiceStatus.sent_to_client.value
     invoice.sent_at = utcnow()

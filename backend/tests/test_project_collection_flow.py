@@ -144,7 +144,8 @@ def test_project_to_client_collection_flow():
             notification = db.query(EmailNotification).filter(EmailNotification.invoice_id == invoice_id).one()
             assert notification.recipient_email == "cae@example.com"
             assert notification.cc_email == "finance@example.com"
-            assert "Log in to review and approve this invoice" in notification.body
+            assert notification.subject == "Approval needed: FlexGCC Invoice -- Acme Operations 2026-04-15"
+            assert "Log in to review and approve or send back for clarifications/changes" in notification.body
             assert f"/auth/login?approval_invoice_id={invoice_id}" in notification.body
             cae = db.query(app_main.AppUser).filter(app_main.AppUser.email == "cae@example.com").one()
             approval_token = app_main.approval_token_for_user("client_invoice", invoice_id, cae)
@@ -332,6 +333,123 @@ def test_finance_send_attaches_client_invoice_pdf_with_standard_filename(monkeyp
         assert attachment["filename"] == f"FlexGCC Invoice -- Acme Consolidated {date.today().isoformat()}.pdf"
         assert attachment["type"] == "application/pdf"
         assert base64.b64decode(attachment["content"]).startswith(b"%PDF")
+
+
+def test_cae_can_send_client_invoice_back_and_finance_can_replace_resubmit_and_send_pdf(monkeypatch):
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    captured_emails = []
+
+    def fake_sendgrid(**kwargs):
+        captured_emails.append(kwargs)
+        return "sent", "message-123"
+
+    with TestClient(app) as client:
+        cae_user = provision_user(client, full_name="Client Account Executive", email="cae@example.com", roles=["client_account_executive"])
+        provision_user(client, full_name="Finance Manager", email="finance@example.com", roles=["finance_manager"])
+        project_response = client.post(
+            "/projects",
+            headers=OPS_HEADERS,
+            json={**PROJECT_PAYLOAD, "client_account_executive_id": cae_user["id"], "start_date": str(date.today())},
+        )
+        assert project_response.status_code == 201, project_response.text
+        project = project_response.json()
+        schedule_response = client.post(
+            f"/projects/{project['id']}/invoice-schedules",
+            headers=OPS_HEADERS,
+            json={
+                "label": "Monthly billing",
+                "item_description": "Original monthly service",
+                "amount": "4000.00",
+                "currency": "USD",
+                "frequency": "single",
+                "first_invoice_date": str(date.today()),
+            },
+        )
+        assert schedule_response.status_code == 201, schedule_response.text
+        invoice_id = client.get("/client-invoices", headers=FINANCE_HEADERS).json()[0]["id"]
+
+        missing_comment_response = client.post(
+            f"/client-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"approver_name": "Client Account Executive", "decision": "clarification_requested"},
+        )
+        assert missing_comment_response.status_code == 400
+
+        clarification_response = client.post(
+            f"/client-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"approver_name": "Client Account Executive", "decision": "clarification_requested", "notes": "Please correct amount and invoice date."},
+        )
+        assert clarification_response.status_code == 200, clarification_response.text
+        assert clarification_response.json()["status"] == "clarification_requested"
+        with SessionLocal() as db:
+            change_notification = (
+                db.query(EmailNotification)
+                .filter(EmailNotification.invoice_id == invoice_id, EmailNotification.recipient_email == "finance@example.com", EmailNotification.subject.like("Changes requested:%"))
+                .one()
+            )
+            assert "Please correct amount and invoice date." in change_notification.body
+            assert f"invoice_id={invoice_id}" in change_notification.body
+
+        generated_docx_response = client.get(f"/client-invoices/{invoice_id}/download-internal", headers=FINANCE_HEADERS)
+        assert generated_docx_response.status_code == 200, generated_docx_response.text
+        assert generated_docx_response.content.startswith(b"PK")
+
+        new_issue_date = date.today() + timedelta(days=1)
+        replacement_response = client.post(
+            f"/client-invoices/{invoice_id}/replacement",
+            headers=FINANCE_HEADERS,
+            data={"amount": "4250.00", "issue_date": str(new_issue_date), "notes": "Amount/date corrected."},
+            files={
+                "invoice_file": ("revised-invoice.docx", b"revised internal invoice", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                "client_invoice_pdf": ("revised-invoice.pdf", b"%PDF-revised invoice", "application/pdf"),
+            },
+        )
+        assert replacement_response.status_code == 200, replacement_response.text
+        replacement = replacement_response.json()
+        assert replacement["amount"] == "4250.00"
+        assert replacement["issue_date"] == str(new_issue_date)
+        assert replacement["due_date"] == str(new_issue_date + timedelta(days=7))
+        assert replacement["internal_invoice_document_name"] == "revised-invoice.docx"
+        assert replacement["invoice_document_name"] == "revised-invoice.pdf"
+
+        revised_docx_response = client.get(f"/client-invoices/{invoice_id}/download-internal", headers=FINANCE_HEADERS)
+        assert revised_docx_response.status_code == 200, revised_docx_response.text
+        assert revised_docx_response.content == b"revised internal invoice"
+
+        captured_emails.clear()
+        monkeypatch.setattr(app_main, "send_sendgrid_email", fake_sendgrid)
+        resubmit_response = client.post(
+            f"/client-invoices/{invoice_id}/resubmit-client-approval",
+            headers=FINANCE_HEADERS,
+            json={"approver_name": "Finance Manager", "decision": "resubmitted", "notes": "Revised invoice attached."},
+        )
+        assert resubmit_response.status_code == 200, resubmit_response.text
+        assert resubmit_response.json()["status"] == "due_for_client_approval"
+        assert captured_emails[0]["subject"] == f"Approval needed: FlexGCC Invoice -- Acme Operations {new_issue_date}"
+        assert captured_emails[0]["attachments"][0]["filename"] == "revised-invoice.docx"
+        assert base64.b64decode(captured_emails[0]["attachments"][0]["content"]) == b"revised internal invoice"
+
+        assert client.post(
+            f"/client-invoices/{invoice_id}/client-account-approval",
+            headers=CAE_HEADERS,
+            json={"approver_name": "Client Account Executive", "decision": "approved", "notes": "Revised version approved."},
+        ).status_code == 200
+        assert client.post(
+            f"/client-invoices/{invoice_id}/finance-approval",
+            headers=FINANCE_HEADERS,
+            json={"approver_name": "Finance Manager"},
+        ).status_code == 200
+        captured_emails.clear()
+        send_response = client.post(
+            f"/client-invoices/{invoice_id}/send",
+            headers=FINANCE_HEADERS,
+            json={"sender_name": "Finance Manager", "recipient_email": "anita@example.com"},
+        )
+        assert send_response.status_code == 200, send_response.text
+        assert captured_emails[0]["attachments"][0]["filename"] == "revised-invoice.pdf"
+        assert base64.b64decode(captured_emails[0]["attachments"][0]["content"]) == b"%PDF-revised invoice"
 
 
 def test_operations_can_inactivate_projects_and_admin_can_reactivate_them():
@@ -850,6 +968,7 @@ def test_due_client_schedules_consolidate_by_client_and_attach_internal_word_inv
         assert [item["amount"] for item in invoice["line_items"]] == ["5000.00", "3700.00"]
 
         assert len(captured_emails) == 1
+        assert captured_emails[0]["subject"] == f"Approval needed: FlexGCC Invoice -- Acme Consolidated {invoice_date}"
         attachment = captured_emails[0]["attachments"][0]
         assert attachment["filename"] == f"FlexGCC Invoice -- Acme Consolidated {invoice_date}.docx"
         assert attachment["type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

@@ -25,6 +25,7 @@ class UserRole(str, Enum):
 class InvoiceStatus(str, Enum):
     draft = "draft"
     due_for_client_approval = "due_for_client_approval"
+    clarification_requested = "clarification_requested"
     approved_by_client_account = "approved_by_client_account"
     approved_for_sending = "approved_for_sending"
     sent_to_client = "sent_to_client"
@@ -216,6 +217,7 @@ class ClientInvoice(Base):
     currency: Mapped[str] = mapped_column(String(12), default="USD")
     status: Mapped[str] = mapped_column(String(80), default=InvoiceStatus.due_for_client_approval.value)
     invoice_document_id: Mapped[int | None] = mapped_column(ForeignKey("uploaded_documents.id"))
+    internal_invoice_document_id: Mapped[int | None] = mapped_column(ForeignKey("uploaded_documents.id"))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

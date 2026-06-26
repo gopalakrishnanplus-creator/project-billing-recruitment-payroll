@@ -36,6 +36,7 @@ const ALL_ROLES = Object.keys(ROLE_LABELS);
 
 const INVOICE_STATUSES = [
   'due_for_client_approval',
+  'clarification_requested',
   'approved_by_client_account',
   'approved_for_sending',
   'sent_to_client',
@@ -243,6 +244,8 @@ type ClientInvoice = {
   status: string;
   invoice_document_id: number | null;
   invoice_document_name: string | null;
+  internal_invoice_document_id?: number | null;
+  internal_invoice_document_name?: string | null;
   sent_at?: string | null;
   project_code?: string;
   project_title?: string;
@@ -675,6 +678,7 @@ function App() {
   const leaveRequestId = urlParams.get('leave_request_id');
   const leaveRequestError = urlParams.get('leave_request_error');
   const requestedView = urlParams.get('view');
+  const requestedInvoiceId = Number(urlParams.get('invoice_id') ?? '');
   const requestedNeedId = Number(urlParams.get('need_id') ?? '');
   const requestedInterviewId = Number(urlParams.get('interview_id') ?? '');
   const [me, setMe] = useState<CurrentUser | null>(null);
@@ -697,7 +701,7 @@ function App() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [interviews, setInterviews] = useState<Interview[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
-  const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(Number.isFinite(requestedInvoiceId) && requestedInvoiceId > 0 ? requestedInvoiceId : null);
   const [selectedClientScheduleId, setSelectedClientScheduleId] = useState<number | null>(null);
   const [selectedCandidateInvoiceId, setSelectedCandidateInvoiceId] = useState<number | null>(null);
   const [selectedNeedId, setSelectedNeedId] = useState<number | null>(Number.isFinite(requestedNeedId) && requestedNeedId > 0 ? requestedNeedId : null);
@@ -1777,18 +1781,29 @@ function App() {
     });
   }
 
-  async function approvalInvoiceAction() {
+  async function approvalInvoiceAction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     if (!approvalInvoice) return;
+    const formElement = event.currentTarget;
+    const payload = formPayload(formElement);
     setLoading(true);
     setNotice(null);
     try {
       const invoice = await api<ClientInvoice>(`/client-invoices/${approvalInvoice.id}/client-account-approval`, {
         method: 'POST',
         headers: approvalToken ? { 'X-Approval-Token': approvalToken } : {},
-        body: JSON.stringify({ approver_name: me?.full_name ?? 'Client Account Executive' }),
+        body: JSON.stringify({
+          approver_name: me?.full_name ?? 'Client Account Executive',
+          decision: payload.decision ?? 'approved',
+          notes: payload.notes ?? null,
+        }),
       });
       setApprovalInvoice(invoice);
-      setNotice({ tone: 'ok', message: 'Invoice approved for finance review' });
+      const message = invoice.status === 'clarification_requested'
+        ? 'Invoice sent back to Finance for clarifications/changes'
+        : 'Invoice approved for finance review';
+      setNotice({ tone: 'ok', message });
+      formElement.reset();
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Approval failed' });
     } finally {
@@ -1907,6 +1922,30 @@ function App() {
 
   function downloadInvoice() {
     downloadClientInvoice(selectedInvoice?.id);
+  }
+
+  function downloadInternalClientInvoice(invoiceId: number | undefined) {
+    if (!invoiceId) return;
+    window.open(`${API_BASE}/client-invoices/${invoiceId}/download-internal`, '_blank', 'noopener,noreferrer');
+  }
+
+  function downloadInternalInvoice() {
+    downloadInternalClientInvoice(selectedInvoice?.id);
+  }
+
+  async function submitClientInvoiceReplacement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedInvoice) return;
+    const formElement = event.currentTarget;
+    await mutate(async () => {
+      const invoice = await api<ClientInvoice>(`/client-invoices/${selectedInvoice.id}/replacement`, {
+        method: 'POST',
+        body: new FormData(formElement),
+      });
+      setSelectedInvoiceId(invoice.id);
+      formElement.reset();
+      return 'Invoice replacement saved';
+    });
   }
 
   function downloadCandidateInvoice(invoiceId: number | undefined, token?: string | null) {
@@ -2218,7 +2257,7 @@ function App() {
         approvalToken={approvalToken}
         approvalError={approvalError}
         approvalInvoice={approvalInvoice}
-        onApprove={() => void approvalInvoiceAction()}
+        onSubmit={(event) => void approvalInvoiceAction(event)}
         onDownload={() => downloadClientInvoice(approvalInvoice?.id, approvalToken)}
       />
     );
@@ -3593,8 +3632,10 @@ function App() {
                   canClientApprove={canClientApprove}
                   canFinance={canFinance}
                   downloadInvoice={downloadInvoice}
+                  downloadInternalInvoice={downloadInternalInvoice}
                   invoiceAction={invoiceAction}
                   currentUserName={me.full_name}
+                  onReplaceInvoice={() => setActiveForm('client-invoice-replacement')}
                   onRecordPayment={() => setActiveForm('client-payment')}
                   onReversePayment={(payment) => void reverseClientPayment(payment)}
                   onDeleteTestInvoice={deleteSelectedClientInvoice}
@@ -3625,6 +3666,27 @@ function App() {
               <button className="primary" disabled={loading || !['sent_to_client', 'partially_paid'].includes(selectedInvoice.status)}>
                 <Banknote size={18} />
                 <span>Record Payment</span>
+              </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+            </form>
+          )}
+
+          {canFinance && selectedInvoice && activeForm === 'client-invoice-replacement' && (
+            <form className="panel" onSubmit={(event) => void submitClientInvoiceReplacement(event)}>
+              <PanelTitle icon={<Upload size={18} />} title="Replace / Update Client Invoice" />
+              <p className="contextLine">Download the Word invoice, edit it, then upload the revised file. If the amount or invoice date changed, update those fields here so the system record matches.</p>
+              <Field label="Revised invoice file (DOCX or PDF)" name="invoice_file" type="file" accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf" />
+              <Field label="Client PDF attachment (optional)" name="client_invoice_pdf" type="file" accept="application/pdf" />
+              <Field label="Invoice amount" name="amount" type="number" step="0.01" defaultValue={selectedInvoice.amount} />
+              <Field label="Invoice date" name="issue_date" type="date" defaultValue={selectedInvoice.issue_date} />
+              <Field label="Due date" name="due_date" type="date" defaultValue={selectedInvoice.due_date} />
+              <label className="field">
+                <span>Finance notes</span>
+                <textarea name="notes" rows={4} />
+              </label>
+              <button className="primary" disabled={loading}>
+                <Upload size={18} />
+                <span>Save Replacement</span>
               </button>
               <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
             </form>
@@ -4209,11 +4271,17 @@ function App() {
                     <Download size={18} />
                     <span>Download</span>
                   </button>
+                  {canFinance && (
+                    <button className="secondary" onClick={downloadInternalInvoice}>
+                      <Download size={18} />
+                      <span>Download Word Invoice</span>
+                    </button>
+                  )}
                   {canClientApprove && (
                     <button
                       className="secondary"
                       disabled={loading || selectedInvoice.status !== 'due_for_client_approval'}
-                      onClick={() => void invoiceAction('/client-account-approval', { approver_name: me.full_name ?? 'Client Account Executive' }, 'Client account executive approved invoice')}
+                      onClick={() => void invoiceAction('/client-account-approval', { approver_name: me.full_name ?? 'Client Account Executive', decision: 'approved' }, 'Client account executive approved invoice')}
                     >
                       <BadgeCheck size={18} />
                       <span>CAE Approve</span>
@@ -4236,6 +4304,22 @@ function App() {
                       >
                         <Send size={18} />
                         <span>Send</span>
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={loading || ['sent_to_client', 'partially_paid', 'paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedInvoice.status)}
+                        onClick={() => setActiveForm('client-invoice-replacement')}
+                      >
+                        <Upload size={18} />
+                        <span>Replace / Update</span>
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={loading || selectedInvoice.status !== 'clarification_requested'}
+                        onClick={() => void invoiceAction('/resubmit-client-approval', { approver_name: me.full_name ?? 'Finance Manager', decision: 'resubmitted' }, 'Invoice sent back to CAE for approval')}
+                      >
+                        <Send size={18} />
+                        <span>Send Back To CAE Approval</span>
                       </button>
                       <button
                         className="secondary"
@@ -4292,6 +4376,27 @@ function App() {
               <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
             </form>
           )}
+
+          {canFinance && selectedInvoice && activeForm === 'client-invoice-replacement' && (
+            <form className="panel" onSubmit={(event) => void submitClientInvoiceReplacement(event)}>
+              <PanelTitle icon={<Upload size={18} />} title="Replace / Update Client Invoice" />
+              <p className="contextLine">Download the Word invoice, edit it, then upload the revised file. If the amount or invoice date changed, update those fields here so the system record matches.</p>
+              <Field label="Revised invoice file (DOCX or PDF)" name="invoice_file" type="file" accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf" />
+              <Field label="Client PDF attachment (optional)" name="client_invoice_pdf" type="file" accept="application/pdf" />
+              <Field label="Invoice amount" name="amount" type="number" step="0.01" defaultValue={selectedInvoice.amount} />
+              <Field label="Invoice date" name="issue_date" type="date" defaultValue={selectedInvoice.issue_date} />
+              <Field label="Due date" name="due_date" type="date" defaultValue={selectedInvoice.due_date} />
+              <label className="field">
+                <span>Finance notes</span>
+                <textarea name="notes" rows={4} />
+              </label>
+              <button className="primary" disabled={loading}>
+                <Upload size={18} />
+                <span>Save Replacement</span>
+              </button>
+              <button className="secondary" type="button" onClick={() => setActiveForm(null)} disabled={loading}>Close</button>
+            </form>
+          )}
         </section>
       )}
     </main>
@@ -4326,7 +4431,7 @@ function ApprovalShell({
   approvalToken,
   approvalError,
   approvalInvoice,
-  onApprove,
+  onSubmit,
   onDownload,
 }: {
   loading: boolean;
@@ -4336,7 +4441,7 @@ function ApprovalShell({
   approvalToken?: string | null;
   approvalError?: string | null;
   approvalInvoice?: ClientInvoice | null;
-  onApprove?: () => void;
+  onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
   onDownload?: () => void;
 }) {
   if (approvalError === 'not_authorized') {
@@ -4385,7 +4490,7 @@ function ApprovalShell({
         <h2>Client Invoice Approval</h2>
         {!approvalInvoice && <p>{loading ? 'Loading invoice...' : 'This invoice approval link is not available for this account.'}</p>}
         {approvalInvoice && (
-          <>
+          <form className="stackedForm" onSubmit={onSubmit}>
             <dl className="facts">
               <div><dt>Invoice</dt><dd>{approvalInvoice.invoice_number}</dd></div>
               <div><dt>Status</dt><dd><Status value={approvalInvoice.status} /></dd></div>
@@ -4402,12 +4507,29 @@ function ApprovalShell({
                 <Download size={18} />
                 <span>Download Invoice PDF</span>
               </button>
-              <button className="primary" disabled={loading || approvalInvoice.status !== 'due_for_client_approval'} onClick={onApprove}>
-                <BadgeCheck size={18} />
-                <span>Approve Invoice</span>
-              </button>
             </div>
-          </>
+            {approvalInvoice.status === 'due_for_client_approval' ? (
+              <>
+                <label className="field">
+                  <span>Decision</span>
+                  <select name="decision" defaultValue="approved">
+                    <option value="approved">Approve Invoice</option>
+                    <option value="clarification_requested">Send back for clarifications/changes</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Comments / instructions</span>
+                  <textarea name="notes" rows={4} />
+                </label>
+                <button className="primary" disabled={loading}>
+                  <BadgeCheck size={18} />
+                  <span>Submit Decision</span>
+                </button>
+              </>
+            ) : (
+              <p className="empty">This invoice has already been acted on.</p>
+            )}
+          </form>
         )}
       </section>
     </main>
@@ -4935,8 +5057,10 @@ function InvoiceDetail({
   canClientApprove,
   canFinance,
   downloadInvoice,
+  downloadInternalInvoice,
   invoiceAction,
   currentUserName,
+  onReplaceInvoice,
   onRecordPayment,
   onReversePayment,
   onDeleteTestInvoice,
@@ -4946,8 +5070,10 @@ function InvoiceDetail({
   canClientApprove: boolean;
   canFinance: boolean;
   downloadInvoice: () => void;
+  downloadInternalInvoice: () => void;
   invoiceAction: (path: string, body: Record<string, unknown>, message: string) => Promise<void>;
   currentUserName: string | null;
+  onReplaceInvoice?: () => void;
   onRecordPayment?: () => void;
   onReversePayment?: (payment: ClientPayment) => void;
   onDeleteTestInvoice?: () => void;
@@ -5014,11 +5140,17 @@ function InvoiceDetail({
           <Download size={18} />
           <span>Download</span>
         </button>
+        {canFinance && (
+          <button className="secondary" onClick={downloadInternalInvoice}>
+            <Download size={18} />
+            <span>Download Word Invoice</span>
+          </button>
+        )}
         {canClientApprove && (
           <button
             className="secondary"
             disabled={loading || selectedInvoice.status !== 'due_for_client_approval'}
-            onClick={() => void invoiceAction('/client-account-approval', { approver_name: currentUserName ?? 'Client Account Executive' }, 'Client account executive approved invoice')}
+            onClick={() => void invoiceAction('/client-account-approval', { approver_name: currentUserName ?? 'Client Account Executive', decision: 'approved' }, 'Client account executive approved invoice')}
           >
             <BadgeCheck size={18} />
             <span>CAE Approve</span>
@@ -5041,6 +5173,22 @@ function InvoiceDetail({
             >
               <Send size={18} />
               <span>Send</span>
+            </button>
+            <button
+              className="secondary"
+              disabled={loading || ['sent_to_client', 'partially_paid', 'paid', 'cancelled', 'partially_paid_remainder_cancelled'].includes(selectedInvoice.status)}
+              onClick={onReplaceInvoice}
+            >
+              <Upload size={18} />
+              <span>Replace / Update</span>
+            </button>
+            <button
+              className="secondary"
+              disabled={loading || selectedInvoice.status !== 'clarification_requested'}
+              onClick={() => void invoiceAction('/resubmit-client-approval', { approver_name: currentUserName ?? 'Finance Manager', decision: 'resubmitted' }, 'Invoice sent back to CAE for approval')}
+            >
+              <Send size={18} />
+              <span>Send Back To CAE Approval</span>
             </button>
             <button
               className="secondary"

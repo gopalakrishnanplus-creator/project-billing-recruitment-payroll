@@ -276,6 +276,7 @@ class CurrentUserRead(BaseModel):
     email: str | None = None
     roles: list[str] = Field(default_factory=list)
     active_role: str | None = None
+    auth_token: str | None = None
 
 
 class RecruitmentNeedRead(BaseModel):

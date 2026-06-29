@@ -21,6 +21,7 @@ import Users from 'lucide-react/dist/esm/icons/users.mjs';
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8001';
+const AUTH_TOKEN_STORAGE_KEY = 'pbrp_auth_token';
 
 const ROLE_LABELS: Record<string, string> = {
   system_admin: 'System Admin',
@@ -502,6 +503,7 @@ type CurrentUser = {
   email: string | null;
   roles: string[];
   active_role: string | null;
+  auth_token?: string | null;
 };
 
 type AppUser = {
@@ -521,15 +523,44 @@ const ANONYMOUS_USER: CurrentUser = {
   email: null,
   roles: [],
   active_role: null,
+  auth_token: null,
 };
+
+function storedAuthToken(): string | null {
+  return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+}
+
+function storeAuthToken(token: string | null | undefined) {
+  if (token) {
+    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+  }
+}
+
+function clearAuthToken() {
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+}
+
+function consumeAuthTokenFromUrl(): string | null {
+  const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
+  const hashParams = new URLSearchParams(hash);
+  const token = hashParams.get('auth_token');
+  if (!token) return null;
+  storeAuthToken(token);
+  hashParams.delete('auth_token');
+  const cleanedHash = hashParams.toString();
+  window.history.replaceState({}, '', `${window.location.pathname}${window.location.search}${cleanedHash ? `#${cleanedHash}` : ''}`);
+  return token;
+}
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const isFormData = options.body instanceof FormData;
+  const authToken = storedAuthToken();
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: 'include',
     headers: {
       ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(options.headers ?? {}),
     },
   });
@@ -932,6 +963,11 @@ function App() {
 
   async function refreshMe() {
     const current = await api<CurrentUser>('/auth/me');
+    if (current.authenticated) {
+      storeAuthToken(current.auth_token);
+    } else {
+      clearAuthToken();
+    }
     setMe(current);
     return current;
   }
@@ -1098,6 +1134,7 @@ function App() {
   }
 
   useEffect(() => {
+    consumeAuthTokenFromUrl();
     const error = new URLSearchParams(window.location.search).get('auth_error');
     if (error) {
       const authErrorMessages: Record<string, string> = {
@@ -1161,14 +1198,19 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ role }),
       });
+      storeAuthToken(current.auth_token);
       setMe(current);
       return `Started ${roleLabel(role)} session`;
     });
   }
 
   async function logout() {
-    await api('/auth/logout', { method: 'POST' });
-    setMe({ authenticated: false, id: null, full_name: null, email: null, roles: [], active_role: null });
+    try {
+      await api('/auth/logout', { method: 'POST' });
+    } finally {
+      clearAuthToken();
+    }
+    setMe(ANONYMOUS_USER);
     setProjects([]);
     setInactiveProjects([]);
     setShowInactiveProjects(false);

@@ -150,6 +150,7 @@ INDIA_HIRE_ENTITY = "mbox_india"
 MBOX_BILLING_NAME = "Mbox Contract Solutions Pvt. Ltd."
 MBOX_BILLING_ADDRESS = "M-68, Sector 7, Vashi, Navi Mumbai"
 APPROVAL_TOKEN_MAX_AGE_SECONDS = int(getenv("APPROVAL_TOKEN_MAX_AGE_SECONDS", "7200"))
+AUTH_TOKEN_MAX_AGE_SECONDS = int(getenv("AUTH_TOKEN_MAX_AGE_SECONDS", str(60 * 60 * 24 * 30)))
 PROJECT_FILE_DOCUMENT_TYPES = {"msa", "sow", "sow_amendment"}
 CLIENT_INVOICE_DELETE_BLOCKED_STATUSES = {
     InvoiceStatus.sent_to_client.value,
@@ -192,6 +193,7 @@ app.add_middleware(
 
 approval_token_serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="pbrp-approval-token")
 oauth_state_serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="pbrp-google-oauth-state")
+app_auth_token_serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="pbrp-app-auth-token")
 
 
 @dataclass
@@ -460,6 +462,36 @@ def approval_token_for_user(kind: str, invoice_id: int, user: AppUser) -> str:
     )
 
 
+def auth_token_for_user(user: AppUser, active_role: str | None = None) -> str:
+    return app_auth_token_serializer.dumps(
+        {
+            "user_id": user.id,
+            "email": normalize_email(user.email),
+            "active_role": active_role,
+        }
+    )
+
+
+def auth_token_from_request(request: Request) -> str | None:
+    authorization = request.headers.get("authorization") or ""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return None
+
+
+def frontend_redirect_url(query_params: dict[str, object] | None = None, fragment_params: dict[str, object] | None = None) -> str:
+    query_values = {key: value for key, value in (query_params or {}).items() if value is not None}
+    fragment_values = {key: value for key, value in (fragment_params or {}).items() if value is not None}
+    query = urlencode(query_values)
+    fragment = urlencode(fragment_values)
+    return f"{FRONTEND_URL}{'?' + query if query else ''}{'#' + fragment if fragment else ''}"
+
+
+def frontend_redirect_with_auth_token(user: AppUser, active_role: str | None = None, query_params: dict[str, object] | None = None) -> RedirectResponse:
+    return RedirectResponse(frontend_redirect_url(query_params, {"auth_token": auth_token_for_user(user, active_role)}))
+
+
 def google_redirect_uri() -> str:
     return getenv("GOOGLE_REDIRECT_URI", f"{API_BASE_URL}/auth/callback")
 
@@ -602,19 +634,38 @@ def auth_context_from_session(request: Request, db: Session) -> AuthContext:
             raise HTTPException(status_code=403, detail="Role not assigned")
         return AuthContext(user=user, roles=roles, active_role=test_role)
 
-    user_id = request.session.get("user_id")
+    session_user_id = request.session.get("user_id")
+    user_id = session_user_id
+    token_active_role = None
     if not user_id:
-        raise HTTPException(status_code=401, detail="Login required")
+        token = auth_token_from_request(request)
+        if not token:
+            raise HTTPException(status_code=401, detail="Login required")
+        try:
+            token_payload = app_auth_token_serializer.loads(token, max_age=AUTH_TOKEN_MAX_AGE_SECONDS)
+        except (SignatureExpired, BadSignature) as exc:
+            raise HTTPException(status_code=401, detail="Login required") from exc
+        try:
+            user_id = int(token_payload.get("user_id"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=401, detail="Login required") from exc
+        token_active_role = token_payload.get("active_role")
     user = db.scalar(select(AppUser).where(AppUser.id == user_id).options(selectinload(AppUser.role_assignments)))
     if user is None or not user.is_active:
-        request.session.clear()
+        if session_user_id:
+            request.session.clear()
         raise HTTPException(status_code=403, detail="User is not active")
+    if not session_user_id:
+        token_email = normalize_email(str(token_payload.get("email") or ""))
+        if token_email and token_email != normalize_email(user.email):
+            raise HTTPException(status_code=401, detail="Login required")
     roles = user_roles(user)
     if not roles:
         raise HTTPException(status_code=403, detail="No roles assigned")
-    active_role = request.session.get("active_role")
+    active_role = request.session.get("active_role") if session_user_id else token_active_role
     if active_role and active_role not in roles:
-        request.session.pop("active_role", None)
+        if session_user_id:
+            request.session.pop("active_role", None)
         active_role = None
     return AuthContext(user=user, roles=roles, active_role=active_role)
 
@@ -3262,7 +3313,11 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
             return RedirectResponse(f"{FRONTEND_URL}/?approval_invoice_id={pending_approval_invoice_id}&approval_error=not_authorized")
         request.session["active_role"] = UserRole.client_account_executive.value
         token = approval_token_for_user("client_invoice", pending_approval_invoice_id, user)
-        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'approval_invoice_id': pending_approval_invoice_id, 'approval_token': token})}")
+        return frontend_redirect_with_auth_token(
+            user,
+            UserRole.client_account_executive.value,
+            {"approval_invoice_id": pending_approval_invoice_id, "approval_token": token},
+        )
     pending_candidate_invoice_id = state_payload.get("candidate_invoice_id")
     if pending_candidate_invoice_id is not None:
         try:
@@ -3282,7 +3337,11 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
             return RedirectResponse(f"{FRONTEND_URL}/?candidate_invoice_id={pending_candidate_invoice_id}&candidate_invoice_error=not_authorized")
         request.session["active_role"] = UserRole.client_account_executive.value
         token = approval_token_for_user("candidate_invoice", pending_candidate_invoice_id, user)
-        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'candidate_invoice_id': pending_candidate_invoice_id, 'approval_token': token})}")
+        return frontend_redirect_with_auth_token(
+            user,
+            UserRole.client_account_executive.value,
+            {"candidate_invoice_id": pending_candidate_invoice_id, "approval_token": token},
+        )
     pending_leave_request_id = state_payload.get("leave_request_id")
     if pending_leave_request_id is not None:
         try:
@@ -3300,15 +3359,20 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
             return RedirectResponse(f"{FRONTEND_URL}/?leave_request_id={pending_leave_request_id}&leave_request_error=not_authorized")
         request.session["active_role"] = UserRole.client_account_executive.value
         token = approval_token_for_user("leave_request", pending_leave_request_id, user)
-        return RedirectResponse(f"{FRONTEND_URL}/?{urlencode({'leave_request_id': pending_leave_request_id, 'approval_token': token})}")
+        return frontend_redirect_with_auth_token(
+            user,
+            UserRole.client_account_executive.value,
+            {"leave_request_id": pending_leave_request_id, "approval_token": token},
+        )
     if leave_application_requested:
         if UserRole.job_candidate.value not in roles:
             return RedirectResponse(f"{FRONTEND_URL}/?auth_error=not_provisioned")
         request.session["active_role"] = UserRole.job_candidate.value
-        return RedirectResponse(f"{FRONTEND_URL}/?leave_application=1")
+        return frontend_redirect_with_auth_token(user, UserRole.job_candidate.value, {"leave_application": 1})
     if len(roles) == 1:
         request.session["active_role"] = roles[0]
-    return RedirectResponse(FRONTEND_URL)
+        return frontend_redirect_with_auth_token(user, roles[0])
+    return frontend_redirect_with_auth_token(user)
 
 
 @app.get("/auth/me", response_model=CurrentUserRead)
@@ -3326,6 +3390,7 @@ def auth_me(request: Request, db: Session = Depends(get_db)) -> CurrentUserRead:
         email=context.user.email,
         roles=context.roles,
         active_role=context.active_role,
+        auth_token=auth_token_for_user(context.user, context.active_role),
     )
 
 
@@ -3342,6 +3407,7 @@ def select_role(payload: RoleSelect, request: Request, db: Session = Depends(get
         email=context.user.email,
         roles=context.roles,
         active_role=payload.role,
+        auth_token=auth_token_for_user(context.user, payload.role),
     )
 
 

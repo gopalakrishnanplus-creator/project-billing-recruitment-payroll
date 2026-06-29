@@ -7,7 +7,7 @@ os.environ["ALLOW_TEST_AUTH"] = "true"
 from app.database import Base, engine
 from app import main as app_main
 from app.main import app
-from app.models import Candidate, CandidateContract, CandidateInvoiceApproval, CandidateInvoiceDocument, CandidateInvoiceSchedule, CandidateLeaveRequest, CandidateLeaveTaken, CandidateVendorInvoice, EmailNotification
+from app.models import AppUser, Candidate, CandidateContract, CandidateInvoiceApproval, CandidateInvoiceDocument, CandidateInvoiceSchedule, CandidateLeaveRequest, CandidateLeaveTaken, CandidateVendorInvoice, EmailNotification
 from app.database import SessionLocal
 from fastapi.testclient import TestClient
 
@@ -77,6 +77,40 @@ def test_system_admin_can_remove_all_roles_from_provisioned_user():
         login_response = client.get("/auth/me", headers={"x-test-email": "temp@example.com", "x-test-role": "hr_manager"})
         assert login_response.status_code == 403
         assert "No roles assigned" in login_response.text
+
+
+def test_signed_auth_token_can_authenticate_without_session_cookie():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    with TestClient(app) as client:
+        user_payload = provision_user(client, full_name="Finance Manager", email="finance-token@example.com", roles=["finance_manager"])
+        with SessionLocal() as db:
+            user = db.get(AppUser, user_payload["id"])
+            assert user is not None
+            token = app_main.auth_token_for_user(user)
+
+        me_response = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me_response.status_code == 200, me_response.text
+        me = me_response.json()
+        assert me["authenticated"] is True
+        assert me["email"] == "finance-token@example.com"
+        assert me["active_role"] is None
+        assert me["auth_token"]
+
+        role_response = client.post(
+            "/auth/select-role",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"role": "finance_manager"},
+        )
+        assert role_response.status_code == 200, role_response.text
+        role_payload = role_response.json()
+        assert role_payload["active_role"] == "finance_manager"
+        assert role_payload["auth_token"]
+
+        active_response = client.get("/auth/me", headers={"Authorization": f"Bearer {role_payload['auth_token']}"})
+        assert active_response.status_code == 200, active_response.text
+        assert active_response.json()["active_role"] == "finance_manager"
 
 
 def test_project_to_client_collection_flow():
